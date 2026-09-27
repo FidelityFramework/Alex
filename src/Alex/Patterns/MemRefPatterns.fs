@@ -1,0 +1,195 @@
+/// MemRefPatterns - Composable patterns for memref operations
+///
+/// PUBLIC: Witnesses import these patterns to emit memref operations.
+/// Patterns compose Element primitives into domain-specific operations.
+///
+/// ARCHITECTURE: Patterns are PUBLIC, Elements are module internal.
+/// This enforces composition - witnesses cannot directly emit Element operations.
+module Alex.Patterns.MemRefPatterns
+
+open Fidelity.PSG
+open XParsec
+open XParsec.Parsers
+open XParsec.Combinators
+open Alex.XParsec.PSGCombinators
+open Alex.Traversal.TransferTypes
+open Alex.Elements.MemRefElements
+open Alex.Elements.IndexElements  // pIndexConst
+open Alex.Dialects.Core.Types
+open Alex.CodeGeneration.TypeMapping  // mlirTypeSize
+
+// ═══════════════════════════════════════════════════════════
+// MUTABLE VARIABLE PATTERNS
+// ═══════════════════════════════════════════════════════════
+
+/// Build complete mutable binding: alloca + initialize with store
+/// For F# `let mutable x = initialValue`
+///
+/// Emits:
+///   %xRef = memref.alloca() : memref<1x{elemType}>
+///   memref.store %initialValue, %xRef[%c0] : {elemType}, memref<1x{elemType}>
+///
+/// Returns: memref SSA name (for VarRef to recall)
+let pBuildMutableBinding (nodeId: int) (elemType: MLIRType) (initSSA: SSA) : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        // Step 1: Get pre-allocated SSAs from Coeffects
+        let! ssas = getNodeSSAs (NodeId nodeId)
+        do! ensure (ssas.Length >= 2) $"pBuildMutableBinding: Expected at least 2 SSAs, got {ssas.Length}"
+        let memrefSSA = ssas.[0]  // For memref allocation result
+        let zeroSSA = ssas.[1]    // For zero constant index
+
+        // Step 2: Allocate memref (rank-1 with single element for scalar)
+        let! allocOp = pAlloca memrefSSA 1 elemType None
+
+        // Step 3: Create constant index for scalar memref (always %c0)
+        let! zeroOp = pIndexConst zeroSSA 0L
+
+        // Step 4: Store initial value to memref
+        let memrefType = TMemRefStatic (1, elemType)
+        let! storeOp = pStore initSSA memrefSSA [zeroSSA] elemType memrefType
+
+        let ops = [allocOp; zeroOp; storeOp]
+        // Semantic type: TMemRef (abstract mutable cell) — distinguishes from TMemRefStatic (buffers)
+        // Physical type (TMemRefStatic) preserved in SSATypes by pAlloca for pLoad derivation
+        let result = TRValue { SSA = memrefSSA; Type = TMemRef elemType }
+        return (ops, result)
+    }
+
+/// Load value from mutable variable
+/// For F# VarRef to mutable binding
+///
+/// Emits:
+///   %c0 = arith.constant 0 : index
+///   %value = memref.load %memrefSSA[%c0] : memref<1x{elemType}>
+///
+/// Returns: loaded value SSA (type = elemType, not TMemRef)
+let pLoadMutableVariable (nodeId: int) (memrefSSA: SSA) (elemType: MLIRType) : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        // Step 1: Get pre-allocated SSAs from Coeffects
+        let! ssas = getNodeSSAs (NodeId nodeId)
+        do! ensure (ssas.Length >= 2) $"pLoadMutableVariable: Expected at least 2 SSAs, got {ssas.Length}"
+        let zeroSSA = ssas.[0]    // For zero constant index
+        let valueSSA = ssas.[1]   // For loaded value result
+
+        // Step 2: Create constant index for scalar memref (always %c0)
+        let! zeroOp = pIndexConst zeroSSA 0L
+
+        // Step 3: Load value from memref
+        let! loadOp = pLoad valueSSA memrefSSA [zeroSSA]
+
+        let ops = [zeroOp; loadOp]
+        let result = TRValue { SSA = valueSSA; Type = elemType }
+        return (ops, result)
+    }
+
+/// Store value to mutable variable
+/// For F# `x <- newValue` (SemanticKind.Set)
+///
+/// Emits:
+///   %c0 = arith.constant 0 : index
+///   memref.store %newValue, %memrefSSA[%c0] : {elemType}, memref<1x{elemType}>
+///
+/// Returns: TRVoid (stores don't produce values)
+let pStoreMutableVariable (nodeId: int) (memrefSSA: SSA) (valueSSA: SSA) (elemType: MLIRType) : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        // Step 1: Get pre-allocated SSA from Coeffects for zero constant
+        let! ssas = getNodeSSAs (NodeId nodeId)
+        do! ensure (ssas.Length >= 1) $"pStoreMutableVariable: Expected at least 1 SSA, got {ssas.Length}"
+        let zeroSSA = ssas.[0]  // For zero constant index
+
+        // Step 2: Create constant index for scalar memref (always %c0)
+        let! zeroOp = pIndexConst zeroSSA 0L
+
+        // Step 3: Store value to memref
+        let memrefType = TMemRefStatic (1, elemType)
+        let! storeOp = pStore valueSSA memrefSSA [zeroSSA] elemType memrefType
+
+        let ops = [zeroOp; storeOp]
+        return (ops, TRVoid)
+    }
+
+// ═══════════════════════════════════════════════════════════
+// MODULE-LEVEL VALUE SLOTS (program-lifetime static storage)
+// ═══════════════════════════════════════════════════════════
+
+/// Physical storage type of a value with semantic type `ty`: records and tuples are
+/// semantic TStruct values whose storage is a byte memref of the struct's size.
+let slotElementType (arch: Architecture) (ty: MLIRType) : MLIRType =
+    physicalStorageType arch ty
+
+/// Observe the exact startup/storage relation. The source binding's
+/// immutability never grants permission to write an immutable image region.
+let pProgramValueAuthority (bindingId: NodeId) : PSGParser<unit> =
+    parser {
+        let! state = getUserState
+        let projection = state.Graph.Emission.Storage
+        do! ensure (projection.SlotAuthorities.Contains bindingId)
+                $"Program value {NodeId.value bindingId} lacks its settled startup and writable-space authority"
+        return ()
+    }
+
+/// Initialize a module-level value slot: declare the one-element memref.global (queued for
+/// module-scope placement), take its address, store the initial value.
+///
+/// Emits:
+///   %slot = memref.get_global @name : memref<1x{elem}>
+///   %c0 = arith.constant 0 : index
+///   memref.store %value, %slot[%c0]
+///
+/// SSA layout (2 SSAs): [0] = slotSSA, [1] = zeroSSA
+/// Returns: the slot as a mutable cell (TMemRef elem) — references reload through pGlobalSlotLoad.
+let pGlobalSlotInit (nodeId: NodeId) (globalName: string) (valueSSA: SSA) (valueTy: MLIRType) : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        do! pProgramValueAuthority nodeId
+        let! ssas = getNodeSSAs nodeId
+        do! ensure (ssas.Length >= 2) $"pGlobalSlotInit: Expected at least 2 SSAs, got {ssas.Length}"
+        let! state = getUserState
+        let elemTy = slotElementType state.Platform.TargetArch valueTy
+        let slotTy = TMemRefStatic (1, elemTy)
+        let! authority = Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot nodeId) slotTy
+        MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
+        let! getOp = pMemRefGetGlobal ssas.[0] globalName slotTy
+        let! zeroOp = pIndexConst ssas.[1] 0L
+        let! storeOp = pStore valueSSA ssas.[0] [ssas.[1]] elemTy slotTy
+        return ([getOp; zeroOp; storeOp], TRValue { SSA = ssas.[0]; Type = TMemRef elemTy })
+    }
+
+/// Reload a module-level value from its slot. Valid in any function: the slot is a global.
+///
+/// SSA layout (3 SSAs): [0] = slotSSA, [1] = zeroSSA, [2] = valueSSA
+let pGlobalSlotLoad (bindingId: NodeId) (nodeId: NodeId) (globalName: string) (valueTy: MLIRType) : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        do! pProgramValueAuthority bindingId
+        let! ssas = getNodeSSAs nodeId
+        do! ensure (ssas.Length >= 3) $"pGlobalSlotLoad: Expected at least 3 SSAs, got {ssas.Length}"
+        let! state = getUserState
+        let elemTy = slotElementType state.Platform.TargetArch valueTy
+        let slotTy = TMemRefStatic (1, elemTy)
+        let! authority = Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot bindingId) slotTy
+        MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
+        let! getOp = pMemRefGetGlobal ssas.[0] globalName slotTy
+        let! zeroOp = pIndexConst ssas.[1] 0L
+        let! loadOp = pLoadFrom ssas.[2] ssas.[0] [ssas.[1]] elemTy
+        return ([getOp; zeroOp; loadOp], TRValue { SSA = ssas.[2]; Type = valueTy })
+    }
+
+/// Store into a module-level value slot (`Module.value <- v` on a mutable module-level binding).
+///
+/// SSA layout (2 SSAs): [0] = slotSSA, [1] = zeroSSA
+let pGlobalSlotStore (bindingId: NodeId) (nodeId: NodeId) (globalName: string) (valueSSA: SSA) (valueTy: MLIRType) : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        do! pProgramValueAuthority bindingId
+        let! ssas = getNodeSSAs nodeId
+        do! ensure (ssas.Length >= 2) $"pGlobalSlotStore: Expected at least 2 SSAs, got {ssas.Length}"
+        let! state = getUserState
+        let elemTy = slotElementType state.Platform.TargetArch valueTy
+        let slotTy = TMemRefStatic (1, elemTy)
+        let! authority = Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot bindingId) slotTy
+        MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
+        let! getOp = pMemRefGetGlobal ssas.[0] globalName slotTy
+        let! zeroOp = pIndexConst ssas.[1] 0L
+        let! storeOp = pStore valueSSA ssas.[0] [ssas.[1]] elemTy slotTy
+        return ([getOp; zeroOp; storeOp], TRVoid)
+    }
+
+// ═══════════════════════════════════════════════════════════

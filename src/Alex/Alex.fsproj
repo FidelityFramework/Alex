@@ -1,0 +1,118 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../../build/Boundary.targets" />
+
+  <!-- Alex: the passive witness. It reads one published PSG revision (Fidelity.PSG)
+       and emits MLIR with its source correspondence. It references no compiler. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Alex</AssemblyName>
+    <RootNamespace>Alex</RootNamespace>
+    <Version>0.1.0</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <DisableImplicitSystemValueTupleReference>true</DisableImplicitSystemValueTupleReference>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Target.fs" />
+    <Compile Include="Dialects/Core/Types.fs" />
+    <Compile Include="Dialects/Core/Serialize.fs" />
+    <Compile Include="Traversal/Values.fs" />
+    <Compile Include="Traversal/SMTTransfer.fs" />
+    <Compile Include="Correspondence.fs" />
+    <Compile Include="CodeGeneration/TypeMapping.fs" />
+    <Compile Include="CodeGeneration/CallableSymbols.fs" />
+    <Compile Include="Traversal/PSGZipper.fs" />
+    <Compile Include="Traversal/ScopeContext.fs" />
+    <Compile Include="Traversal/TransferTypes.fs" />
+    <Compile Include="Traversal/CoverageValidation.fs" />
+    <Compile Include="Traversal/NanopassArchitecture.fs" />
+    <Compile Include="XParsec/PSGCombinators.fs" />
+    <Compile Include="Traversal/SequenceOperands.fs" />
+    <Compile Include="Traversal/LazyOperands.fs" />
+    <Compile Include="Traversal/CallableOperands.fs" />
+    <Compile Include="XParsec/Extensions.fs" />
+    <Compile Include="Elements/MLIRAtomics.fs" />
+    <Compile Include="Elements/MemRefElements.fs" />
+    <Compile Include="Elements/ArithElements.fs" />
+    <Compile Include="Elements/SCFElements.fs" />
+    <Compile Include="Elements/CFElements.fs" />
+    <Compile Include="Elements/FuncElements.fs" />
+    <Compile Include="Elements/SpatialElements.fs" />
+    <Compile Include="Elements/IndexElements.fs" />
+    <Compile Include="Elements/CombElements.fs" />
+    <Compile Include="Elements/HWElements.fs" />
+    <Compile Include="Elements/SeqElements.fs" />
+    <Compile Include="Patterns/MemoryPatterns.fs" />
+    <Compile Include="Patterns/DUPatterns.fs" />
+    <Compile Include="Patterns/RecordPatterns.fs" />
+    <Compile Include="Patterns/MemRefPatterns.fs" />
+    <Compile Include="Patterns/CollectionPatterns.fs" />
+    <Compile Include="Patterns/ClosurePatterns.fs" />
+    <Compile Include="Patterns/ControlFlowPatterns.fs" />
+    <Compile Include="Patterns/LiteralPatterns.fs" />
+    <Compile Include="Patterns/RequirementPatterns.fs" />
+    <Compile Include="Patterns/ContinuationPatterns.fs" />
+    <Compile Include="Patterns/EnvironmentPatterns.fs" />
+    <Compile Include="Patterns/LazyPatterns.fs" />
+    <Compile Include="Patterns/ApplicationPatterns.fs" />
+    <Compile Include="Patterns/FunctionPointerPatterns.fs" />
+    <Compile Include="Patterns/CallablePatterns.fs" />
+    <Compile Include="Patterns/SequencePatterns.fs" />
+    <Compile Include="Patterns/EagerPatterns.fs" />
+    <Compile Include="Patterns/MutableCallablePatterns.fs" />
+    <Compile Include="Patterns/PlatformPatterns.fs" />
+    <Compile Include="Patterns/SpatialPatterns.fs" />
+    <Compile Include="Patterns/MmioPatterns.fs" />
+    <Compile Include="Patterns/BorrowedViewPatterns.fs" />
+    <Compile Include="Patterns/MappedViewPatterns.fs" />
+    <Compile Include="Witnesses/LiteralWitness.fs" />
+    <Compile Include="Witnesses/RequirementWitness.fs" />
+    <Compile Include="Witnesses/EagerWitness.fs" />
+    <Compile Include="Witnesses/TypeAnnotationWitness.fs" />
+    <Compile Include="Witnesses/IntrinsicWitness.fs" />
+    <Compile Include="Witnesses/FunctionPointerWitness.fs" />
+    <Compile Include="Witnesses/LazyWitness.fs" />
+    <Compile Include="Witnesses/SeqWitness.fs" />
+    <Compile Include="Witnesses/EnvironmentWitness.fs" />
+    <Compile Include="Witnesses/ListWitness.fs" />
+    <Compile Include="Witnesses/MapWitness.fs" />
+    <Compile Include="Witnesses/SetWitness.fs" />
+    <Compile Include="Witnesses/OptionWitness.fs" />
+    <Compile Include="Witnesses/ControlFlowWitness.fs" />
+    <Compile Include="Witnesses/MatchWitness.fs" />
+    <Compile Include="Witnesses/RecordWitness.fs" />
+    <Compile Include="Witnesses/DUWitness.fs" />
+    <Compile Include="Witnesses/MemoryWitness.fs" />
+    <Compile Include="Witnesses/PlatformWitness.fs" />
+    <Compile Include="Witnesses/MmioWitness.fs" />
+    <Compile Include="Witnesses/BorrowedViewWitness.fs" />
+    <Compile Include="Witnesses/MappedViewWitness.fs" />
+    <Compile Include="Witnesses/StructuralWitness.fs" />
+    <Compile Include="Witnesses/HardwareModuleWitness.fs" />
+    <Compile Include="Witnesses/KernelModuleWitness.fs" />
+    <Compile Include="Witnesses/BindingWitness.fs" />
+    <Compile Include="Witnesses/VarRefWitness.fs" />
+    <Compile Include="Witnesses/MutableAssignmentWitness.fs" />
+    <Compile Include="Witnesses/MemoryIntrinsicWitness.fs" />
+    <Compile Include="Witnesses/StringIntrinsicWitness.fs" />
+    <Compile Include="Witnesses/ArithIntrinsicWitness.fs" />
+    <Compile Include="Witnesses/ApplicationWitness.fs" />
+    <Compile Include="Witnesses/LambdaWitness.fs" />
+    <Compile Include="Traversal/WitnessRegistry.fs" />
+    <Compile Include="Traversal/StaticStorageValidation.fs" />
+    <Compile Include="Traversal/MLIRTransfer.fs" />
+    <Compile Include="Traversal/XDCTransfer.fs" />
+    <Compile Include="Generation.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" Version="10.1.401" />
+    <PackageReference Include="XParsec" Version="0.3.0" />
+    <ProjectReference Include="$(PsgContractProject)" />
+  </ItemGroup>
+
+</Project>

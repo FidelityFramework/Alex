@@ -1,0 +1,516 @@
+/// ControlFlowPatterns - Structured control flow constructions
+///
+/// PUBLIC: Witnesses use these to emit control flow operations (If, While, For, Switch).
+/// All control flow constructions compose SCFElements: structured control flow
+/// only, the witnessed vocabulary (Thin_Middle_End_Design 22). Unstructured
+/// `cf` is what `scf` lowers to below the boundary, never emitted here.
+module Alex.Patterns.ControlFlowPatterns
+
+open XParsec
+open XParsec.Parsers
+open XParsec.Combinators
+open Alex.XParsec.PSGCombinators
+open Alex.Dialects.Core.Types
+open Alex.Traversal.TransferTypes
+open Alex.Elements.SCFElements  // pSCFIf, pSCFWhile, pSCFFor
+open Alex.Elements.CombElements // pCombICmp, pCombMux (FPGA combinational logic)
+open Alex.Elements.ArithElements // pTruncI, pExtSI (FPGA width harmonization)
+open Alex.Elements.IndexElements
+open Alex.Elements.MLIRAtomics  // pConstI (tag literal constants)
+open Alex.CodeGeneration.TypeMapping
+open Fidelity.PSG
+open Alex.Target                        // TargetPlatform (codata-dependent elision)
+
+// ═══════════════════════════════════════════════════════════
+// STRUCTURED CONTROL FLOW (SCF)
+// ═══════════════════════════════════════════════════════════
+
+/// Compose already witnessed, unterminated arms into a stock index switch.
+/// The caller supplies the settled labels and result carriers; this pattern
+/// neither chooses control flow nor inspects the source graph for segments.
+let pBuildIndexSwitch (selector: Val) (cases: (int64 * (MLIROp list * Val list)) list)
+                      (defaultBody: MLIROp list * Val list) (results: Val list)
+                      : PSGParser<MLIROp list> =
+    parser {
+        do! ensure (selector.Type = TIndex) "scf.index_switch requires an index selector"
+        let labels = cases |> List.map fst
+        do! ensure ((Set.ofList labels).Count = labels.Length) "scf.index_switch requires distinct case labels"
+        let expected = results |> List.map (fun value -> value.Type)
+        let arm label (operations, values: Val list) = parser {
+            do! ensure ((values |> List.map (fun value -> value.Type)) = expected) $"scf.index_switch {label} yield types do not match its results"
+            do! ensure (operations |> List.exists (function MLIROp.SCFOp (SCFOp.Yield _) -> true | _ -> false) |> not) $"scf.index_switch {label} already has a yield terminator"
+            let! terminator = pSCFYield (values |> List.map (fun value -> value.SSA, value.Type))
+            return operations @ [terminator]
+        }
+        let! branches =
+            cases |> List.map (fun (label, body) -> parser {
+                let! operations = arm (sprintf "case %d" label) body
+                return label, operations
+            }) |> Alex.XParsec.Extensions.sequence
+        let! fallback = arm "default" defaultBody
+        let! operation = pSCFIndexSwitch selector.SSA branches fallback (results |> List.map (fun value -> value.SSA, value.Type))
+        return [operation]
+    }
+
+/// Shared scalar/lazy/sequence dispatch transport. Numeric publication owns
+/// the cast sign, selected index width and complete range-coverage proof.
+let pPublishedDispatchSelector site operand result : PSGParser<MLIROp list * Val> = parser {
+    let! state = getUserState
+    let numeric = state.Graph.Emission.Numeric
+    let! transport =
+        match numeric.IndexTransports.TryFind site with
+        | Some transport when transport.Operand = operand -> preturn transport
+        | _ -> fail (Message "Dispatch selector lacks its exact source-published index transport.")
+    let! value, valueType = pRecallNode operand
+    do! ensure (valueType = scalarCarrierType transport.Carrier && state.Platform.TargetArch.Pointer = Ok transport.PointerBits)
+            "Dispatch selector or target differs from its source-published index transport."
+    let! operation =
+        if transport.Unsigned then pIndexCastU result value valueType TIndex
+        else pIndexCastS result value valueType TIndex
+    return [operation], { SSA = result; Type = TIndex }
+}
+
+/// Observe a Baker dispatch's explicit operands and settled branch adaptations.
+let pBuildContinuationDispatch (nodeId: NodeId) (selectorId: NodeId)
+                               (cases: (int * NodeId * MLIROp list) list)
+                               (otherwise: NodeId * MLIROp list)
+                               (result: (SSA * MLIRType) option)
+                               : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        let! indexOps, indexValue =
+            pPublishedDispatchSelector nodeId selectorId (Alex.Traversal.Values.value nodeId 1)
+        let arm bodyId operations = parser {
+            match result with
+            | None -> return operations, []
+            | Some _ ->
+                let! value, valueType = pRecallNode bodyId
+                let! adaptations, adapted, adaptedType = pAdapt nodeId bodyId value valueType
+                return operations @ adaptations, [{ SSA = adapted; Type = adaptedType }]
+        }
+        let! branches =
+            cases |> List.map (fun (label, bodyId, operations) -> parser {
+                let! branch = arm bodyId operations
+                return int64 label, branch
+            }) |> Alex.XParsec.Extensions.sequence
+        let! fallback = arm (fst otherwise) (snd otherwise)
+        let values = result |> Option.map (fun (ssa, ty) -> { SSA = ssa; Type = ty }) |> Option.toList
+        let! operations = pBuildIndexSwitch indexValue branches fallback values
+        let transfer = values |> List.tryHead |> Option.map TRValue |> Option.defaultValue TRVoid
+        return indexOps @ operations, transfer
+    }
+
+/// If/then/else via SCF.If (void — no result value)
+let pBuildIfThenElse (cond: SSA) (thenOps: MLIROp list) (elseOps: MLIROp list option) : PSGParser<MLIROp list> =
+    parser {
+        let! ifOp = pSCFIf cond thenOps elseOps None
+        return [ifOp]
+    }
+
+/// Expression-valued if/then/else via SCF.If — yields a result from branches
+let pBuildIfThenElseWithResult (cond: SSA) (thenOps: MLIROp list) (elseOps: MLIROp list option)
+                               (resultSSA: SSA) (resultType: MLIRType)
+                               : PSGParser<MLIROp list> =
+    parser {
+        let! ifOp = pSCFIf cond thenOps elseOps (Some (resultSSA, resultType))
+        return [ifOp]
+    }
+
+/// FPGA combinational mux: if/then/else elides to comb.mux
+/// PULL model: receives node IDs, recalls branch result SSAs from accumulator
+let pBuildCombMux (cond: SSA) (thenResultNodeId: NodeId) (elseResultNodeId: NodeId)
+                  (resultSSA: SSA) (resultType: MLIRType)
+                  : PSGParser<MLIROp list> =
+    parser {
+        let! (thenSSA, _) = pRecallNode thenResultNodeId
+        let! (elseSSA, _) = pRecallNode elseResultNodeId
+        let! muxOp = pCombMux resultSSA cond thenSSA elseSSA resultType
+        return [muxOp]
+    }
+
+/// Unified conditional elision — the TargetPlatform coeffect determines the MLIR residual.
+/// CPU: scf.if with nested regions containing branch ops + scf.yield terminators
+/// FPGA: branch ops flattened inline + comb.mux selecting between result SSAs
+///
+/// The witness ALWAYS scope-isolates branches (collecting ops). This pattern decides
+/// what to do with those collected ops based on the observed coeffect:
+///   - CPU: wrap in scf.if regions (nested structure)
+///   - FPGA: return ops inline (flat), append comb.mux
+///
+/// `result`: Some (resultSSA, resultType) for expression-valued, None for void
+let pBuildConditional (condSSA: SSA)
+                      (thenOps: MLIROp list) (elseOps: MLIROp list option)
+                      (thenValueNodeId: NodeId) (elseValueNodeIdOpt: NodeId option)
+                      (result: (SSA * MLIRType) option)
+                      (nodeId: NodeId)
+                      : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        let! targetPlatform = getTargetPlatform
+        match targetPlatform, result with
+        // ─── FPGA expression-valued: inline ops + comb.mux ───
+        | FPGA, Some (resultSSA, resultType) ->
+            match elseValueNodeIdOpt with
+            | Some elseValueNodeId ->
+                let! elseBranchOps =
+                    match elseOps with
+                    | Some ops -> preturn ops
+                    | None -> fail (Message $"FPGA conditional at node {NodeId.value nodeId} has an else value (node {NodeId.value elseValueNodeId}) but no witnessed else operations")
+                let! (thenSSA, thenTy) = pRecallNode thenValueNodeId
+                let! (elseSSA, elseTy) = pRecallNode elseValueNodeId
+
+                let! thenMeetOps, thenValue = pSettledAdaptTo nodeId thenValueNodeId resultType { SSA = thenSSA; Type = thenTy }
+                let! elseMeetOps, elseValue = pSettledAdaptTo nodeId elseValueNodeId resultType { SSA = elseSSA; Type = elseTy }
+                let! muxOp = pCombMux resultSSA condSSA thenValue.SSA elseValue.SSA resultType
+                return (thenOps @ thenMeetOps @ elseBranchOps @ elseMeetOps @ [muxOp], TRValue { SSA = resultSSA; Type = resultType })
+            | None ->
+                return! fail (Message "FPGA comb.mux requires both branches")
+
+        // ─── FPGA void: not supported (hardware has no side effects without state) ───
+        | FPGA, None ->
+            return! fail (Message "FPGA: void conditional requires state (seq.compreg)")
+
+        // ─── CPU expression-valued: scf.if with yield terminators; each arm's value brought
+        // to the join's width by the meet SSAAssignment derived for (if, arm), inside its region ───
+        | _, Some (resultSSA, resultType) ->
+            let! (rawThenSSA, rawThenTy) = pRecallNode thenValueNodeId
+            let! (thenMeetOps, thenSSA, thenTy) = pAdapt nodeId thenValueNodeId rawThenSSA rawThenTy
+            do! ensure (thenTy = resultType)
+                    $"PSG settlement (SSAAssignment) did not settle the meet of the then-branch (node {NodeId.value thenValueNodeId}) to the result carrier of the conditional at node {NodeId.value nodeId}: branch {thenTy}, result {resultType}"
+            let thenYield = MLIROp.SCFOp (SCFOp.Yield [(thenSSA, resultType)])
+            let thenOpsWithYield = thenOps @ thenMeetOps @ [thenYield]
+            match elseValueNodeIdOpt, elseOps with
+            | Some elseValueNodeId, Some elseBranchOps ->
+                let! (rawElseSSA, rawElseTy) = pRecallNode elseValueNodeId
+                let! (elseMeetOps, elseSSA, elseTy) = pAdapt nodeId elseValueNodeId rawElseSSA rawElseTy
+                do! ensure (elseTy = resultType)
+                        $"PSG settlement (SSAAssignment) did not settle the meet of the else-branch (node {NodeId.value elseValueNodeId}) to the result carrier of the conditional at node {NodeId.value nodeId}: branch {elseTy}, result {resultType}"
+                let elseYield = MLIROp.SCFOp (SCFOp.Yield [(elseSSA, resultType)])
+                let elseOpsWithYield = Some (elseBranchOps @ elseMeetOps @ [elseYield])
+                let! ifOp = pSCFIf condSSA thenOpsWithYield elseOpsWithYield (Some (resultSSA, resultType))
+                return ([ifOp], TRValue { SSA = resultSSA; Type = resultType })
+            | Some elseValueNodeId, None ->
+                return! fail (Message $"Expression-valued if at node {NodeId.value nodeId} has an else value (node {NodeId.value elseValueNodeId}) but no witnessed else region")
+            | None, _ ->
+                return! fail (Message "Expression-valued if requires else branch")
+
+        // ─── CPU void: scf.if with empty yield terminators ───
+        | _, None ->
+            let yieldOp = MLIROp.SCFOp (SCFOp.Yield [])
+            let thenOpsWithYield = thenOps @ [yieldOp]
+            let elseOpsWithYield = elseOps |> Option.map (fun ops -> ops @ [yieldOp])
+            let! ifOp = pSCFIf condSSA thenOpsWithYield elseOpsWithYield None
+            return ([ifOp], TRVoid)
+    }
+
+/// While regions with their terminators. The loop itself returns no SSA;
+/// a settled unit expression composes the canonical unit-result pattern.
+let pBuildWhileLoop (condSSA: SSA) (condOps: MLIROp list) (bodyOps: MLIROp list)
+                    : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        let! condition = pSCFCondition condSSA []
+        let! yieldOp = pSCFYield []
+        let! whileOp = pSCFWhile (condOps @ [condition]) (bodyOps @ [yieldOp])
+        return [whileOp], TRVoid
+    }
+
+/// For loop via SCF.For
+let pBuildForLoop (lower: SSA) (upper: SSA) (step: SSA) (bodyOps: MLIROp list) : PSGParser<MLIROp list> =
+    parser {
+        let! forOp = pSCFFor lower upper step bodyOps
+        return [forOp]
+    }
+
+// ═══════════════════════════════════════════════════════════
+// MATCH ELIMINATION (catamorphism elision)
+// ═══════════════════════════════════════════════════════════
+
+/// Read an explicitly supplied discriminant. A pattern's position is never
+/// evidence for its constructor tag or literal value.
+let private pArmDiscriminant (pattern: Fidelity.PSG.Pattern) : PSGParser<int64> =
+    match pattern with
+    | Fidelity.PSG.Pattern.Union (_, tagIndex, _, _) -> preturn (int64 tagIndex)
+    | _ -> fail (Message "A constructor match requires a source-published constructor discriminant")
+
+/// Get the DU union type from a CaseArm pattern (for tag extraction).
+let private getScrutineeUnionType (arms: Fidelity.PSG.CaseArm list) : TypeIdentity option =
+    arms |> List.tryPick (fun arm ->
+        match arm.Pattern with
+        | Fidelity.PSG.Pattern.Union (_, _, _, unionType) -> Some unionType
+        | _ -> None)
+
+/// Build match elimination — tag extract + nested scf.if chain (CPU)
+/// or all arms inline + comb.mux chain (FPGA, future).
+///
+/// Tag extraction and comparisons are emitted HERE at elision time, not in Baker.
+/// Baker preserved the structural fold; this pattern decides how to realize it.
+///
+/// Parameters:
+///   scrutineeSSA - SSA of the matched value
+///   scrutineeType - MLIR type of the matched value
+///   scrutineeNodeId - PSG node ID of the scrutinee (for DUGetTag SSAs)
+///   arms - list of (armOps, armBodyValueNodeId, pattern) per arm
+///   result - Some (resultSSA, resultType) if expression-valued, None if void
+///   nodeId - the CaseElimination node's ID (for SSA allocation)
+let private pBuildMultipleMatchElimination
+    (scrutineeSSA: SSA) (scrutineeType: MLIRType) (scrutineeNodeId: NodeId)
+    (arms: (MLIROp list * NodeId * Fidelity.PSG.CaseArm) list)
+    (result: (SSA * MLIRType) option)
+    (nodeId: NodeId)
+    : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        let! targetPlatform = getTargetPlatform
+
+        match targetPlatform with
+        | FPGA ->
+            // FPGA DU match: all arms combinational (inline), nested comb.mux selects result.
+            // The scrutinee (TTag type) IS the tag — no memory extraction needed.
+            // Catamorphism: fold over arms → tag comparisons, then foldBack → mux chain.
+            match result with
+            | None ->
+                return! fail (Message "FPGA: void match not supported (hardware requires a result)")
+            | Some (resultSSA, resultType) ->
+
+            let numArms = List.length arms
+
+            // Phase 1: Recall all arm value SSAs with their types (for width harmonization)
+            let! armValues =
+                let rec recallAll idx acc =
+                    if idx >= numArms then preturn (List.rev acc)
+                    else
+                        let (_, armValueNodeId, _) = arms.[idx]
+                        parser {
+                            let! (armSSA, armTy) = pRecallNode armValueNodeId
+                            let! adaptation, value = pSettledAdaptTo nodeId armValueNodeId resultType { SSA = armSSA; Type = armTy }
+                            return! recallAll (idx + 1) ((adaptation, value) :: acc)
+                        }
+                recallAll 0 []
+
+            let armValueSSAs = armValues |> List.map (fun (_, value) -> value.SSA)
+
+            // All arm ops inline (combinational — all evaluate unconditionally)
+            let allArmOps = List.map2 (fun (ops, _, _) (adaptation, _) -> ops @ adaptation) arms armValues |> List.concat
+
+            if numArms = 1 then
+                return (allArmOps, TRValue { SSA = armValueSSAs.[0]; Type = resultType })
+            else
+                let! allSSAs = getNodeSSAs nodeId
+
+                // SSA layout (functional indexing — no mutable counter):
+                //   [0]              = resultSSA
+                //   [1 + 2*i]        = tagLit for arm i     (i in 0..numArms-2)
+                //   [1 + 2*i + 1]    = cmpSSA for arm i
+                //   [tagCmpEnd + j]  = intermediate mux SSA (j in 0..numArms-3)
+                //   outermost mux reuses resultSSA (index 0)
+                let tagCmpEnd = 1 + 2 * (numArms - 1)
+
+                // Phase 2: Tag comparisons (fold over non-last arms, composing Elements)
+                let! tagResults =
+                    let rec buildComparisons armIdx acc =
+                        if armIdx >= numArms - 1 then preturn (List.rev acc)
+                        else
+                            let (_, _, arm) = arms.[armIdx]
+                            let tagLitSSA = allSSAs.[1 + 2 * armIdx]
+                            let cmpSSA = allSSAs.[1 + 2 * armIdx + 1]
+                            parser {
+                                let! tagIndex = pArmDiscriminant arm.Pattern
+                                let! tagLitOp = pConstI tagLitSSA tagIndex scrutineeType
+                                let! cmpOp = pCombICmp cmpSSA ICmpPred.Eq scrutineeSSA tagLitSSA scrutineeType
+                                return! buildComparisons (armIdx + 1) ((tagLitOp, cmpOp, cmpSSA) :: acc)
+                            }
+                    buildComparisons 0 []
+
+                let tagOps = tagResults |> List.collect (fun (litOp, cmpOp, _) -> [litOp; cmpOp])
+                let cmpSSAs = tagResults |> List.map (fun (_, _, cmpSSA) -> cmpSSA)
+
+                // Phase 3: Nested mux chain (foldBack from inside-out, composing Elements)
+                // Start with last arm's value as initial "else", wrap each previous arm with comb.mux
+                // Uses harmonized SSAs so all operands match resultType width.
+                let! (muxOps, _) =
+                    let rec buildMuxChain armIdx currentElseSSA muxCount acc =
+                        if armIdx < 0 then preturn (List.rev acc, currentElseSSA)
+                        else
+                            let muxResultSSA =
+                                if armIdx = 0 then resultSSA
+                                else allSSAs.[tagCmpEnd + muxCount]
+                            parser {
+                                let! muxOp = pCombMux muxResultSSA cmpSSAs.[armIdx] armValueSSAs.[armIdx] currentElseSSA resultType
+                                return! buildMuxChain (armIdx - 1) muxResultSSA (muxCount + 1) (muxOp :: acc)
+                            }
+                    buildMuxChain (numArms - 2) armValueSSAs.[numArms - 1] 0 []
+
+                let allOps = allArmOps @ tagOps @ muxOps
+                return (allOps, TRValue { SSA = resultSSA; Type = resultType })
+
+        | _ ->
+            let numArms = List.length arms
+
+            // Detect irrefutable match (Record/Tuple/Wildcard patterns — no DU tag)
+            let isRecordMatch =
+                arms |> List.forall (fun (_, _, arm) ->
+                    match arm.Pattern with
+                    | Fidelity.PSG.Pattern.Record _ -> true
+                    | Fidelity.PSG.Pattern.Tuple _ -> true
+                    | Fidelity.PSG.Pattern.Wildcard -> true
+                    | _ -> false)
+
+            if isRecordMatch then
+                // An ordered irrefutable (record/tuple/wildcard) match reaches composition only
+                // after Baker settles its arms and guards into the selected body; pBuildMatchElimination
+                // admits no multi-arm irrefutable match, so no guard is recalled or invented here.
+                return! fail (Message $"Baker match recipe did not settle the ordered irrefutable arms and guards of the match at node {NodeId.value nodeId} before composition")
+            else
+
+                // ── DU match path: DUGetTag + nested scf.if chain ──
+
+                // Step 1: Extract tag from scrutinee
+                let! allSSAs = getNodeSSAs nodeId
+                let tagTy = TInt (IntWidth 8)
+
+                // Index 0 is reserved for the result SSA — tag extraction starts at index 1
+                let! tagExtractOps, tagSSA, tagExtractEnd =
+                    match scrutineeType with
+                    | TIndex ->
+                        let indexZeroSSA = allSSAs.[1]
+                        let tagSSA = allSSAs.[2]
+                        let memrefI8Ty = TMemRef (TInt (IntWidth 8))
+                        let indexZeroOp = MLIROp.ArithOp (ArithOp.ConstI (indexZeroSSA, 0L, TIndex))
+                        let loadOp = MLIROp.MemRefOp (MemRefOp.Load (tagSSA, scrutineeSSA, [indexZeroSSA], tagTy, memrefI8Ty))
+                        preturn ([indexZeroOp; loadOp], tagSSA, 3)
+                    | TMemRef _ | TMemRefStatic _ | TStruct (_, Some _) ->
+                        let castSSA = allSSAs.[1]
+                        let zeroSSA = allSSAs.[2]
+                        let tagSSA = allSSAs.[3]
+                        let memrefI8Ty = TMemRef (TInt (IntWidth 8))
+                        let castOp = MLIROp.MemRefOp (MemRefOp.ReinterpretCast (castSSA, scrutineeSSA, 0, 1, scrutineeType, memrefI8Ty))
+                        let zeroOp = MLIROp.ArithOp (ArithOp.ConstI (zeroSSA, 0L, TIndex))
+                        let loadOp = MLIROp.MemRefOp (MemRefOp.Load (tagSSA, castSSA, [zeroSSA], tagTy, memrefI8Ty))
+                        preturn ([castOp; zeroOp; loadOp], tagSSA, 4)
+                    | other ->
+                        fail (Message $"PSG settlement (Layouts) did not settle a byte-addressable union carrier for the scrutinee (node {NodeId.value scrutineeNodeId}) of the match at node {NodeId.value nodeId}: got {other}")
+
+                // Step 2: Recall all arm value SSAs upfront, each at the join's width (its meet)
+                let! armValueSSAs =
+                    match result with
+                    | Some (_, resultType) ->
+                        let rec recallAll idx acc =
+                            if idx >= numArms then preturn (List.rev acc)
+                            else
+                                let (_, armValueNodeId, _) = arms.[idx]
+                                parser {
+                                    let! (rawSSA, rawTy) = pRecallNode armValueNodeId
+                                    let! (meetOps, armSSA, armTy) = pAdapt nodeId armValueNodeId rawSSA rawTy
+                                    do! ensure (armTy = resultType)
+                                            $"PSG settlement (SSAAssignment) did not settle the meet of arm {idx} (node {NodeId.value armValueNodeId}) to the result carrier of the match at node {NodeId.value nodeId}: arm {armTy}, result {resultType}"
+                                    return! recallAll (idx + 1) ((armSSA, meetOps) :: acc)
+                                }
+                        recallAll 0 []
+                    | None -> preturn []
+                let arms = arms |> List.mapi (fun i (armOps, v, arm) -> (armOps @ (match List.tryItem i armValueSSAs with Some (_, ops) -> ops | None -> []), v, arm))
+                let armValueSSAs = armValueSSAs |> List.map fst
+
+                // Step 3: Build nested scf.if chain from inside-out.
+                // SSA layout after tag extraction: 2 per non-final arm (tagLit + cmp), then one
+                // result SSA per nested (inner) scf.if. Inner ifs live in the else regions of the
+                // outer ones, so each level needs its own result name and each else region must
+                // terminate with a yield of that level's result.
+                let mutable ssaOffset = tagExtractEnd
+                let (lastArmOps, _, _) = arms.[numArms - 1]
+                let innerResultBase = tagExtractEnd + 2 * (numArms - 1)
+                let levelResultSSA (i: int) =
+                    if i = 0 then (match result with Some (r, _) -> r | None -> allSSAs.[0])
+                    else allSSAs.[innerResultBase + (i - 1)]
+
+                let lastArmElseOps =
+                    match result with
+                    | Some (_, resultType) ->
+                        let lastSSA = armValueSSAs.[numArms - 1]
+                        lastArmOps @ [MLIROp.SCFOp (SCFOp.Yield [(lastSSA, resultType)])]
+                    | None ->
+                        lastArmOps @ [MLIROp.SCFOp (SCFOp.Yield [])]
+
+                let! tagValues =
+                    arms |> List.take (numArms - 1)
+                    |> List.map (fun (_, _, arm) -> pArmDiscriminant arm.Pattern)
+                    |> Alex.XParsec.Extensions.sequence
+                let nestedOps =
+                    List.foldBack (fun i currentElseOps ->
+                        let (armOps, _, _) = arms.[i]
+                        let tagIndex = tagValues.[i]
+
+                        let tagLitSSA = allSSAs.[ssaOffset]
+                        let cmpSSA = allSSAs.[ssaOffset + 1]
+                        ssaOffset <- ssaOffset + 2
+
+                        let tagLitOp = MLIROp.ArithOp (ArithOp.ConstI (tagLitSSA, int64 tagIndex, tagTy))
+                        let cmpOp = MLIROp.ArithOp (ArithOp.CmpI (cmpSSA, ICmpPred.Eq, tagSSA, tagLitSSA, tagTy))
+
+                        let thenOps =
+                            match result with
+                            | Some (_, resultType) ->
+                                let armSSA = armValueSSAs.[i]
+                                armOps @ [MLIROp.SCFOp (SCFOp.Yield [(armSSA, resultType)])]
+                            | None ->
+                                armOps @ [MLIROp.SCFOp (SCFOp.Yield [])]
+
+                        match result with
+                        | Some (_, resultType) ->
+                            let thisResultSSA = levelResultSSA i
+                            let ifOp = MLIROp.SCFOp (SCFOp.If (cmpSSA, thenOps, Some currentElseOps, Some (thisResultSSA, resultType)))
+                            [tagLitOp; cmpOp; ifOp; MLIROp.SCFOp (SCFOp.Yield [(thisResultSSA, resultType)])]
+                        | None ->
+                            let ifOp = MLIROp.SCFOp (SCFOp.If (cmpSSA, thenOps, Some currentElseOps, None))
+                            [tagLitOp; cmpOp; ifOp; MLIROp.SCFOp (SCFOp.Yield [])]
+                    ) [0 .. numArms - 2] lastArmElseOps
+
+                // Strip the trailing yield from the outermost ops — those go in the
+                // function body, not inside an scf.if region.
+                let outerOps = nestedOps |> List.take (nestedOps.Length - 1)
+
+                let allOps = tagExtractOps @ outerOps
+
+                match result with
+                | Some (resultSSA, resultType) ->
+                    return (allOps, TRValue { SSA = resultSSA; Type = resultType })
+                | None ->
+                    return (allOps, TRVoid)
+    }
+
+/// A selected singleton has no physical join. Return the actual body carrier,
+/// after its source-settled width adaptation, rather than an undefined join SSA.
+/// MatchWitness has already checked the terminal requirement at this occurrence.
+let pBuildMatchElimination
+    (scrutineeSSA: SSA) (scrutineeType: MLIRType) (scrutineeNodeId: NodeId)
+    (arms: (MLIROp list * NodeId * Fidelity.PSG.CaseArm) list)
+    (result: (SSA * MLIRType) option)
+    (nodeId: NodeId)
+    : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        do! ensure (arms |> List.forall (fun (_, _, arm) -> arm.Guard.IsNone && arm.Bindings.IsEmpty))
+                "Match patterns require Baker's bindings and guards inside the selected body"
+        let allIrrefutable =
+            arms |> List.forall (fun (_, _, arm) ->
+                match arm.Pattern with
+                | Fidelity.PSG.Pattern.Record _
+                | Fidelity.PSG.Pattern.Tuple _
+                | Fidelity.PSG.Pattern.Wildcard
+                | Fidelity.PSG.Pattern.Var _ -> true
+                | _ -> false)
+        do! ensure (arms.Length < 2 || not allIrrefutable)
+                "Baker must settle ordered irrefutable arms and their guards before match composition"
+        let hasConstant =
+            arms |> List.exists (fun (_, _, arm) ->
+                match arm.Pattern with Fidelity.PSG.Pattern.Const _ -> true | _ -> false)
+        do! ensure (not hasConstant)
+                "Raw constant CaseElimination requires Baker's typed equality and conditional normalization."
+        match arms with
+        | [] -> return! fail (Message "CaseElimination requires a selected body")
+        | [(operations, bodyId, _)] ->
+            match result with
+            | None -> return operations, TRVoid
+            | Some (_, expectedType) ->
+                let! bodySSA, bodyType = pRecallNode bodyId
+                let! adaptations, actualSSA, actualType = pAdapt nodeId bodyId bodySSA bodyType
+                do! ensure (actualType = expectedType) "Selected match body does not satisfy its settled result carrier"
+                return operations @ adaptations, TRValue { SSA = actualSSA; Type = actualType }
+        | _ ->
+            return! pBuildMultipleMatchElimination scrutineeSSA scrutineeType scrutineeNodeId arms result nodeId
+    }

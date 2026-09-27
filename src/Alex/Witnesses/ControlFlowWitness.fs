@@ -1,0 +1,264 @@
+/// ControlFlowWitness - Witness control flow operations via XParsec
+///
+/// Uses XParsec combinators from PSGCombinators to match PSG structure,
+/// then delegates to Patterns for MLIR elision.
+///
+/// NANOPASS: This witness handles ONLY control flow nodes.
+/// All other nodes return WitnessOutput.skip for other nanopasses to handle.
+///
+/// SPECIAL CASE: Control flow needs to witness sub-graphs (then/else/body branches)
+/// that can contain ANY category of nodes. Uses subGraphCombinator to fold over
+/// all registered witnesses.
+module Alex.Witnesses.ControlFlowWitness
+
+/// Set to true for detailed control flow traversal tracing
+let mutable private traceEnabled = System.Environment.GetEnvironmentVariable("COMPOSER_TRACE_CONTROLFLOW") = "1"
+let private trace fmt = Printf.kprintf (fun s -> if traceEnabled then printfn "%s" s) fmt
+
+open Fidelity.PSG
+open Alex.Dialects.Core.Types
+open Alex.Traversal.TransferTypes
+open Alex.Traversal.NanopassArchitecture
+open Alex.Traversal.ScopeContext
+open Alex.Traversal.PSGZipper
+open Alex.XParsec.PSGCombinators
+
+open Alex.Patterns.ControlFlowPatterns
+open Alex.Patterns.SequencePatterns
+open Alex.Patterns.LazyPatterns
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y-COMBINATOR PATTERN
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Scope witnesses need to handle nested scopes (e.g., IfThenElse inside WhileLoop).
+// This requires recursive self-reference: the combinator must include itself.
+//
+// Solution: Y-combinator fixed point via thunk (unit -> Combinator)
+// The combinator getter is passed from WitnessRegistry, allowing deferred evaluation
+// and creating a proper fixed point where witnesses can recursively invoke themselves.
+
+/// Collect a branch region through the current scope traversal driver.
+/// Witness a branch scope (if-then, if-else, while-cond, while-body, for-body)
+/// Collects operations from the branch while using the SAME accumulator for bindings/errors
+/// Combinator passed through from top-level via Y-combinator fixed point
+let private witnessBranchScope (rootId: NodeId) (ctx: WitnessContext) (combinator: WitnessContext -> SemanticNode -> WitnessOutput) : MLIROp list =
+    trace "[ControlFlowWitness] witnessBranchScope: Starting visitation of branch root node %A" (NodeId.value rootId)
+
+    // SCOPE-AWARE ACCUMULATION: Create child scope for branch operations
+    // Operations witness during branch traversal naturally accumulate into this child scope
+    // No counting, no subtraction - operations know their scope at creation time
+    let branchScope = ref (ScopeContext.createChild !ctx.ScopeContext BlockLevel)
+    let reject message =
+        MLIRAccumulator.addError
+            (Diagnostic.coded AX4001 (Some rootId) (Some "ControlFlow") (Some "structural occurrence") message)
+            ctx.Accumulator
+
+    // Witness branch nodes using child scope
+    // Accumulator and GlobalVisited remain shared (errors and bindings are global)
+    match Revision.tryNode rootId ctx.Graph with
+    | Some branchNode ->
+        trace "[ControlFlowWitness] witnessBranchScope: Found branch node %A (kind: %s)"
+            (NodeId.value rootId)
+            (branchNode.Kind.ToString().Split('\n').[0])
+
+        let position =
+            match ctx.Zipper.Focus.Children |> List.tryFindIndex ((=) rootId) with
+            | Some index -> down index ctx.Zipper
+            | None -> None
+        match position with
+        | Some branchZipper when branchZipper.Focus.Id = rootId ->
+            trace "[ControlFlowWitness] witnessBranchScope: Successfully focused on node %A, calling visitAllNodes" (NodeId.value rootId)
+            // Create context with child scope - operations will accumulate into branchScope
+            let branchCtx = { ctx with
+                                Zipper = branchZipper
+                                ScopeContext = branchScope }
+            // Use GLOBAL visited set - nodes visited once, emit into branch scope
+            visitAllNodes combinator branchCtx branchNode ctx.TraversalVisited
+
+            let branchOps = ScopeContext.getOps !branchScope
+            trace "[ControlFlowWitness] witnessBranchScope: Completed visitation of node %A - extracted %d ops from child scope"
+                (NodeId.value rootId)
+                (List.length branchOps)
+        | _ ->
+            reject $"Control-flow region {NodeId.value rootId} is not a declared child of its actual occurrence."
+            trace "[ControlFlowWitness] witnessBranchScope: Failed to focus on node %A" (NodeId.value rootId)
+    | None ->
+        reject $"Control-flow region {NodeId.value rootId} is absent from the current graph."
+        trace "[ControlFlowWitness] witnessBranchScope: Node %A not found in graph" (NodeId.value rootId)
+
+    // Extract operations from child scope (already in correct order)
+    ScopeContext.getOps !branchScope
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CATEGORY-SELECTIVE WITNESS (Private)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Pull only the dispatch's declared child regions through the existing
+/// fixed-point scope mechanism. Labels and branch identities come from Baker.
+let private witnessContinuationDispatch getCombinator (ctx: WitnessContext) (node: SemanticNode) selector cases otherwise =
+    let diagnostic phase message =
+        WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "ContinuationDispatch") (Some phase) message
+    let children = selector :: otherwise :: (cases |> List.map snd)
+    match children |> List.tryFind (fun id -> Revision.tryNode id ctx.Graph |> Option.isNone) with
+    | Some missing -> diagnostic "graph prerequisites" $"ContinuationDispatch {NodeId.value node.Id} references missing child {NodeId.value missing}"
+    | None when children |> List.exists (fun id -> not (List.contains id node.Children)) ->
+        diagnostic "graph prerequisites" $"ContinuationDispatch {NodeId.value node.Id} has an operand outside its declared structural children"
+    | None ->
+        let combinator = getCombinator ()
+        let selectorOps = witnessBranchScope selector ctx combinator
+        let branches = cases |> List.map (fun (label, body) -> label, body, witnessBranchScope body ctx combinator)
+        let fallback = otherwise, witnessBranchScope otherwise ctx combinator
+        let pattern =
+            if isLazyValue ctx node then pLazyDispatch ctx selector branches fallback
+            elif isSequenceValue ctx node then pSequenceDispatch ctx selector branches fallback
+            else
+                let isUnit = Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id
+                let result =
+                    if isUnit then None
+                    else Some (Alex.Traversal.Values.value node.Id 0, mapTypeAt node.Id ctx)
+                let dispatch = pBuildContinuationDispatch node.Id selector branches fallback result
+                if isUnit then Alex.Patterns.LiteralPatterns.pWithUnitResult node.Id dispatch else dispatch
+        match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+        | Result.Ok ((operations, transfer), _) ->
+            { InlineOps = selectorOps @ operations; TopLevelOps = []; Result = transfer }
+        | Result.Error message -> diagnostic "settled operands" message
+
+/// Witness control flow operations - category-selective (handles only control flow nodes)
+/// Takes combinator getter (Y-combinator thunk) for recursive self-reference
+let private witnessControlFlowWith (getCombinator: unit -> (WitnessContext -> SemanticNode -> WitnessOutput)) (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput =
+    // Get the full combinator (including ourselves) via Y-combinator fixed point
+    let combinator = getCombinator()
+
+    match tryMatch pIfThenElse ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+    | Some ((condId, thenId, elseIdOpt), _) ->
+        trace "[ControlFlowWitness] Handling IfThenElse node %A (cond=%A, then=%A, else=%A)"
+            (NodeId.value node.Id)
+            (NodeId.value condId)
+            (NodeId.value thenId)
+            (elseIdOpt |> Option.map NodeId.value)
+
+        // ARCHITECTURAL FIX: Condition must be visited in CURRENT scope, not as child branch
+        // IfThenElse condition operations accumulate into parent scope (before scf.if)
+        // Only branch BODIES (then/else) are isolated child scopes for scf.if regions.
+        // Since IfThenElse is a scope boundary, children aren't auto-visited - we must visit condition explicitly.
+        trace "[ControlFlowWitness] IfThenElse: Visiting condition %A in current scope (not branch scope)" (NodeId.value condId)
+        let conditionPosition =
+            ctx.Zipper.Focus.Children |> List.tryFindIndex ((=) condId)
+            |> Option.bind (fun index -> down index ctx.Zipper)
+        let visitedCondition =
+            match Revision.tryNode condId ctx.Graph, conditionPosition with
+            | Some condNode, Some position when position.Focus.Id = condId ->
+                // Keep the operation scope, but descend from the actual If
+                // occurrence. Reusing its zipper would misidentify every
+                // nested operand and lose its child breadcrumbs.
+                visitAllNodes combinator { ctx with Zipper = position } condNode ctx.TraversalVisited
+                true
+            | _ -> false
+
+        // Recall the condition result (now available from current scope visitation)
+        // Use findLastValueNode to handle Sequential conditions (e.g., TupleGet + boolean ops)
+        let condValueNodeId = findLastValueNode condId ctx.Graph
+        match if visitedCondition then MLIRAccumulator.recallNode condValueNodeId ctx.Accumulator else None with
+        | None when not visitedCondition ->
+            WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "ControlFlow") (Some "IfThenElse condition")
+                $"PSG settlement did not place condition {NodeId.value condId} of IfThenElse {NodeId.value node.Id} in the graph as a declared child of its occurrence"
+        | None ->
+            trace "[ControlFlowWitness] IfThenElse: ERROR - Condition %A (value node %A) witnessed but no result" (NodeId.value condId) (NodeId.value condValueNodeId)
+            WitnessOutput.error "IfThenElse: Condition witnessed but no result"
+        | Some (condSSA, condType) ->
+            // Walk branches — always scope-isolated for op collection.
+            // The Pattern layer decides what to do with these ops based on
+            // the observed TargetPlatform coeffect (scf.if regions vs inline + comb.mux).
+            let thenOps = witnessBranchScope thenId ctx combinator
+            let elseOps = elseIdOpt |> Option.map (fun elseId -> witnessBranchScope elseId ctx combinator)
+
+            let thenValueNodeId = findLastValueNode thenId ctx.Graph
+            let elseValueNodeIdOpt = elseIdOpt |> Option.map (fun elseId -> findLastValueNode elseId ctx.Graph)
+
+            let pattern =
+                if isLazyValue ctx node then
+                    match elseIdOpt, elseOps with
+                    | Some elseId, Some operations ->
+                        pLazyConditional ctx { SSA = condSSA; Type = condType } thenId thenOps elseId operations
+                    | _ -> XParsec.Parsers.fail (XParsec.Message "Lazy conditional requires both settled branches.")
+                elif isSequenceValue ctx node then
+                    match elseIdOpt, elseOps with
+                    | Some elseId, Some operations ->
+                        pSequenceConditional ctx { SSA = condSSA; Type = condType } thenId thenOps elseId operations
+                    | _ -> XParsec.Parsers.fail (XParsec.Message "Sequence conditional requires both settled branches.")
+                else
+                    let isUnit = Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id
+                    let build result = pBuildConditional condSSA thenOps elseOps thenValueNodeId elseValueNodeIdOpt result node.Id
+                    if isUnit then Alex.Patterns.LiteralPatterns.pWithUnitResult node.Id (build None)
+                    else
+                        let resultType = mapTypeAt node.Id ctx
+                        // A valued conditional carries its derived result value; an absent one is
+                        // a settlement defect, never a unit conditional.
+                        XParsec.Combinators.parser {
+                            let! ssas = getNodeSSAs node.Id
+                            match ssas with
+                            | ssa :: _ -> return! build (Some (ssa, resultType))
+                            | [] ->
+                                return! XParsec.Parsers.fail (XParsec.Message
+                                    $"PSG settlement did not derive a result value for valued IfThenElse {NodeId.value node.Id}")
+                        }
+            match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+            | Result.Ok ((ops, transferResult), _) ->
+                trace "[ControlFlowWitness] IfThenElse: Built conditional with %d ops" (List.length ops)
+                { InlineOps = ops; TopLevelOps = []; Result = transferResult }
+            | Result.Error diagnostic ->
+                WitnessOutput.error $"IfThenElse: {diagnostic}"
+
+    | None ->
+        match tryMatch pWhileLoop ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+        | Some ((condId, bodyId), _) ->
+            trace "[ControlFlowWitness] WhileLoop: Visiting condition branch %A" (NodeId.value condId)
+            let condOps = witnessBranchScope condId ctx combinator
+            trace "[ControlFlowWitness] WhileLoop: Visiting body branch %A" (NodeId.value bodyId)
+            let bodyOps = witnessBranchScope bodyId ctx combinator
+
+            // Recall condition result to build scf.condition terminator
+            match MLIRAccumulator.recallNode condId ctx.Accumulator with
+            | None ->
+                trace "[ControlFlowWitness] WhileLoop: ERROR - Condition %A witnessed but no result" (NodeId.value condId)
+                WitnessOutput.error "WhileLoop: Condition witnessed but no result"
+            | Some (condSSA, _) ->
+                trace "[ControlFlowWitness] WhileLoop: Building scf.while with condition SSA %A" condSSA
+                let loop = pBuildWhileLoop condSSA condOps bodyOps
+                let pattern =
+                    if Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id then
+                        Alex.Patterns.LiteralPatterns.pWithUnitResult node.Id loop
+                    else loop
+                match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                | Result.Ok ((ops, result), _) ->
+                    { InlineOps = ops; TopLevelOps = []; Result = result }
+                | Result.Error diagnostic -> WitnessOutput.error $"WhileLoop: {diagnostic}"
+
+        | None ->
+            match tryMatch pForLoop ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+            | Some ((_, lowerId, upperId, _, bodyId), _) ->
+                match MLIRAccumulator.recallNode lowerId ctx.Accumulator, MLIRAccumulator.recallNode upperId ctx.Accumulator with
+                | Some (lowerSSA, _), Some (upperSSA, _) ->
+                    let _bodyOps = witnessBranchScope bodyId ctx combinator
+                    WitnessOutput.error "ForLoop needs step constant - gap in patterns"
+
+                | _ -> WitnessOutput.error "ForLoop: Loop bounds not yet witnessed"
+
+            | None -> WitnessOutput.skip
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NANOPASS REGISTRATION (Public)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Create control flow nanopass with Y-combinator thunk for recursive self-reference
+/// The combinator getter allows deferred evaluation, creating a fixed point where
+/// this witness can handle nested control flow (e.g., IfThenElse inside WhileLoop)
+let createNanopass (getCombinator: unit -> (WitnessContext -> SemanticNode -> WitnessOutput)) : Nanopass = {
+    Name = "ControlFlow"
+    Witness = fun ctx node ->
+        match node.Kind with
+        | SemanticKind.ContinuationDispatch (selector, cases, otherwise) ->
+            witnessContinuationDispatch getCombinator ctx node selector cases otherwise
+        | _ -> witnessControlFlowWith getCombinator ctx node
+}

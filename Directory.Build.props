@@ -1,0 +1,10 @@
+<Project>
+  <!-- Optional local checkout selection; command-line properties still take precedence. -->
+  <Import Project="$(MSBuildThisFileDirectory)Directory.Build.local.props" Condition="Exists('$(MSBuildThisFileDirectory)Directory.Build.local.props')" />
+  <PropertyGroup>
+    <!-- The published PSG contract. It is its own project; the compiler service produces revisions of it. -->
+    <PsgContractProject Condition="'$(PsgContractProject)' == ''">$(MSBuildThisFileDirectory)../Fidelity.PSG/src/Fidelity.PSG/Fidelity.PSG.fsproj</PsgContractProject>
+    <!-- The library the contract references. It reaches Alex through the contract. -->
+    <PsgContractLibrary Condition="'$(PsgContractLibrary)' == ''">$(MSBuildThisFileDirectory)../BAREWire/src/BAREWire.fsproj</PsgContractLibrary>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,932 @@
+/// PSG Combinators - XParsec-based pattern matching for SemanticGraph nodes
+///
+///
+/// XParsec provides:
+/// - Parser<'Parsed, 'T, 'State, 'Input, 'InputSlice> type
+/// - >>=, |>>, .>>, >>., <|>, parser { } - all standard combinators
+/// - getUserState, setUserState, updateUserState - state threading
+/// - Reader.ofString - creates cursor with custom state
+///
+/// We use XParsec for PSG graph navigation by:
+/// 1. Threading PSGParserState through XParsec's state mechanism
+/// 2. Using empty string as dummy input (PSG doesn't consume characters)
+/// 3. Navigating by updating state.Current, not consuming input
+///
+
+module Alex.XParsec.PSGCombinators
+
+open XParsec
+open XParsec.Parsers     // preturn, fail, getUserState, setUserState, updateUserState
+open XParsec.Combinators // >>=, |>>, .>>, >>., <|>, parser { }
+open Fidelity.PSG
+open Alex.Traversal.PSGZipper
+open Alex.Dialects.Core.Types
+open Alex.CodeGeneration.TypeMapping
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PSG PARSER STATE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parser state threaded through pattern matching
+///
+/// UNIFIED STATE ARCHITECTURE (January 2026):
+/// State unification enables pure compositional flow through all three layers.
+/// Everything needed for pattern matching and MLIR emission flows through a single
+/// state structure for Elements, Patterns and Witnesses.
+///
+/// The Four Pillars (see four_pillars_of_transfer memory):
+/// - Pillar A (Coeffects): Pre-computed mise-en-place (SSA, Platform, Mutability, etc.)
+/// - Pillar B (XParsec & Patterns): Monadic composition via parser { }, let!, <|>
+/// - Pillar C (Zipper): Bidirectional navigation with focus
+/// - Pillar D (Templates): Reusable patterns that elide boilerplate
+///
+/// Layer composition:
+/// - Elements compose into Patterns
+/// - Patterns compose into Witnesses
+/// - All composition via `parser { }` CE, `let!` binding, `<|>` choice
+/// - State accessed via `getUserState` inline
+type PSGParserState = {
+    Graph: Revision
+    Zipper: PSGZipper
+    /// Currently focused node
+    Current: SemanticNode
+
+    /// Pillar A: Pre-computed coeffects (mise-en-place, not computation)
+    /// Includes: SSA assignment, Platform, Mutability, Strings, etc.
+    /// This is the photograph that witnesses observe (codata principle)
+    Coeffects: Alex.Traversal.TransferTypes.TransferCoeffects
+
+    /// Accumulator for binding recall and operation collection
+    /// Enables post-order dependency: recall child results to compose parent
+    Accumulator: Alex.Traversal.TransferTypes.MLIRAccumulator
+
+    /// The platform as emission reads it (the same value as Coeffects.Platform)
+    Platform: Alex.Traversal.TransferTypes.PlatformReads
+
+    /// Optional execution trace collector (only enabled for diagnostic runs)
+    ExecutionTrace: Alex.Traversal.TransferTypes.TraceCollector option
+    /// Current depth in hierarchy (0=Witness, 1=Pattern, 2=Element)
+    CurrentDepth: int
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PSG PARSER TYPE (5 type parameters - using XParsec's Parser directly)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// PSG parser type - uses XParsec's Parser with custom state
+///
+/// PSG parsers don't parse characters - they navigate a graph structure.
+/// We use empty string as dummy input, threading PSGParserState through XParsec.
+///
+/// Type parameters:
+/// - 'T: Parsed result type
+/// - char: Element type (dummy - we don't consume characters)
+/// - PSGParserState: Our custom state
+/// - ReadableString: Input type (always empty string)
+/// - ReadableStringSlice: Sliceable input type
+type PSGParser<'T> = Parser<'T, char, PSGParserState, ReadableString, ReadableStringSlice>
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLATFORM-AWARE TYPE RESOLUTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The word-sized integer type: the Register width the platform description
+/// declares, read from the context CCS filled (plan D8, L-10). Where the
+/// description declares no Register this fails with CCS8203's text; Composer
+/// never supplies a width of its own.
+let platformWordType (state: PSGParserState) : MLIRType =
+    state.Platform.PlatformWordType
+
+/// The word width in bits: the declared Register width, or CCS8203's text.
+let platformWordBits (state: PSGParserState) : int =
+    match state.Platform.TargetArch.Register with
+    | Ok bits -> bits
+    | Error message -> failwith message
+
+/// The range CCS wrote on a node at saturation (Dimensional_Range_Design.md §1; RangeAnalysis):
+/// read here, never computed. `None` for a node that is not an integer, boolean or char.
+let nodeRange (graph: Revision) (nodeId: NodeId) : ValueRange option =
+    Revision.tryNode nodeId graph |> Option.bind (fun n -> n.ValueRange)
+
+/// Exact correspondence with a published form, including every nested field.
+/// A missing width is a mismatch; this operation never completes a type.
+let requireValueType (graph: Revision) (nodeId: NodeId) (ty: MLIRType) : MLIRType =
+    let expected = valueTypeAt graph nodeId
+    if ty <> expected then
+        failwithf "Value occurrence %d has carrier %A instead of its source-published carrier %A" (NodeId.value nodeId) ty expected
+    ty
+
+/// The value a derived meet produces: the extension by the operand's sign or the truncation of a
+/// refined read that SSAAssignment derived for this consumer and operand (Coeffects.Meet). The
+/// witness transcribes it; nothing is decided here.
+let private floatType = function
+    | 32 -> TFloat F32
+    | 64 -> TFloat F64
+    | bits -> failwithf "Unsupported floating boundary width %d" bits
+
+let meetOp (meet: Meet) (result: SSA) (value: SSA) : MLIROp =
+    match meet.Adapt with
+    | MeetKind.ExtendUnsigned -> MLIROp.ArithOp (ArithOp.ExtUI (result, value, TInt (IntWidth meet.From), TInt (IntWidth meet.To)))
+    | MeetKind.ExtendSigned -> MLIROp.ArithOp (ArithOp.ExtSI (result, value, TInt (IntWidth meet.From), TInt (IntWidth meet.To)))
+    | MeetKind.Truncate -> MLIROp.ArithOp (ArithOp.TruncI (result, value, TInt (IntWidth meet.From), TInt (IntWidth meet.To)))
+    | MeetKind.ExtendFloat -> MLIROp.ArithOp (ArithOp.ExtF (result, value, floatType meet.From, floatType meet.To))
+    | MeetKind.TruncateFloat -> MLIROp.ArithOp (ArithOp.TruncF (result, value, floatType meet.From, floatType meet.To))
+
+/// The last value a node evaluates to: through a block's last child and an annotation (the node
+/// a value operand is derived and recalled at).
+let rec private lastValueNode (graph: Revision) (id: NodeId) : NodeId =
+    match Revision.tryNode id graph with
+    | Some { Kind = SemanticKind.Sequential ids } ->
+        match List.tryLast ids with
+        | Some last -> lastValueNode graph last
+        | None -> id
+    | Some { Kind = SemanticKind.TypeAnnotation (inner, _) } -> lastValueNode graph inner
+    | Some _ -> id
+    | None -> failwithf "adaptOperand: PSG settlement did not settle the operand node %d: it is not in the graph" (NodeId.value id)
+
+/// Adapt an operand's value to the slot it meets at `consumer`: the meet SSAAssignment derived
+/// for (consumer, operand), or the value unchanged where none was derived (the widths agree).
+/// The operand is looked up at the node the witness recalled and at its last value.
+/// Returns the ops to emit before the consumer, and the value and type the consumer reads.
+let adaptOperand (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (graph: Revision) (consumer: NodeId) (operand: NodeId) (value: SSA) (ty: MLIRType) : MLIROp list * SSA * MLIRType =
+    let found =
+        match Alex.Traversal.TransferTypes.meetFor graph consumer operand with
+        | Some found -> Some found
+        | None -> Alex.Traversal.TransferTypes.meetFor graph consumer (lastValueNode graph operand)
+    match found with
+    | Some (meet, result) ->
+        match ty with
+        | TInt (IntWidth from) when from = meet.From -> ([ meetOp meet result value ], result, TInt (IntWidth meet.To))
+        | TFloat _ when ty = floatType meet.From -> ([meetOp meet result value], result, floatType meet.To)
+        | _ ->
+            failwithf "adaptOperand: the meet derived for node %d's operand %d adapts i%d, but the operand arrives as %A; the derivation and the emission disagree"
+                (NodeId.value consumer) (NodeId.value operand) meet.From ty
+    | None -> ([], value, ty)
+
+/// The monadic form of `adaptOperand`.
+let pAdapt (consumer: NodeId) (operand: NodeId) (value: SSA) (ty: MLIRType) : PSGParser<MLIROp list * SSA * MLIRType> =
+    parser {
+        let! state = getUserState
+        return adaptOperand state.Coeffects state.Graph consumer operand value ty
+    }
+
+/// Read the current occurrence's exact published scalar or aggregate carrier.
+let requireCurrentType (state: PSGParserState) (ty: MLIRType) : MLIRType =
+    requireValueType state.Graph state.Current.Id ty
+
+/// Get the target architecture
+let targetArch (state: PSGParserState) : Architecture =
+    state.Platform.TargetArch
+
+/// Get the appropriate return type for main function
+/// This uses platform word size, NOT hard-coded i32
+let mainReturnType (state: PSGParserState) : MLIRType =
+    state.Platform.PlatformWordType
+
+/// Get the appropriate type for nativeint/unativeint
+let nativeIntType (state: PSGParserState) : MLIRType =
+    state.Platform.PlatformWordType
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SSA COEFFECT EXTRACTION (monadic access to pre-computed SSAs)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Extract result SSA for a node from coeffects (monadic)
+/// This is the PRIMARY way for Patterns to access SSAs - via getUserState, not parameters.
+/// Witnesses pass NodeIds; Patterns extract SSAs monadically from state.Coeffects.SSA.
+let getNodeSSA (nodeId: NodeId) : PSGParser<Alex.Dialects.Core.Types.SSA> =
+    parser {
+        let! state = getUserState
+        return Alex.Traversal.Values.resultOf state.Coeffects.TargetPlatform state.Graph (Alex.Traversal.PSGZipper.enclosingLambdaIds state.Zipper) nodeId
+    }
+
+/// Extract all SSAs for a node from coeffects (monadic)
+/// Multi-SSA nodes have multiple SSAs: [result; intermediate0; intermediate1; ...]
+/// Result SSA is always at index 0.
+let getNodeSSAs (nodeId: NodeId) : PSGParser<Alex.Dialects.Core.Types.SSA list> =
+    parser {
+        let! state = getUserState
+        return Alex.Traversal.Values.valuesOf state.Coeffects.TargetPlatform state.Graph (Alex.Traversal.PSGZipper.enclosingLambdaIds state.Zipper) nodeId
+    }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BASIC PSG OPERATIONS (use XParsec's state threading)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Get current PSG node from state
+let getCurrentNode : PSGParser<SemanticNode> =
+    getUserState |>> (fun state -> state.Current)
+
+/// Get current graph from state
+let getGraph : PSGParser<Revision> =
+    getUserState |>> (fun state -> state.Graph)
+
+/// Get platform info from state
+let getPlatform : PSGParser<Alex.Traversal.TransferTypes.PlatformReads> =
+    getUserState |>> (fun state -> state.Platform)
+
+/// Get target platform (CPU/FPGA/GPU/MCU/NPU) from coeffects
+/// Patterns use this to select which Elements to invoke (codata-dependent elision)
+let getTargetPlatform : PSGParser<Alex.Target.TargetPlatform> =
+    getUserState |>> (fun state -> state.Coeffects.TargetPlatform)
+
+/// Read the exact representation of the named source value occurrence.
+let pValueType (nodeId: NodeId) : PSGParser<MLIRType> =
+    getUserState |>> fun state -> valueTypeAt state.Graph nodeId
+
+/// Set current node in state
+let setCurrentNode (node: SemanticNode) : PSGParser<unit> =
+    updateUserState (fun state -> { state with Current = node })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRIMITIVE PARSERS (pattern match on current node)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Match the current node's kind
+let pKind (expected: SemanticKind) : PSGParser<SemanticNode> =
+    parser {
+        let! node = getCurrentNode
+        if node.Kind = expected then
+            return node
+        else
+            return! fail (Message (sprintf "Expected %A but got %A" expected node.Kind))
+    }
+
+/// Match any node (always succeeds with current node)
+let pAny : PSGParser<SemanticNode> =
+    getCurrentNode
+
+/// Match a Literal node
+let pLiteral : PSGParser<NativeLiteral> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.Literal lit -> return lit
+        | _ -> return! fail (Message "Expected Literal")
+    }
+
+/// Match a VarRef node (defId is optional)
+let pVarRef : PSGParser<string * NodeId option> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.VarRef (name, defIdOpt) -> return (name, defIdOpt)
+        | _ -> return! fail (Message "Expected VarRef")
+    }
+
+/// Match an AddressOf node — takes the address of a value
+let pAddressOf : PSGParser<NodeId> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.AddressOf (exprId, _) -> return exprId
+        | _ -> return! fail (Message "Expected AddressOf")
+    }
+
+/// Match a FieldGet node (extracts field from struct/tuple)
+let pFieldGet : PSGParser<NodeId * string> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.FieldGet (structId, fieldName) -> return (structId, fieldName)
+        | _ -> return! fail (Message "Expected FieldGet")
+    }
+
+/// Match RecordExpr node — returns field assignments and optional copy-from source
+let pRecordExpr : PSGParser<(string * NodeId) list * NodeId option> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.RecordExpr (fields, copyFrom) -> return (fields, copyFrom)
+        | _ -> return! fail (Message "Expected RecordExpr")
+    }
+
+/// Match an Application node
+let pApplication : PSGParser<NodeId * NodeId list> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.Application (funcId, argIds) -> return (funcId, argIds)
+        | _ -> return! fail (Message "Expected Application")
+    }
+
+/// Match an Intrinsic node
+let pIntrinsic : PSGParser<IntrinsicInfo> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.Intrinsic info -> return info
+        | _ -> return! fail (Message "Expected Intrinsic")
+    }
+
+/// Match Application node where function is an Intrinsic of the given module
+/// Resolves through TypeAnnotation wrapper (absorbs resolveFunctionNode logic)
+/// Returns: (IntrinsicInfo, argNodeIds)
+let pIntrinsicApplication (targetModule: IntrinsicModule) : PSGParser<IntrinsicInfo * NodeId list> =
+    parser {
+        let! (funcId, argIds) = pApplication
+        let! state = getUserState
+        // Resolve function node, unwrapping TypeAnnotation if present
+        let funcNodeOpt =
+            match Revision.tryNode funcId state.Graph with
+            | Some funcNode ->
+                match funcNode.Kind with
+                | SemanticKind.TypeAnnotation (innerFuncId, _) ->
+                    Revision.tryNode innerFuncId state.Graph
+                | _ -> Some funcNode
+            | None -> None
+        match funcNodeOpt with
+        | Some funcNode ->
+            match funcNode.Kind with
+            | SemanticKind.Intrinsic info when info.Module = targetModule ->
+                return (info, argIds)
+            | _ -> return! fail (Message $"Function is not {targetModule} intrinsic")
+        | None -> return! fail (Message (sprintf "PSG settlement did not settle the callee node %d of application %d: it is not in the graph" (NodeId.value funcId) (NodeId.value state.Current.Id)))
+    }
+
+/// Match a PlatformBinding node
+let pPlatformBinding : PSGParser<string> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.PlatformBinding entryPoint -> return entryPoint
+        | _ -> return! fail (Message "Expected PlatformBinding")
+    }
+
+/// Match a Binding node
+let pBinding : PSGParser<string * bool * bool * DeclRoot option> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.Binding (name, isMut, isRec, isEntry) ->
+            return (name, isMut, isRec, isEntry)
+        | _ -> return! fail (Message "Expected Binding")
+    }
+
+/// Match a Set node (mutable assignment: x <- value)
+let pSet : PSGParser<NodeId * NodeId> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.Set (targetId, valueId) ->
+            return (targetId, valueId)
+        | _ -> return! fail (Message "Expected Set")
+    }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ACCUMULATOR EXTRACTORS (monadic access to witnessed node results)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Pull SSA and type from accumulator for a previously witnessed node
+/// This enables patterns to extract child results monadically (PULL model).
+/// Post-order traversal ensures children are witnessed before parents.
+let pRecallNode (nodeId: NodeId) : PSGParser<SSA * MLIRType> =
+    parser {
+        let! state = getUserState
+        match Alex.Traversal.TransferTypes.MLIRAccumulator.recallNode nodeId state.Accumulator with
+        | Some (ssa, ty) -> return (ssa, ty)
+        | None -> return! fail (Message $"Node {NodeId.value nodeId} not yet witnessed")
+    }
+
+/// Pull argument node IDs from Application node
+/// Used by application patterns to extract arguments monadically.
+let pGetApplicationArgs : PSGParser<NodeId list> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.Application (_, argIds) -> return argIds
+        | _ -> return! fail (Message "Not an Application node")
+    }
+
+/// Match a Lambda node (params are name*type*nodeId tuples for SSA assignment)
+let pLambda : PSGParser<(string * TypeIdentity * NodeId) list * NodeId> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.Lambda (params', bodyId, _captures, _, _) -> return (params', bodyId)
+        | _ -> return! fail (Message "Expected Lambda")
+    }
+
+/// Match a Lambda node with captures
+/// Returns: (params, bodyId, captures)
+let pLambdaWithCaptures : PSGParser<(string * TypeIdentity * NodeId) list * NodeId * CaptureInfo list> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.Lambda (params', bodyId, captures, _, _) -> return params', bodyId, captures
+        | _ -> return! fail (Message "Expected Lambda")
+    }
+
+/// Match a Lambda node with its parent Binding's name, read from the zipper parent.
+/// Returns: (bindingName, params, bodyId, captures). A lambda with no parent Binding has no
+/// name here: that is a refusal naming the node, never a synthetic symbol.
+let pLambdaWithBinding : PSGParser<string * (string * TypeIdentity * NodeId) list * NodeId * CaptureInfo list> =
+    parser {
+        let! (params', bodyId, captures) = pLambdaWithCaptures
+        let! state = getUserState
+        match up state.Zipper |> Option.map (fun parent -> parent.Focus.Kind) with
+        | Some (SemanticKind.Binding (name, _, _, _)) -> return (name, params', bodyId, captures)
+        | Some other ->
+            return! fail (Message (sprintf "PSG settlement did not settle a binding name for the lambda at node %d: its parent is %A, not a Binding" (NodeId.value state.Current.Id) other))
+        | None ->
+            return! fail (Message (sprintf "PSG settlement did not settle a binding name for the lambda at node %d: it has no parent in the zipper" (NodeId.value state.Current.Id)))
+    }
+
+/// Match an IfThenElse node
+let pIfThenElse : PSGParser<NodeId * NodeId * NodeId option> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.IfThenElse (guard, thenB, elseOpt) ->
+            return (guard, thenB, elseOpt)
+        | _ -> return! fail (Message "Expected IfThenElse")
+    }
+
+/// Match a WhileLoop node
+let pWhileLoop : PSGParser<NodeId * NodeId> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.WhileLoop (guard, body) -> return (guard, body)
+        | _ -> return! fail (Message "Expected WhileLoop")
+    }
+
+/// Match a ForLoop node
+let pForLoop : PSGParser<string * NodeId * NodeId * bool * NodeId> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.ForLoop (var, start, finish, isUp, body) ->
+            return (var, start, finish, isUp, body)
+        | _ -> return! fail (Message "Expected ForLoop")
+    }
+
+/// Match a Sequential node
+let pSequential : PSGParser<NodeId list> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.Sequential childIds -> return childIds
+        | _ -> return! fail (Message "Expected Sequential")
+    }
+
+/// Match a TypeAnnotation node
+/// TypeAnnotation is a transparent wrapper - returns (wrappedNodeId, annotatedType)
+let pTypeAnnotation : PSGParser<NodeId * TypeIdentity> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.TypeAnnotation (wrappedId, annotatedType) ->
+            return (wrappedId, annotatedType)
+        | _ -> return! fail (Message "Expected TypeAnnotation")
+    }
+
+/// Match a PatternBinding node
+let pPatternBinding : PSGParser<string> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.PatternBinding name -> return name
+        | _ -> return! fail (Message "Expected PatternBinding")
+    }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DISCRIMINATED UNION PARSERS (January 2026)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Match a DUGetTag node - extracts tag from DU value
+/// Returns: (duValueNodeId, duType)
+let pDUGetTag : PSGParser<NodeId * TypeIdentity> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.DUGetTag (duValueId, duType) -> return (duValueId, duType)
+        | _ -> return! fail (Message "Expected DUGetTag")
+    }
+
+/// Match a DUEliminate node - type-safe payload extraction via case eliminator
+/// Returns: (duValueNodeId, caseIndex, caseName, payloadType)
+let pDUEliminate : PSGParser<NodeId * int * string * TypeIdentity> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.DUEliminate (duValueId, caseIndex, caseName, payloadType) ->
+            return (duValueId, caseIndex, caseName, payloadType)
+        | _ -> return! fail (Message "Expected DUEliminate")
+    }
+
+/// Match a DUConstruct node - constructs DU value in arena
+/// Returns: (caseName, caseIndex, payloadOpt, arenaHintOpt)
+let pDUConstruct : PSGParser<string * int * NodeId option * NodeId option> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.DUConstruct (caseName, caseIndex, payload, arenaHint) ->
+            return (caseName, caseIndex, payload, arenaHint)
+        | _ -> return! fail (Message "Expected DUConstruct")
+    }
+
+/// Match a CaseElimination node — structural elimination (catamorphism)
+/// Returns: (scrutineeNodeId, arms)
+let pCaseElimination : PSGParser<NodeId * CaseArm list> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.CaseElimination (scrutineeId, arms) ->
+            return (scrutineeId, arms)
+        | _ -> return! fail (Message "Expected CaseElimination")
+    }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NAVIGATION COMBINATORS (use XParsec's state threading)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Focus on a child node by ID
+let focusChild (childId: NodeId) : PSGParser<SemanticNode> =
+    parser {
+        let! state = getUserState
+        match Revision.tryNode childId state.Graph with
+        | Some childNode ->
+            do! setCurrentNode childNode
+            return childNode
+        | None ->
+            return! fail (Message (sprintf "Child node %A not found" childId))
+    }
+
+/// Run parser on a specific child node, then restore focus
+let onChild (childId: NodeId) (p: PSGParser<'T>) : PSGParser<'T> =
+    parser {
+        let! state = getUserState
+        match Revision.tryNode childId state.Graph with
+        | Some childNode ->
+            // Save current position
+            let savedCurrent = state.Current
+            // Navigate to child
+            do! setCurrentNode childNode
+            // Run child parser
+            let! result = p
+            // Restore position
+            do! setCurrentNode savedCurrent
+            return result
+        | None ->
+            return! fail (Message (sprintf "Child node %A not found" childId))
+    }
+
+/// Run parser on each child and collect results
+let onChildren (childIds: NodeId list) (p: PSGParser<'T>) : PSGParser<'T list> =
+    parser {
+        let! results =
+            childIds
+            |> List.map (fun cid -> onChild cid p)
+            |> List.fold (fun accParser nextParser ->
+                parser {
+                    let! acc = accParser
+                    let! next = nextParser
+                    return acc @ [next]
+                }) (preturn [])
+        return results
+    }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ATOMIC OPERATION CLASSIFICATION PATTERNS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// TERMINOLOGY NOTE (January 2026):
+// - CCS calls them: "Intrinsics" (intrinsic to native type universe)
+// - MiddleEnd calls them: "Atomic Operations" (atomic/indivisible at MLIR level)
+// - PSG type name remains `SemanticKind.Intrinsic` (can't change CCS output)
+// - Comments and function names use "Atomic Operation" terminology
+
+/// Match atomic operation by module (SemanticKind.Intrinsic)
+let pIntrinsicModule (expectedModule: IntrinsicModule) : PSGParser<IntrinsicInfo> =
+    parser {
+        let! info = pIntrinsic
+        if info.Module = expectedModule then
+            return info
+        else
+            return! fail (Message (sprintf "Expected module %A but got %A" expectedModule info.Module))
+    }
+
+/// Match atomic operation by full name pattern (SemanticKind.Intrinsic)
+let pIntrinsicNamed (fullName: string) : PSGParser<IntrinsicInfo> =
+    parser {
+        let! info = pIntrinsic
+        if info.FullName = fullName then
+            return info
+        else
+            return! fail (Message (sprintf "Expected %s but got %s" fullName info.FullName))
+    }
+
+/// Classify atomic operation by category for emission dispatch
+type EmissionCategory =
+    | BinaryArith of mlirOp: string
+    | UnaryArith of mlirOp: string
+    | Comparison of mlirOp: string
+    | MemoryOp of op: string
+    | StringOp of op: string
+    // NOTE: ConsoleOp removed - Console is NOT an atomic operation, it's Layer 3 user code
+    // in Fidelity.Platform that uses Sys.* atomic operations. See clef-lang-spec/spec/platform-bindings.md
+    | PlatformOp of op: string
+    | DateTimeOp of op: string
+    | TimeSpanOp of op: string
+    | OtherAtomicOp
+
+let classifyAtomicOp (info: IntrinsicInfo) : EmissionCategory =
+    match info.Module, info.Operation with
+    // Arithmetic operators — type-agnostic; the PATTERN pulls operand types and selects int/float Element
+    | IntrinsicModule.Operators, "op_Addition" -> BinaryArith "add"
+    | IntrinsicModule.Operators, "op_Subtraction" -> BinaryArith "sub"
+    | IntrinsicModule.Operators, "op_Multiply" -> BinaryArith "mul"
+    | IntrinsicModule.Operators, "op_Division" -> BinaryArith "div"
+    | IntrinsicModule.Operators, "op_Modulus" -> BinaryArith "rem"
+    // Comparison operators — type-agnostic; pattern selects cmpi vs cmpf based on operand type
+    | IntrinsicModule.Operators, "op_LessThan" -> Comparison "lt"
+    | IntrinsicModule.Operators, "op_LessThanOrEqual" -> Comparison "le"
+    | IntrinsicModule.Operators, "op_GreaterThan" -> Comparison "gt"
+    | IntrinsicModule.Operators, "op_GreaterThanOrEqual" -> Comparison "ge"
+    | IntrinsicModule.Operators, "op_Equality" -> Comparison "eq"
+    | IntrinsicModule.Operators, "op_Inequality" -> Comparison "ne"
+    // Boolean logical operators (always integer/bitwise)
+    | IntrinsicModule.Operators, "op_BooleanAnd" -> BinaryArith "andi"
+    | IntrinsicModule.Operators, "op_BooleanOr" -> BinaryArith "ori"
+    | IntrinsicModule.Operators, "not" -> UnaryArith "xori"
+    | IntrinsicModule.Operators, "op_LogicalNot" -> UnaryArith "complement"  // ~~~ bitwise NOT
+    // Unary minus and plus (design (c): `κ<'u> -> κ<'u>`); the pattern selects subi-from-zero
+    // or negf by operand type, and plus forwards the operand (sequence CS-9).
+    | IntrinsicModule.Operators, "op_UnaryNegation" -> UnaryArith "neg"
+    | IntrinsicModule.Operators, "op_UnaryPlus" -> UnaryArith "plus"
+    // Bitwise operators — type-preserving (int only, no float analog)
+    | IntrinsicModule.Operators, "op_BitwiseAnd"  -> BinaryArith "andi"
+    | IntrinsicModule.Operators, "op_BitwiseOr"   -> BinaryArith "ori"
+    | IntrinsicModule.Operators, "op_ExclusiveOr" -> BinaryArith "xori"
+    // Shift operators — integer only; signedness dispatched via NTUKind in pBinaryArithIntrinsic
+    | IntrinsicModule.Operators, "op_LeftShift"   -> BinaryArith "shli"
+    | IntrinsicModule.Operators, "op_RightShift"  -> BinaryArith "shr"   // resolved to shrsi/shrui per NTUKind
+    // String
+    | IntrinsicModule.String, op -> StringOp op
+    // NOTE: Console is NOT an atomic operation - see clef-lang-spec/spec/platform-bindings.md
+    // Platform (Sys.* atomic operations from CCS)
+    | IntrinsicModule.Sys, op -> PlatformOp op
+    // DateTime operations
+    | IntrinsicModule.DateTime, op -> DateTimeOp op
+    // TimeSpan operations
+    | IntrinsicModule.TimeSpan, op -> TimeSpanOp op
+    | _ -> OtherAtomicOp
+
+/// Match and classify atomic operation (SemanticKind.Intrinsic)
+let pClassifiedAtomicOp : PSGParser<IntrinsicInfo * EmissionCategory> =
+    pIntrinsic |>> fun info -> (info, classifyAtomicOp info)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LAZY VALUE PARSERS (PRD-14, January 2026)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Match a LazyExpr node - lazy value construction
+/// Returns: (bodyId, captures)
+let pLazyExpr : PSGParser<NodeId * CaptureInfo list> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.LazyExpr (bodyId, captures) ->
+            return (bodyId, captures)
+        | _ ->
+            return! fail (Message "Expected LazyExpr node")
+    }
+
+/// Match a LazyForce node - force lazy evaluation
+/// Returns: lazyValueNodeId
+let pLazyForce : PSGParser<NodeId> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.LazyForce lazyId ->
+            return lazyId
+        | _ ->
+            return! fail (Message "Expected LazyForce node")
+    }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SEQUENCE PARSERS (PRD-15, January 2026)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Match a SeqExpr node - sequence expression construction
+/// Returns: (bodyId, captures)
+let pSeqExpr : PSGParser<NodeId * CaptureInfo list> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.SeqExpr (bodyId, captures) ->
+            return (bodyId, captures)
+        | _ ->
+            return! fail (Message "Expected SeqExpr node")
+    }
+
+/// Match a ForEach node - for-in loop over sequence
+/// Returns: (var, collection, body)
+let pForEach : PSGParser<string * NodeId * NodeId> =
+    parser {
+        let! node = getCurrentNode
+        match node.Kind with
+        | SemanticKind.ForEach (var, _, collection, body) ->
+            return (var, collection, body)
+        | _ ->
+            return! fail (Message "Expected ForEach node")
+    }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RUNNER (create Reader with empty string and custom state)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Run a parser on a node with full context (UNIFIED STATE)
+///
+/// CRITICAL: Uses Reader.ofString with EMPTY STRING.
+/// PSG parsers don't consume characters - they navigate graph structure.
+///
+/// State unification (January 2026): Coeffects and Accumulator flow through
+/// PSGParserState for parser composition and settled-value recall.
+let runParser (parser: PSGParser<'T>) (graph: Revision) (node: SemanticNode) (zipper: PSGZipper) (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (accumulator: Alex.Traversal.TransferTypes.MLIRAccumulator) =
+    let state = {
+        Graph = graph
+        Zipper = zipper
+        Current = node
+        Coeffects = coeffects
+        Accumulator = accumulator
+        Platform = coeffects.Platform  // Backward compatibility - use Coeffects.Platform in new code
+        ExecutionTrace = None  // No tracing by default
+        CurrentDepth = 0
+    }
+    let reader = Reader.ofString "" state  // Empty string - we don't parse characters
+    parser reader
+
+/// Run parser with execution trace enabled (for diagnostics)
+let runParserWithTrace (parser: PSGParser<'T>) (graph: Revision) (node: SemanticNode) (zipper: PSGZipper) (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (accumulator: Alex.Traversal.TransferTypes.MLIRAccumulator) (traceCollector: Alex.Traversal.TransferTypes.TraceCollector) =
+    let state = {
+        Graph = graph
+        Zipper = zipper
+        Current = node
+        Coeffects = coeffects
+        Accumulator = accumulator
+        Platform = coeffects.Platform  // Backward compatibility
+        ExecutionTrace = Some traceCollector
+        CurrentDepth = 0
+    }
+    let reader = Reader.ofString "" state
+    parser reader
+
+/// Try to match a pattern, returning option
+/// Full context flows through unified state
+let tryMatch (parser: PSGParser<'T>) (graph: Revision) (node: SemanticNode) (zipper: PSGZipper) (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (accumulator: Alex.Traversal.TransferTypes.MLIRAccumulator) =
+    match runParser parser graph node zipper coeffects accumulator with
+    | Ok success -> Some (success.Parsed, zipper)
+    | Error _ -> None
+
+/// Extract human-readable messages from XParsec error tree
+let private extractMessages (errors: XParsec.ErrorType<char, PSGParserState>) : string list =
+    let rec collect acc = function
+        | XParsec.ErrorType.Message m -> m :: acc
+        | XParsec.ErrorType.Nested (parent, children) ->
+            let acc = collect acc parent
+            children |> List.fold (fun a child -> collect a child.Errors) acc
+        | XParsec.ErrorType.EndOfInput -> "end of input" :: acc
+        | other -> (sprintf "%A" other) :: acc
+    collect [] errors |> List.rev
+
+/// Try to match a pattern with diagnostic error capture
+/// Returns Result with detailed error information on failure
+/// Extracts Message strings from the XParsec error tree for readable diagnostics
+let tryMatchWithDiagnostics (parser: PSGParser<'T>) (graph: Revision) (node: SemanticNode) (zipper: PSGZipper) (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (accumulator: Alex.Traversal.TransferTypes.MLIRAccumulator) =
+    match runParser parser graph node zipper coeffects accumulator with
+    | Ok success -> Result.Ok (success.Parsed, zipper)
+    | Error err ->
+        let messages = extractMessages err.Errors
+        let errorMsg =
+            match messages with
+            | [] -> sprintf "Pattern failed (no message) at position %d" err.Position.Index
+            | [single] -> single
+            | multiple -> multiple |> String.concat " → "
+        Result.Error errorMsg
+
+/// Create initial parser state from zipper
+/// Coeffects and Accumulator must be passed explicitly (not part of zipper)
+let stateFromZipper (zipper: PSGZipper) (node: SemanticNode) (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (accumulator: Alex.Traversal.TransferTypes.MLIRAccumulator) : PSGParserState =
+    {
+        Graph = zipper.Graph
+        Zipper = zipper
+        Current = node
+        Coeffects = coeffects
+        Accumulator = accumulator
+        Platform = coeffects.Platform  // Backward compatibility
+        ExecutionTrace = None
+        CurrentDepth = 0
+    }
+
+/// Emit a trace entry (if tracing is enabled)
+/// Use this from Elements and Patterns to record execution
+let emitTrace (componentName: string) (parameters: string) : PSGParser<unit> =
+    fun reader ->
+        let state = reader.State
+        match state.ExecutionTrace with
+        | Some collector ->
+            Alex.Traversal.TransferTypes.TraceCollector.add
+                state.CurrentDepth
+                componentName
+                (Some state.Current.Id)
+                parameters
+                collector
+        | None -> ()
+        preturn () reader
+
+/// Guard combinator - ensure a condition is true, or fail with message
+/// This is the DECLARATIVE alternative to imperative if statements
+let ensure (condition: bool) (errorMsg: string) : PSGParser<unit> =
+    if condition then
+        preturn ()
+    else
+        fail (Message errorMsg)
+
+/// Compose an exact source-published numeric adaptation. None is the source's
+/// equality judgment; it cannot authorize discovery of a different alias meet.
+let pPublishedAdapt (consumer: NodeId) (operand: NodeId) (adaptation: Meet option) (value: Val) : PSGParser<MLIROp list * Val> =
+    parser {
+        let! state = getUserState
+        let settled = Alex.Traversal.TransferTypes.meetFor state.Graph consumer operand |> Option.map fst
+        do! ensure (settled = adaptation) "Published adaptation disagrees with its exact source numeric meet."
+        match adaptation with
+        | None -> return [], value
+        | Some meet ->
+            do! ensure (meet.Consumer = consumer && meet.Operand = operand) "Published adaptation names different source participants."
+            let fromType =
+                match meet.Adapt with
+                | MeetKind.ExtendFloat | MeetKind.TruncateFloat -> floatType meet.From
+                | _ -> TInt(IntWidth meet.From)
+            do! ensure (value.Type = fromType) "Published adaptation disagrees with the witnessed operand type."
+            let! operations, result, resultType = pAdapt consumer operand value.SSA value.Type
+            return operations, { SSA = result; Type = resultType }
+    }
+
+/// Read a source-settled meet and require its result to match the separately
+/// published destination carrier. Missing adaptation cannot become a cast
+/// chosen by comparing physical widths or inspecting the operand's range.
+let pSettledAdaptTo (consumer: NodeId) (operand: NodeId) (expected: MLIRType) (value: Val) : PSGParser<MLIROp list * Val> =
+    parser {
+        let! state = getUserState
+        let adaptation = Alex.Traversal.TransferTypes.meetFor state.Graph consumer operand |> Option.map fst
+        let! operations, adapted = pPublishedAdapt consumer operand adaptation value
+        do! ensure (adapted.Type = expected)
+                (sprintf "Source numeric meet for consumer %d operand %d does not establish destination carrier %A (got %A)"
+                    (NodeId.value consumer) (NodeId.value operand) expected adapted.Type)
+        return operations, adapted
+    }
+
+/// Run a parser using zipper
+/// Coeffects and Accumulator must be passed explicitly (not part of zipper)
+let runParserWithZipper (parser: PSGParser<'T>) (zipper: PSGZipper) (node: SemanticNode) (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (accumulator: Alex.Traversal.TransferTypes.MLIRAccumulator) =
+    let state = stateFromZipper zipper node coeffects accumulator
+    let reader = Reader.ofString "" state
+    parser reader
+
+/// Try to match with diagnostic trace enabled
+/// Returns Result with trace attached on failure
+let tryMatchWithTrace (parser: PSGParser<'T>) (graph: Revision) (node: SemanticNode) (zipper: PSGZipper) (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (accumulator: Alex.Traversal.TransferTypes.MLIRAccumulator) =
+    let traceCollector = Alex.Traversal.TransferTypes.TraceCollector.create()
+    match runParserWithTrace parser graph node zipper coeffects accumulator traceCollector with
+    | Ok success -> Result.Ok (success.Parsed, zipper, Alex.Traversal.TransferTypes.TraceCollector.toList traceCollector)
+    | Error err ->
+        let trace = Alex.Traversal.TransferTypes.TraceCollector.toList traceCollector
+        Result.Error (err, trace)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHILD REGION COMPOSITION
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The registered witness fixed point supplies region witnessing at the
+// Traversal/Witness boundary. Patterns compose the supplied operations into
+// structured regions; they do not infer source evaluation or continuation order.
+// Baker owns those semantic contracts.
+//
+// ControlFlowWitness and MatchWitness currently use visitAllNodes and mutable
+// scope collection. That existing driver is a separate architectural migration;
+// this parser module must not add a recursive subtree-emission path.
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PSG STRUCTURAL TRAVERSAL UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Traverse Sequential structure to find the last value-producing child.
+/// Sequential nodes are structural scaffolding that organize the PSG tree.
+/// They are NOT witnesses and do not bind results.
+/// This pattern extracts the actual value-producing node from Sequential nesting.
+let rec findLastValueNode nodeId graph =
+    match Revision.tryNode nodeId graph with
+    | Some node ->
+        match node.Kind with
+        | SemanticKind.Sequential childIds ->
+            // Sequential is structural - recursively find last value child
+            match List.tryLast childIds with
+            | Some lastChild -> findLastValueNode lastChild graph
+            | None -> nodeId  // Empty sequential - return self (caller will handle TRVoid)
+        | SemanticKind.TypeAnnotation (wrappedId, _) ->
+            // TypeAnnotation is transparent - unwrap to the actual value node
+            findLastValueNode wrappedId graph
+        | _ -> nodeId  // Non-transparent node is the actual value node
+    | None -> failwithf "findLastValueNode: PSG settlement did not settle the value node %d: it is not in the graph" (NodeId.value nodeId)
