@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Tests of Alex against revisions assembled from contract values. No compiler is
+       referenced or needed: a test states the facts a Pattern is given and examines
+       what the Pattern spells.
+
+       Test files are independent of one another. To build and run one file alone:
+         dotnet test -p:OnlyTests=IndexSwitchTests
+       A file that uses a shared fixture names it:
+         dotnet test -p:OnlyTests=IndexPatternTests -p:WithFixtures=ArrayRead
+       Both properties accept a wildcard. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <AlexBoundaryScope>tests</AlexBoundaryScope>
+    <AlexBoundaryAlsoPermitted>$(MSBuildThisFileDirectory)../../src/Alex/Alex.fsproj</AlexBoundaryAlsoPermitted>
+  </PropertyGroup>
+  <Import Project="../../build/Boundary.targets" />
+
+  <ItemGroup>
+    <Compile Include="Build.fs" />
+    <Compile Include="Tools.fs" />
+    <Compile Include="Fixtures/*.fs" Condition="'$(OnlyTests)' == ''" />
+    <Compile Include="Fixtures/$(WithFixtures).fs" Condition="'$(OnlyTests)' != '' and '$(WithFixtures)' != ''" />
+    <Compile Include="Tests/*.fs" Condition="'$(OnlyTests)' == ''" />
+    <Compile Include="Tests/$(OnlyTests).fs" Condition="'$(OnlyTests)' != ''" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" Version="10.1.401" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
+    <ProjectReference Include="../../src/Alex/Alex.fsproj" />
+  </ItemGroup>
+
+</Project>

@@ -369,7 +369,8 @@ let private pMemoryBuffer source element : PSGParser<Val> = parser {
     do! ensure (matchesElement ty) "Memory operand disagrees with its published buffer carrier."
     match MLIRAccumulator.recallSSAType ssa state.Accumulator with
     | Some physical when matchesElement physical -> return { SSA = ssa; Type = physical }
-    | _ -> return! fail (Message "Memory operand disagrees with its published buffer carrier at the physical SSA.")
+    | Some _ -> return! fail (Message "Memory operand disagrees with its published buffer carrier at the physical SSA.")
+    | None -> return! fail (Message (sprintf "Memory operand: memref SSA %A has no registered type." ssa))
 }
 
 let private pMemoryExtent site source element resultCarrier unsigned : PSGParser<MLIROp list * TransferResult> = parser {

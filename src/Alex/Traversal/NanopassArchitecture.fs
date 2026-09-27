@@ -197,9 +197,14 @@ let rec visitAllNodes
         // DU/record) cannot place a module-scope decl itself, so it queues on the accumulator;
         // draining centrally here routes them to RootScopeContext for every construction path
         // (DU, Option, List, Map, Set, Result) without each witness having to remember.
+        // The queue holds what this occurrence queued. An occurrence that is refused,
+        // by its witness or by the check of its result, places no declaration, and its
+        // queue is emptied so that no later occurrence places it.
+        let queued = MLIRAccumulator.drainPendingStaticGlobals visitedCtx.Accumulator
         let pendingStaticGlobals =
-            if Result.isOk numericAdmission then MLIRAccumulator.drainPendingStaticGlobals visitedCtx.Accumulator
-            else []
+            match output.Result with
+            | TRError _ -> []
+            | _ -> queued
         if not (List.isEmpty pendingStaticGlobals) then
             EmissionCorrespondence.record visitedCtx pendingStaticGlobals
             let updatedRootScope = ScopeContext.addOps pendingStaticGlobals !visitedCtx.RootScopeContext

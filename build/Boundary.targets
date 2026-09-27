@@ -1,12 +1,13 @@
 <Project>
   <!--
-    The boundary of Alex, enforced before every compile.
+    The boundary of Alex, enforced before every compile of the library and of its tests.
 
     ALEX001  A source names the compiler service. Alex receives a published PSG revision
              and nothing else; a fact it lacks is missing from the revision.
-    ALEX002  The project references something other than the published contract and
-             the library the contract references.
-    ALEX003  A source rewrites emitted MLIR, starts a process, or loads a plugin.
+    ALEX002  The project references something other than the published contract, the
+             library the contract references, and, for the tests, Alex itself.
+    ALEX003  A source of the library rewrites emitted MLIR, starts a process, or loads a
+             plugin. The tests start the MLIR verifier and are exempt from the process rule.
   -->
   <UsingTask TaskName="ValidateAlexBoundary"
              TaskFactory="RoslynCodeTaskFactory"
@@ -14,22 +15,24 @@
     <ParameterGroup>
       <Sources ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
       <ProjectReferences ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="false" />
-      <ContractProject ParameterType="System.String" Required="true" />
-      <ContractLibrary ParameterType="System.String" Required="true" />
+      <Permitted ParameterType="System.String" Required="true" />
+      <Scope ParameterType="System.String" Required="true" />
     </ParameterGroup>
     <Task>
       <Using Namespace="System" />
       <Using Namespace="System.IO" />
+      <Using Namespace="System.Linq" />
       <Using Namespace="System.Text.RegularExpressions" />
       <Code Type="Method" Language="cs"><![CDATA[
       public override bool Execute() {
         var compilerService = new Regex(@"\bClef\s*\.\s*Compiler\b|\bFSharp\s*\.\s*Compiler\b");
         var rewriteMarkers = new[] {
           "MLIRNanopass", "declarationCollectionPass", "relocateDefinition",
-          "--pass-pipeline", "System.Diagnostics.Process", "ProcessStartInfo",
           "--load-pass-plugin", "--load-dialect-plugin", "--load-plugin",
           "FIDELITY_MLIR_PLUGINS", "mlir-plugins"
         };
+        var processMarkers = new[] { "--pass-pipeline", "System.Diagnostics.Process", "ProcessStartInfo" };
+        var markers = Scope == "library" ? rewriteMarkers.Concat(processMarkers).ToArray() : rewriteMarkers;
         foreach (var item in Sources) {
           var path = Path.GetFullPath(item.ItemSpec);
           var lines = File.ReadAllLines(path);
@@ -38,18 +41,17 @@
             if (compilerService.IsMatch(line))
               Log.LogError(null, "ALEX001", null, path, index + 1, 0, 0, 0,
                 "Alex reads a published PSG revision only. This line names the compiler service.");
-            foreach (var marker in rewriteMarkers)
+            foreach (var marker in markers)
               if (line.IndexOf(marker, StringComparison.Ordinal) >= 0)
                 Log.LogError(null, "ALEX003", null, path, index + 1, 0, 0, 0,
                   "Prohibited rewrite, process or plugin entry '{0}'. Alex witnesses settled facts and emits once.", marker);
           }
         }
-        var contract = Path.GetFullPath(ContractProject);
-        var library = Path.GetFullPath(ContractLibrary);
+        var permitted = Permitted.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries).Select(Path.GetFullPath).ToArray();
         if (ProjectReferences != null)
           foreach (var reference in ProjectReferences) {
             var path = Path.GetFullPath(reference.ItemSpec);
-            if (!string.Equals(path, contract, StringComparison.Ordinal) && !string.Equals(path, library, StringComparison.Ordinal))
+            if (!permitted.Contains(path, StringComparer.Ordinal))
               Log.LogError(null, "ALEX002", null, path, 0, 0, 0, 0,
                 "Alex references the published PSG contract and the library the contract references. No other project is permitted.");
           }
@@ -58,10 +60,14 @@
       ]]></Code>
     </Task>
   </UsingTask>
+  <PropertyGroup>
+    <AlexBoundaryScope Condition="'$(AlexBoundaryScope)' == ''">library</AlexBoundaryScope>
+    <AlexBoundaryPermitted>$(PsgContractProject);$(PsgContractLibrary);$(AlexBoundaryAlsoPermitted)</AlexBoundaryPermitted>
+  </PropertyGroup>
   <Target Name="CheckAlexBoundary" BeforeTargets="CoreCompile">
     <ValidateAlexBoundary Sources="@(Compile)"
                           ProjectReferences="@(ProjectReference)"
-                          ContractProject="$(PsgContractProject)"
-                          ContractLibrary="$(PsgContractLibrary)" />
+                          Permitted="$(AlexBoundaryPermitted)"
+                          Scope="$(AlexBoundaryScope)" />
   </Target>
 </Project>

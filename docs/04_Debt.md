@@ -13,6 +13,8 @@ These are repaired in the clef repository. Alex cannot repair them and must not 
 | Node identity | `NodeId.fresh`, a counter global to the process | A derivation from source. See `03_Node_Identity.md`. |
 | Free type variables | `TypeIdentities.ofType` publishes an unresolved variable as `Variable` | Binders of the enclosing declaration are published, and a variable with no binder is refused. |
 | Process-wide caches | `ConditionalWeakTable` keyed by graph, in 14 or more readers | Removed with the readers they serve. |
+| One fact in two tables | The callable projection republishes `CallableCarriers`, `CallableJoins`, `CallableFlows` and `MutableCallableStorage` of the codata unchanged | The contract holds each fact once. Until then the contract rule of agreement refuses a revision whose two copies differ. |
+| Witness units | The revision names no unit of witnessing. Alex chooses its starts and their order in `Traversal/NanopassArchitecture.fs`, `runAllNanopasses` | Decided by the owner. `05_Tests.md` holds the measurement of the edge set. |
 
 ## Owed by Alex
 
@@ -28,7 +30,7 @@ These are repaired in the clef repository. Alex cannot repair them and must not 
 | Value names from the counter | `Traversal/Values.fs`, 229 uses of `NodeId.value` | Names derive from the local index of a stable identity. |
 | Target forms in common Patterns | Record, function and conditional Patterns branch on the target | Target forms belong to the backend. |
 | Serialization beyond spelling | `Dialects/Core/Serialize.fs` | The assessment lists the cases in its section 5.8. |
-| Tests | None in this repository | Tests that build a revision directly from contract values. The existing tests are in Composer, because they build their source through the compiler service. |
+| Emission after a refused branch | `Witnesses/ControlFlowWitness.fs` and `Witnesses/MatchWitness.fs`, `witnessBranchScope` | A branch that is refused records an error and returns no operation, and the witness then emits the conditional. The helper returns the refusal, and the witness emits nothing. |
 
 ## Owed by Composer
 
@@ -47,6 +49,10 @@ These are repaired in the clef repository. Alex cannot repair them and must not 
 | A missing publication classified as "not a sequence" | 2026-09-27 | By construction. A revision always carries its emission. |
 | A kernel ingress failure dropped | 2026-09-27 | Reported as `CCS8403` at the declaration, in the compiler service. |
 | An output with no pin dropped from the hardware plan | 2026-09-27 | Refused, in the compiler service. |
+| No tests in this repository | 2026-09-27 | `tests/Alex.Tests` holds the tests of Patterns, witnesses and the traversal, given revisions assembled from contract values. See `05_Tests.md`. |
+| A revision was not examined before witnessing | 2026-09-27 | `Alex.Generation.generate` applies `Fidelity.PSG.Integrity.check` and refuses a revision that is not well formed. |
+| A declaration queued by a refused occurrence was placed by the next occurrence | 2026-09-27 | The queue of a refused occurrence is emptied. `Traversal/NanopassArchitecture.fs`. |
+| An operand with no registered type reported as a disagreement | 2026-09-27 | `Patterns/MemoryPatterns.fs`, `pMemoryBuffer` names the operand and the defect. |
 
 ## Not debt
 

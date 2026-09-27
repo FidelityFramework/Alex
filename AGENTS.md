@@ -30,3 +30,11 @@ These are owner requirements. They apply to every change, by a person or an agen
 - Do not add a package reference where a Fidelity Framework library covers the need.
 - The terms Elaboration and Saturation name phases of the graph's construction in Baker. Do not use them for anything in Alex.
 - Record exact evidence and exact failures. A focused check that passes does not establish that the compiler accepts a program.
+
+## Tests
+
+- A test in this repository states a revision from values of the contract. It references no compiler, and the boundary gate applies to test files.
+- A fixture states the rows the compiler service publishes for it. Where the compiler service refuses the fixture, the fixture states the rows the Pattern under test reads and says so in its comment.
+- A test of a refusal requires the refusal text, no emitted operation and no bound operand. An assertion that cannot fail is removed.
+- A test whose input comes from Clef source text, or which enters a Composer backend, resides in the Composer repository.
+- A test that fails because of a defect in Alex stays as written. The defect is repaired in `src/Alex`, or recorded in `docs/04_Debt.md` with the evidence.

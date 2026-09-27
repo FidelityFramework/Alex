@@ -21,7 +21,7 @@ Alex does not reference the Clef Compiler Service. The build refuses a source li
 Alex.Generation.generate : Request -> Result<Witnessed, Refusal>
 ```
 
-A `Request` holds the revision, the selected target, and the libraries the project declares. A `Witnessed` value holds the operations, their portable text, the correspondence records, the writable storage inventory, the transcription of the proof obligations, and the link requirements. A `Refusal` holds the reason and the operations witnessed before the refusal.
+A `Request` holds the revision, the selected target, and the libraries the project declares. The entry examines the revision with the structural rules of the contract (`Fidelity.PSG.Integrity.check`) and refuses one that is not well formed before any witness runs. A `Witnessed` value holds the operations, their portable text, the correspondence records, the writable storage inventory, the transcription of the proof obligations, and the link requirements. A `Refusal` holds the reason and the operations witnessed before the refusal.
 
 ## Layout
 
@@ -36,8 +36,9 @@ A `Request` holds the revision, the selected target, and the libraries the proje
 | `src/Alex/Correspondence.fs` | Scope, occurrence and emitted-definition records |
 | `src/Alex/Generation.fs` | The public entry |
 | `build/Boundary.targets` | The boundary, checked before every compile |
-| `docs` | The boundary, the contract, the open decisions and the debt register |
-| `tools` | The inventory script that measured the dependency on the compiler service |
+| `tests/Alex.Tests` | Tests of Patterns, witnesses and the traversal, given revisions assembled from contract values |
+| `docs` | The boundary, the contract, the open decisions, the debt register and the account of the tests |
+| `tools` | `CcsSurfaceInventory.fsx` measured the dependency on the compiler service. `PlanMeasure.fsx` measures what the edge set of a revision says about units of work. |
 
 ## Build
 
@@ -46,6 +47,12 @@ dotnet build src/Alex/Alex.fsproj
 ```
 
 The contract is expected at `../Fidelity.PSG/src/Fidelity.PSG/Fidelity.PSG.fsproj`. A different location is set in `Directory.Build.local.props` through the property `PsgContractProject`.
+
+```bash
+dotnet test tests/Alex.Tests/Alex.Tests.fsproj
+```
+
+`docs/05_Tests.md` states what a test is given and how one file is run alone.
 
 ## State
 

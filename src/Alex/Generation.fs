@@ -123,10 +123,11 @@ let private witness (request: Request) : Result<Witnessed, Refusal> =
                       Constraints = constraints
                       Links = Set.union revision.Emission.Boundary.Links request.LinkedLibraries }
 
-/// Witness one revision. A core's leg reads the declared Register and Pointer widths at
-/// every boundary and layout site. A revision that declares neither cannot start it and
-/// is refused here, before any witness runs, with the producer's own diagnostic.
-/// The fabric leg reads neither.
+/// Witness one revision. The revision is examined against the structural rules of its
+/// contract first, and a revision that breaks one is refused before any witness runs.
+/// A core's leg reads the declared Register and Pointer widths at every boundary and
+/// layout site. A revision that declares neither cannot start it and is refused with
+/// the producer's own diagnostic. The fabric leg reads neither.
 let generate (request: Request) : Result<Witnessed, Refusal> =
     let undeclared =
         match request.Target with
@@ -135,7 +136,9 @@ let generate (request: Request) : Result<Witnessed, Refusal> =
             match request.Revision.Platform.Register, request.Revision.Platform.Pointer with
             | Result.Error message, _ | _, Result.Error message -> Some message
             | Result.Ok _, Result.Ok _ -> None
-    match undeclared with
-    | Some message ->
-        Result.Error { Reason = message; Witnessed = []; ModuleName = None; PointerBits = request.Revision.Platform.Pointer }
-    | None -> witness request
+    let refuse reason =
+        Result.Error { Reason = reason; Witnessed = []; ModuleName = None; PointerBits = request.Revision.Platform.Pointer }
+    match Integrity.check request.Revision, undeclared with
+    | (_ :: _ as violations), _ -> refuse (Integrity.describe violations)
+    | [], Some message -> refuse message
+    | [], None -> witness request
