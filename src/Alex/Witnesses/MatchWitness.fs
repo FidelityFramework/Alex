@@ -25,24 +25,25 @@ open Alex.Patterns.ControlFlowPatterns
 // BRANCH REGION COLLECTION THROUGH THE SCOPE TRAVERSAL DRIVER
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Witness a branch scope and collect operations.
-/// Creates child scope, visits sub-tree, returns collected ops.
-let private visitChild (childId: NodeId) (ctx: WitnessContext) combinator =
+/// Visit a declared child of the match from its actual occurrence. A child the
+/// zipper cannot reach is an error, and the witness emits nothing for the match.
+let private visitChild (childId: NodeId) (ctx: WitnessContext) combinator : Result<unit, Diagnostic> =
     let position =
         ctx.Zipper.Focus.Children |> List.tryFindIndex ((=) childId)
         |> Option.bind (fun index -> down index ctx.Zipper)
     match position with
     | Some childZipper ->
         visitAllNodes combinator { ctx with Zipper = childZipper } childZipper.Focus ctx.TraversalVisited
+        Result.Ok ()
     | None ->
-        Diagnostic.error (Some ctx.Zipper.Focus.Id) (Some "CaseElimination") (Some "structural child")
-            $"Cannot descend to declared match child {NodeId.value childId}"
-        |> fun diagnostic -> MLIRAccumulator.addError diagnostic ctx.Accumulator
+        Result.Error (Diagnostic.error (Some ctx.Zipper.Focus.Id) (Some "CaseElimination") (Some "structural child")
+                        $"Cannot descend to declared match child {NodeId.value childId}")
 
-let private witnessBranchScope (rootId: NodeId) (ctx: WitnessContext) (combinator: WitnessContext -> SemanticNode -> WitnessOutput) : MLIROp list =
+/// Witness one arm body in a child scope and return its operations.
+let private witnessBranchScope (rootId: NodeId) (ctx: WitnessContext) (combinator: WitnessContext -> SemanticNode -> WitnessOutput) : Result<MLIROp list, Diagnostic> =
     let branchScope = ref (ScopeContext.createChild !ctx.ScopeContext BlockLevel)
     visitChild rootId { ctx with ScopeContext = branchScope } combinator
-    ScopeContext.getOps !branchScope
+    |> Result.map (fun () -> ScopeContext.getOps !branchScope)
 
 /// A terminal refutable arm is selected only after Baker's requirement in this
 /// exact frontier occurrence. A declaration's Parent field cannot establish it.
@@ -83,7 +84,9 @@ let private witnessMatchWith (getCombinator: unit -> (WitnessContext -> Semantic
         | Result.Ok true ->
 
         // Step 1: Visit scrutinee in CURRENT scope (like ControlFlowWitness condition)
-        visitChild scrutineeId ctx combinator
+        match visitChild scrutineeId ctx combinator with
+        | Result.Error failure -> WitnessOutput.errorDiag failure
+        | Result.Ok () ->
 
         // Recall scrutinee result
         match MLIRAccumulator.recallNode scrutineeId ctx.Accumulator with
@@ -93,11 +96,15 @@ let private witnessMatchWith (getCombinator: unit -> (WitnessContext -> Semantic
 
             // Step 2: Pull the selected bodies through their actual occurrences.
             // Baker owns extraction and guard order inside those bodies.
-            let armResults =
-                arms |> List.map (fun arm ->
-                    let armOps = witnessBranchScope arm.Body ctx combinator
-                    let armValueNodeId = findLastValueNode arm.Body ctx.Graph
-                    (armOps, armValueNodeId, arm))
+            let armRegions =
+                arms
+                |> List.map (fun arm ->
+                    witnessBranchScope arm.Body ctx combinator
+                    |> Result.map (fun armOps -> armOps, arm.Body, arm))
+                |> collectRegions
+            match armRegions with
+            | Result.Error failure -> WitnessOutput.errorDiag failure
+            | Result.Ok armResults ->
 
             // Step 3: Determine if expression-valued. A result type CCS left as an
             // unresolved type variable is not a unit result; it is reported.

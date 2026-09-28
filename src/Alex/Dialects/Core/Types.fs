@@ -403,7 +403,8 @@ and SCFOp =
     | If of SSA * MLIROp list * MLIROp list option * (SSA * MLIRType) option  // cond, thenOps, elseOps, result (None = void)
     | IndexSwitch of selector: SSA * cases: (int64 * MLIROp list) list * defaultBody: MLIROp list * results: (SSA * MLIRType) list
     | While of MLIROp list * MLIROp list                      // condOps, bodyOps
-    | For of SSA * SSA * SSA * MLIROp list                    // lower, upper, step, bodyOps
+    /// `induction` is the value the operation defines for its body.
+    | For of induction: SSA * lower: SSA * upper: SSA * step: SSA * body: MLIROp list
     | Yield of (SSA * MLIRType) list                          // values with types
     | Condition of SSA * SSA list                             // cond, args
 

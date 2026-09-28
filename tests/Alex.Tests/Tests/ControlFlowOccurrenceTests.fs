@@ -108,7 +108,7 @@ let ``conditional guard descends through its actual occurrence and recalls the e
     Assert.Contains("scf.if %arg0", verified)
 
 [<Fact>]
-let ``control flow rejects a branch missing its declared occurrence even when an operand was recalled`` () =
+let ``control flow returns an error and emits nothing for a branch that is not a declared child`` () =
     let guard = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
     let yes = node 1 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
     let no = node 2 (SemanticKind.Literal(NativeLiteral.Bool false)) boolType [] None
@@ -141,5 +141,15 @@ let ``control flow rejects a branch missing its declared occurrence even when an
         | SemanticKind.Literal _ -> Alex.Witnesses.LiteralWitness.nanopass.Witness ctx node
         | _ -> Alex.Witnesses.StructuralWitness.nanopass.Witness ctx node
     visitAllNodes witness ctx position.Focus visited
-    Assert.NotEmpty accumulator.Errors
+    // The error names the region. The then branch has a recalled operand, and the
+    // conditional is still not composed from it.
+    let reported = Assert.Single accumulator.Errors
+    Assert.Equal(Some yes.Id, reported.NodeId)
+    Assert.Equal("Control-flow region 1 is not a declared child of its actual occurrence.", reported.Message)
     Assert.DoesNotContain(yes.Id, visited.Value)
+    // No operation of the conditional is emitted and the conditional binds no operand.
+    let conditionals =
+        ScopeContext.getOps scope.Value
+        |> List.filter (function MLIROp.SCFOp _ -> true | _ -> false)
+    Assert.Empty conditionals
+    Assert.Equal(None, MLIRAccumulator.recallNode choice.Id accumulator)

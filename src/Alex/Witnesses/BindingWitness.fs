@@ -98,10 +98,9 @@ let private witnessBinding (ctx: WitnessContext) (node: SemanticNode) : WitnessO
                     // Module-level value: initialize its program-lifetime slot (memref.global).
                     // References reload from the slot in whatever function they occur.
                     elif ModuleValues.isSlotBinding ctx.Coeffects.TargetPlatform ctx.Graph node then
-                        // The initializer may be a block (`let a = ... in { ... }`): its value is
-                        // the last value node of the block, not the block node itself.
-                        let initValueId = findLastValueNode valueId ctx.Graph
-                        match MLIRAccumulator.recallNode initValueId ctx.Accumulator with
+                        // The initializer is recalled at its declared occurrence. A block is
+                        // bound to the value it forwards by its own witness.
+                        match MLIRAccumulator.recallNode valueId ctx.Accumulator with
                         | Some (initialSSA, initialTy) ->
                             let meetOps, valueSSA, _ = adaptOperand ctx.Coeffects ctx.Graph node.Id valueId initialSSA initialTy
                             // the slot's element type at the binding's range width on fabric

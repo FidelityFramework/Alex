@@ -268,9 +268,6 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                 WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Lambda") (Some "return type")
                     $"PSG settlement did not keep the body {NodeId.value bodyId} of lambda {NodeId.value node.Id} resident in the graph; its return type has no source"
             | Some _ ->
-            if System.Environment.GetEnvironmentVariable("COMPOSER_TRACE_TRAVERSAL") = "1" then
-                printfn "[LambdaWitness] %s: body=%d valueNode=%d bodyResult=%A"
-                    funcName (NodeId.value bodyId) (NodeId.value actualValueNode) bodyResult
             let rawReturnType =
                 match bodyComponents with
                 | Some values -> (List.head values).Type

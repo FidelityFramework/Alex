@@ -213,9 +213,9 @@ let pBuildWhileLoop (condSSA: SSA) (condOps: MLIROp list) (bodyOps: MLIROp list)
     }
 
 /// For loop via SCF.For
-let pBuildForLoop (lower: SSA) (upper: SSA) (step: SSA) (bodyOps: MLIROp list) : PSGParser<MLIROp list> =
+let pBuildForLoop (induction: SSA) (lower: SSA) (upper: SSA) (step: SSA) (bodyOps: MLIROp list) : PSGParser<MLIROp list> =
     parser {
-        let! forOp = pSCFFor lower upper step bodyOps
+        let! forOp = pSCFFor induction lower upper step bodyOps
         return [forOp]
     }
 
@@ -375,7 +375,9 @@ let private pBuildMultipleMatchElimination
                         let indexZeroOp = MLIROp.ArithOp (ArithOp.ConstI (indexZeroSSA, 0L, TIndex))
                         let loadOp = MLIROp.MemRefOp (MemRefOp.Load (tagSSA, scrutineeSSA, [indexZeroSSA], tagTy, memrefI8Ty))
                         preturn ([indexZeroOp; loadOp], tagSSA, 3)
-                    | TMemRef _ | TMemRefStatic _ | TStruct (_, Some _) ->
+                    // memref.reinterpret_cast keeps the element type of its source, so the
+                    // carrier read here is a byte buffer. Any other carrier is an error below.
+                    | TMemRef (TInt (IntWidth 8)) | TMemRefStatic (_, TInt (IntWidth 8)) ->
                         let castSSA = allSSAs.[1]
                         let zeroSSA = allSSAs.[2]
                         let tagSSA = allSSAs.[3]

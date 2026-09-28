@@ -588,7 +588,7 @@ module MLIRAccumulator =
                 1 + countOperations thenOps + elseCount
             | MLIROp.SCFOp (SCFOp.While (condOps, bodyOps)) ->
                 1 + countOperations condOps + countOperations bodyOps
-            | MLIROp.SCFOp (SCFOp.For (_, _, _, bodyOps)) ->
+            | MLIROp.SCFOp (SCFOp.For (_, _, _, _, bodyOps)) ->
                 1 + countOperations bodyOps
             | MLIROp.SCFOp (SCFOp.IndexSwitch (_, cases, fallback, _)) ->
                 1 + countOperations ((cases |> List.collect snd) @ fallback)

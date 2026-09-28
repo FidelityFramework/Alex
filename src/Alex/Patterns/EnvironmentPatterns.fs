@@ -38,8 +38,9 @@ let pRecallEnvironment source (layout: EnvironmentLayout) = parser {
             | Some contract, Some environment when contract.Owner = layout.Owner -> preturn (environment.SSA, environment.Type)
             | _ -> fail (Message $"Callable occurrence {NodeId.value source} lacks its actual environment operand")
         | None ->
-            match state.Graph.Nodes.TryFind source with
-            | Some { Type = TypeIdentity.Function _ } -> fail (Message $"Callable occurrence {NodeId.value source} has not been witnessed")
+            // The published value shape states whether the occurrence is callable.
+            match state.Graph.Emission.Callable.ValueShapes.TryFind source with
+            | Some (CallableValueShape.Callable _) -> fail (Message $"Callable occurrence {NodeId.value source} has not been witnessed")
             | _ -> pRecallNode source
     do! ensure (actual = expected) $"Environment occurrence {NodeId.value source} lacks its settled carrier"
     return [], TRValue { SSA = value; Type = expected }

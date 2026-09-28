@@ -32,10 +32,10 @@ let pSCFWhile (condOps: MLIROp list) (bodyOps: MLIROp list) : PSGParser<MLIROp> 
         return MLIROp.SCFOp (SCFOp.While (condOps, bodyOps))
     }
 
-/// Emit SCF For operation
-let pSCFFor (lower: SSA) (upper: SSA) (step: SSA) (bodyOps: MLIROp list) : PSGParser<MLIROp> =
+/// Emit SCF For operation. `induction` is the value the operation defines for its body.
+let pSCFFor (induction: SSA) (lower: SSA) (upper: SSA) (step: SSA) (bodyOps: MLIROp list) : PSGParser<MLIROp> =
     parser {
-        return MLIROp.SCFOp (SCFOp.For (lower, upper, step, bodyOps))
+        return MLIROp.SCFOp (SCFOp.For (induction, lower, upper, step, bodyOps))
     }
 
 /// Emit SCF Yield (return value from SCF region)

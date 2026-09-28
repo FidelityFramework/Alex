@@ -480,26 +480,10 @@ let memrefOpToString (pointer: Result<int, string>) (op: MemRefOp) : string =
         sprintf "%s = memref.cast %s : %s to %s"
             (ssaToString result) (ssaToString source) (typeToString pointer srcType) (typeToString pointer destType)
     | MemRefOp.ReinterpretCast (result, source, byteOffset, size, srcType, destType) ->
-        // Check if source and dest have different element types
-        let getElemType = function
-            | TMemRef e | TMemRefStatic (_, e) | TMemRefScalar e -> Some e
-            | _ -> None
-        match getElemType srcType, getElemType destType with
-        | None, _ | _, None ->
-            failwithf "memref.reinterpret_cast: Alex emission did not supply memref types for SSA %s: %A to %A" (ssaToString result) srcType destType
-        | Some srcElem, Some destElem when srcElem <> destElem || (srcElem = TInt (IntWidth 8) && byteOffset <> 0) ->
-            // A byte-buffer field view shifts the base pointer and keeps offset0,
-            // including i8 fields. reinterpret_cast with a nonzero descriptor
-            // offset cannot have the plain destination type used by its loads.
-            // Generate inline offset constant + view as two ops on separate lines
-            let resultStr = ssaToString result
-            let offsetName = sprintf "%s_off" resultStr
-            sprintf "%s = arith.constant %d : index\n    %s = memref.view %s[%s][] : %s to %s"
-                offsetName byteOffset resultStr (ssaToString source) offsetName (typeToString pointer srcType) (typeToString pointer destType)
-        | _ ->
-            // Same element type: standard memref.reinterpret_cast
-            sprintf "%s = memref.reinterpret_cast %s to offset: [%d], sizes: [%d], strides: [1] : %s to %s"
-                (ssaToString result) (ssaToString source) byteOffset size (typeToString pointer srcType) (typeToString pointer destType)
+        // One operation, one line. A view of another element type, or at a byte
+        // offset, is MemRefOp.View with its offset value, composed by the Pattern.
+        sprintf "%s = memref.reinterpret_cast %s to offset: [%d], sizes: [%d], strides: [1] : %s to %s"
+            (ssaToString result) (ssaToString source) byteOffset size (typeToString pointer srcType) (typeToString pointer destType)
     | MemRefOp.ReinterpretCastDynamic (result, source, offset, sizeSSA, srcType, destType) ->
         // memref.reinterpret_cast with dynamic size: reconstruct memref from pointer + known length
         // Used for string/array capture extraction where size is loaded from closure struct
@@ -670,10 +654,10 @@ let rec opToString (pointer: Result<int, string>) (op: MLIROp) : string =
                 sprintf "%sscf.if %s%s {\n      %s\n    } else {\n      %s\n    }" prefix (ssaToString cond) suffix thenStr elseStr
             | None ->
                 sprintf "%sscf.if %s%s {\n      %s\n    }" prefix (ssaToString cond) suffix thenStr
-        | SCFOp.For (lower, upper, step, bodyOps) ->
+        | SCFOp.For (induction, lower, upper, step, bodyOps) ->
             let bodyStr = bodyOps |> List.map (opToString pointer) |> String.concat "\n      "
-            sprintf "scf.for %s = %s to %s step %s {\n      %s\n    }" 
-                (ssaToString lower) (ssaToString upper) (ssaToString step) (ssaToString step) bodyStr
+            sprintf "scf.for %s = %s to %s step %s {\n      %s\n    }"
+                (ssaToString induction) (ssaToString lower) (ssaToString upper) (ssaToString step) bodyStr
         | SCFOp.IndexSwitch (selector, cases, defaultBody, results) ->
             let prefix, resultTypes =
                 match results with

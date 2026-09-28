@@ -48,8 +48,13 @@ let private isScopeBoundary (node: SemanticNode) : bool =
     | SemanticKind.Binding (_, _, _, Some DeclRoot.KernelModule) -> true
     | _ -> false
 
-/// Debug tracing flag for visitAllNodes — set to true for detailed traversal logging
-let private traceTraversal = System.Environment.GetEnvironmentVariable("COMPOSER_TRACE_TRAVERSAL") = "1"
+/// The regions of a scope-owning occurrence, in order, or the first error among them.
+let collectRegions (regions: Result<'region, Diagnostic> list) : Result<'region list, Diagnostic> =
+    List.foldBack (fun region collected ->
+        match region, collected with
+        | Result.Error failure, _ -> Result.Error failure
+        | Result.Ok _, Result.Error failure -> Result.Error failure
+        | Result.Ok value, Result.Ok values -> Result.Ok (value :: values)) regions (Result.Ok [])
 
 /// A materialized code Lambda can be a structural child of its source
 /// ClosureValue as well as its canonical named declaration. Local body walks
@@ -128,14 +133,12 @@ let rec visitAllNodes
 
         // The caller's Zipper is already focused on currentNode with correct breadcrumbs.
         // No re-rooting needed — Huet navigation maintains the path.
-        if traceTraversal then printfn "[visitAllNodes] At node %A (zipper depth %d)" currentNode.Id (PSGZipper.depth visitedCtx.Zipper)
 
         // POST-ORDER Phase 1: Visit children FIRST (tree edges)
         // Navigate down to each child via PSGZipper.down — preserves breadcrumbs.
         let declarationLeaf = boundary.DeclarationLeaves.Contains currentNode.Id ||
                               spatial.Required.Contains currentNode.Id
         if not (isScopeBoundary currentNode) && not declarationLeaf then
-            if traceTraversal then printfn "[visitAllNodes] Node %A: visiting %d children" currentNode.Id currentNode.Children.Length
             let omittedActuals =
                 demand.Calls.TryFind currentNode.Id
                 |> Option.map (fun call -> Set.difference call.Omitted call.Eager)
@@ -146,7 +149,7 @@ let rec visitAllNodes
                 | Some childNode when not childNode.IsReachable ->
                     // Reachability is CCS's decision, read here: a child the graph marks unreachable
                     // (a module's quotation declaration, D9; anything nothing executes) is not witnessed.
-                    if traceTraversal then printfn "[visitAllNodes] Node %A: child %A is unreachable; not witnessed" currentNode.Id childId
+                    ()
                 | Some childNode ->
                     // Navigate zipper DOWN to this child — builds path with parent breadcrumb
                     match PSGZipper.down childIndex visitedCtx.Zipper with
@@ -177,7 +180,6 @@ let rec visitAllNodes
             | Result.Ok () -> witnessed
             | Result.Error reason ->
                 WitnessOutput.errorCoded AX4001 (Some currentNode.Id) (Some "Traversal") (Some "published numeric result") reason
-        if traceTraversal then printfn "[visitAllNodes] Node %A: witness returned %A" currentNode.Id output.Result
 
         // InlineOps belong to the current scope, exactly where the settled graph places the node.
         let updatedCurrentScope = ScopeContext.addOps output.InlineOps !visitedCtx.ScopeContext
@@ -186,9 +188,6 @@ let rec visitAllNodes
         // TopLevelOps go to ROOT scope (module level: GlobalString, nested FuncDef)
         if not (List.isEmpty output.TopLevelOps) then
             EmissionCorrespondence.record visitedCtx output.TopLevelOps
-            if traceTraversal then
-                let funcDefCount = output.TopLevelOps |> List.filter (fun op -> match op with MLIROp.FuncOp (FuncOp.FuncDef (name, _, _, _, _)) -> true | _ -> false) |> List.length
-                printfn "[visitAllNodes] Node %d: Adding %d TopLevelOps (%d FuncDefs) to RootScopeContext" (NodeId.value currentNode.Id) (List.length output.TopLevelOps) funcDefCount
             let updatedRootScope = ScopeContext.addOps output.TopLevelOps !visitedCtx.RootScopeContext
             visitedCtx.RootScopeContext := updatedRootScope
 
@@ -344,7 +343,6 @@ let runAllNanopasses
         if not (Set.contains nodeId !globalVisited) then
             match Revision.tryNode nodeId graph with
             | Some node when node.IsReachable || sourceRoots.Contains nodeId ->
-                if traceTraversal then printfn "[DEBUG] Processing root node %d (%A)" (NodeId.value nodeId) node.Kind
                 match PSGZipper.create graph nodeId with
                 | None ->
                     Diagnostic.error (Some nodeId) (Some "Traversal") (Some "root occurrence")
@@ -409,8 +407,6 @@ let executeNanopasses
         // Create root scope for operation accumulation
         let rootScope = ref (ScopeContext.root())
 
-        if traceTraversal then printfn "[Alex] Single-phase execution: %d registered nanopasses" (List.length registry.Nanopasses)
-
         // Run all nanopasses together in single traversal
         runAllNanopasses registry.Nanopasses graph coeffects sharedAcc rootScope globalVisited
 
@@ -423,7 +419,6 @@ let executeNanopasses
 
         // Extract operations from root scope and add to accumulator (Phase 7)
         let rootOps = ScopeContext.getOps !rootScope
-        if traceTraversal then printfn "[DEBUG] Extracted %d operations from rootScope" (List.length rootOps)
         MLIRAccumulator.addOps rootOps sharedAcc
 
         sharedAcc

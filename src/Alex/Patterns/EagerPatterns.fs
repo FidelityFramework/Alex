@@ -37,14 +37,17 @@ let pEagerValue (ctx: WitnessContext) = parser {
     elif isSequenceValue ctx state.Current then
         return! pSequenceForward ctx operand
     else
-        match state.Current.Type with
-        | TypeIdentity.Function _ -> return! pCallableForward ctx operand
-        | _ ->
+        // The shape of the demanded value and its unit result are published rows of
+        // this occurrence. The type of the node is not inspected.
+        match ctx.Graph.Emission.Callable.ValueShapes.TryFind state.Current.Id with
+        | None -> return! fail (Message "Explicit demand has no published value shape.")
+        | Some (CallableValueShape.Callable _) -> return! pCallableForward ctx operand
+        | Some _ ->
             match MLIRAccumulator.recallNode operand state.Accumulator with
             | Some(value, valueType) ->
                 let! operations, result, resultType = pAdapt state.Current.Id operand value valueType
                 return operations, TRValue { SSA = result; Type = resultType }
-            | None when TypeIdentity.isUnit state.Current.Type ->
+            | None when Alex.Traversal.Values.isUnitTyped ctx.Graph state.Current.Id ->
                 let completed =
                     Zipper.down 0 ctx.Zipper |> Option.exists (fun child ->
                         child.Focus.Id = operand && MLIRAccumulator.completedVoid child ctx.ScopeContext state.Accumulator)
