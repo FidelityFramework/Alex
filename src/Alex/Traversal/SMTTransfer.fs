@@ -128,6 +128,38 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let conclusion = v ()
             statements.Add(smt (SMTAnd(conclusion, clauses)))
             anchor conclusion (List.ofSeq statements)
+        | ObligationBody.FiniteSequencePull model ->
+            let steps = model.Steps |> List.map (fun step -> step.Label, step) |> Map.ofList
+            let wellShaped =
+                not model.Steps.IsEmpty && steps.Count = model.Steps.Length &&
+                steps.ContainsKey model.Entry &&
+                (model.Steps |> List.forall (fun step -> step.Successors |> List.forall steps.ContainsKey))
+            if not wellShaped then integerComparisons [1I, 0I]
+            else
+                let constant value =
+                    let result = v ()
+                    result, [smt (SMTBigIntConstant(result, value))]
+                let lessOrEqual (left, leftOps) (right, rightOps) =
+                    let result = v ()
+                    result, leftOps @ rightOps @ [smt (SMTIntCmp(result, SmtLe, left, right))]
+                let plus (left, leftOps) (right, rightOps) =
+                    let result = v ()
+                    result, leftOps @ rightOps @ [smt (SMTIntAdd(result, left, right))]
+                let clauses =
+                    [ yield lessOrEqual (constant 0I) (constant model.MaximumPulls)
+                      yield lessOrEqual (constant steps[model.Entry].Remaining) (constant model.MaximumPulls)
+                      for step in model.Steps do
+                          yield lessOrEqual (constant 0I) (constant step.Remaining)
+                          let weight = if step.Suspend then 1I else 0I
+                          match step.Successors with
+                          | [] -> yield lessOrEqual (constant weight) (constant step.Remaining)
+                          | successors ->
+                              for successor in successors do
+                                  yield lessOrEqual
+                                      (plus (constant weight) (constant steps[successor].Remaining))
+                                      (constant step.Remaining) ]
+                let conclusion = v ()
+                anchor conclusion ((clauses |> List.collect snd) @ [smt (SMTAnd(conclusion, List.map fst clauses))])
         | ObligationBody.AdditiveLoopInvariant model ->
             let statements = ResizeArray<MLIROp>()
             let constant value =
