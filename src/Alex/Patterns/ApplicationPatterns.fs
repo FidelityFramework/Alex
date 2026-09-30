@@ -245,7 +245,7 @@ let private integerPredicate kind signed =
 let private realPredicate kind =
     match kind with
     | NumericOperationKind.Equal -> Some FCmpPred.OEq
-    | NumericOperationKind.NotEqual -> Some FCmpPred.ONe
+    | NumericOperationKind.NotEqual -> Some FCmpPred.UNe
     | NumericOperationKind.Less -> Some FCmpPred.OLt
     | NumericOperationKind.LessOrEqual -> Some FCmpPred.OLe
     | NumericOperationKind.Greater -> Some FCmpPred.OGt
