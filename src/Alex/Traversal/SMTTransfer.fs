@@ -87,6 +87,27 @@ let private scope (ob: ObligationInfo) : MLIROp list =
 
     let ops =
         match ob.Body with
+        | ObligationBody.ProgramInitializationOrder(initializerOrdinal, initializerCount, useOrdinals) ->
+            let constant (value: int) =
+                let name = v ()
+                name, [smt (SMTBigIntConstant(name, bigint value))]
+            let ordinal, ordinalOps = constant initializerOrdinal
+            let count, countOps = constant initializerCount
+            let zero, zeroOps = constant 0
+            let nonnegative, inPlan = v (), v ()
+            let uses = useOrdinals |> List.map (fun useOrdinal ->
+                let usePhase, useOps = constant useOrdinal
+                let after, bounded = v (), v ()
+                [after; bounded], useOps @
+                    [smt (SMTIntCmp(after, SmtLt, ordinal, usePhase))
+                     smt (SMTIntCmp(bounded, SmtLe, usePhase, count))])
+            let conclusion = v ()
+            anchor conclusion
+                (ordinalOps @ countOps @ zeroOps @
+                 [smt (SMTIntCmp(nonnegative, SmtLe, zero, ordinal))
+                  smt (SMTIntCmp(inPlan, SmtLt, ordinal, count))] @
+                 (uses |> List.collect snd) @
+                 [smt (SMTAnd(conclusion, nonnegative :: inPlan :: (uses |> List.collect fst)))])
         | ObligationBody.FiniteLoopTrip model ->
             let statements = ResizeArray<MLIROp>()
             let constant value =
@@ -630,6 +651,46 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let definition = v ()
             statements.Add(smt (SMTAnd(definition, List.ofSeq clauses)))
             anchor definition (List.ofSeq statements)
+        | ObligationBody.EnvironmentStorageReservation (extent, alignment, capacity, spaceAlignment, granularity) ->
+            match extent, alignment, capacity, spaceAlignment, granularity with
+            | Some extent, Some alignment, Some capacity, Some spaceAlignment, Some granularity ->
+                let constant value =
+                    let name = v ()
+                    name, [smt (SMTBigIntConstant(name, value))]
+                let bytes, bytesOps = constant (bigint extent)
+                let align, alignOps = constant (bigint alignment)
+                let spaceAlign, spaceOps = constant (bigint spaceAlignment)
+                let grain, grainOps = constant (bigint granularity)
+                let limit, limitOps = constant (bigint capacity)
+                let zero, zeroOps = constant 0I
+                let one, oneOps = constant 1I
+                let divisor, divisorOps = constant (bigint (max 1 granularity))
+                let alignDivisor, alignDivisorOps = constant (bigint (max 1 alignment))
+                let powers value =
+                    let choices = [0 .. 30] |> List.map (fun exponent ->
+                        let power, ops = constant (1I <<< exponent)
+                        let clause = v ()
+                        clause, ops @ [smt (SMTEq(clause, value, power, SMTInt))])
+                    let result = v ()
+                    result, (choices |> List.collect snd) @ [smt (SMTOr(result, List.map fst choices))]
+                let validAlign, validAlignOps = powers align
+                let validSpace, validSpaceOps = powers spaceAlign
+                let validGrain, validGrainOps = powers grain
+                let positive, remainder, divisible = v (), v (), v ()
+                let padding, padded, units, rounded, covered, conclusion = v (), v (), v (), v (), v (), v ()
+                anchor conclusion
+                    (bytesOps @ alignOps @ spaceOps @ grainOps @ limitOps @ zeroOps @ oneOps @ divisorOps @ alignDivisorOps
+                     @ validAlignOps @ validSpaceOps @ validGrainOps
+                     @ [smt (SMTIntCmp(positive, SmtGt, bytes, zero))
+                        smt (SMTIntMod(remainder, spaceAlign, alignDivisor))
+                        smt (SMTEq(divisible, remainder, zero, SMTInt))
+                        smt (SMTIntSub(padding, divisor, one))
+                        smt (SMTIntAdd(padded, bytes, padding))
+                        smt (SMTIntDiv(units, padded, divisor))
+                        smt (SMTIntMul(rounded, units, divisor))
+                        smt (SMTIntCmp(covered, SmtLe, rounded, limit))
+                        smt (SMTAnd(conclusion, [positive; validAlign; validSpace; validGrain; divisible; covered]))])
+            | _ -> integerComparisons [1I, 0I]
         | ObligationBody.ConsecutiveLayout (storages, span, capacity) ->
             let sizes = List.toArray storages
             let n' = sizes.Length

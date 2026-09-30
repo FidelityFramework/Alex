@@ -55,3 +55,8 @@ let private validateCoverageWith
 
 let validateCoverage (graph: Revision) (allVisited: Set<NodeId>) : Diagnostic list =
     validateCoverageWith (sourceOccurrences graph) graph allVisited
+
+/// The producer owns region membership; this check only restricts the same
+/// whole-revision coverage obligation to those published members.
+let validateRegionCoverage (graph: Revision) (members: Set<NodeId>) (visited: Set<NodeId>) : Diagnostic list =
+    validateCoverageWith (Set.intersect (sourceOccurrences graph) members) graph visited

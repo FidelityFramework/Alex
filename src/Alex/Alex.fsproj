@@ -17,6 +17,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="AssemblyInfo.fs" />
     <Compile Include="Target.fs" />
     <Compile Include="Dialects/Core/Types.fs" />
     <Compile Include="Dialects/Core/Serialize.fs" />
@@ -105,6 +106,7 @@
     <Compile Include="Traversal/WitnessRegistry.fs" />
     <Compile Include="Traversal/StaticStorageValidation.fs" />
     <Compile Include="Traversal/MLIRTransfer.fs" />
+    <Compile Include="Traversal/SelectiveTraversal.fs" />
     <Compile Include="Traversal/XDCTransfer.fs" />
     <Compile Include="Generation.fs" />
   </ItemGroup>

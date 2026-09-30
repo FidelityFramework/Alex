@@ -74,7 +74,9 @@ let serialize (pointerBits: Result<int, string>) (moduleName: string option) (op
     | None -> sprintf "module {\n%s\n}" (opsToString pointerBits operations "  ")
     | Some name -> moduleToString pointerBits name operations
 
-let private witness (request: Request) : Result<Witnessed, Refusal> =
+let private witnessWith
+    (transfer: Revision -> NodeId -> TransferCoeffects -> Result<MLIROp list * SemanticScope * EmittedDefinition list * 'state, TransferRefusal>)
+    (request: Request) : Result<Witnessed * 'state, Refusal> =
     let revision = request.Revision
     let arch : Architecture = { Register = revision.Platform.Register; Pointer = revision.Platform.Pointer }
     let coeffects : TransferCoeffects = {
@@ -90,9 +92,9 @@ let private witness (request: Request) : Result<Witnessed, Refusal> =
     match revision.DeclarationRoots with
     | [] -> Result.Error (refuse "No declaration roots found in the PSG revision" [])
     | (entryId, _) :: _ ->
-        match transferWithCorrespondence revision entryId coeffects with
+        match transfer revision entryId coeffects with
         | Result.Error refusal -> Result.Error (refuse refusal.Reason refusal.Witnessed)
-        | Result.Ok (operations, scope, definitions) ->
+        | Result.Ok (operations, scope, definitions, state) ->
             // Preserve exactly what the witnesses produced. This boundary never
             // repairs, drops or rewrites witnessed MLIR.
             let storage =
@@ -109,7 +111,7 @@ let private witness (request: Request) : Result<Witnessed, Refusal> =
             match storage, constraints with
             | Result.Error reason, _ | _, Result.Error reason -> Result.Error (refuse reason operations)
             | Result.Ok writableStorage, Result.Ok constraints ->
-                Result.Ok
+                let witnessed =
                     { Scope = scope
                       Operations = operations
                       Definitions = definitions
@@ -122,13 +124,14 @@ let private witness (request: Request) : Result<Witnessed, Refusal> =
                                 Text = Alex.Traversal.SMTTransfer.transfer revision.Obligations }
                       Constraints = constraints
                       Links = Set.union revision.Emission.Boundary.Links request.LinkedLibraries }
+                Result.Ok (witnessed, state)
 
 /// Witness one revision. The revision is examined against the structural rules of its
 /// contract first, and a revision that breaks one is refused before any witness runs.
 /// A core's leg reads the declared Register and Pointer widths at every boundary and
 /// layout site. A revision that declares neither cannot start it and is refused with
 /// the producer's own diagnostic. The fabric leg reads neither.
-let generate (request: Request) : Result<Witnessed, Refusal> =
+let private admit (request: Request) =
     let undeclared =
         match request.Target with
         | TargetPlatform.FPGA -> None
@@ -141,4 +144,29 @@ let generate (request: Request) : Result<Witnessed, Refusal> =
     match Integrity.check request.Revision, undeclared with
     | (_ :: _ as violations), _ -> refuse (Integrity.describe violations)
     | [], Some message -> refuse message
-    | [], None -> witness request
+    | [], None -> Ok ()
+
+let generate (request: Request) : Result<Witnessed, Refusal> =
+    admit request |> Result.bind (fun () ->
+        witnessWith (fun revision entry coeffects ->
+            transferWithCorrespondence revision entry coeffects
+            |> Result.map (fun (operations, scope, definitions) -> operations, scope, definitions, ())) request
+        |> Result.map fst)
+
+/// Accepted operations plus region observations for the next edit and backend
+/// ownership. Proof transcription and all graph/storage checks are fresh.
+[<NoEquality; NoComparison>]
+type SelectiveWitnessed = {
+    Witnessed: Witnessed
+    State: Alex.Traversal.SelectiveTraversal.State
+    Regions: Alex.Traversal.SelectiveTraversal.RegionOutput list
+    Statistics: Alex.Traversal.SelectiveTraversal.Statistics
+}
+
+let generateSelective (request: Request) (prior: Alex.Traversal.SelectiveTraversal.State option) : Result<SelectiveWitnessed, Refusal> =
+    admit request |> Result.bind (fun () ->
+        witnessWith (fun revision _ coeffects ->
+            Alex.Traversal.SelectiveTraversal.transfer revision coeffects prior
+            |> Result.map (fun output -> output.Operations, output.Scope, output.Definitions, output)) request
+        |> Result.map (fun (witnessed, output) ->
+            { Witnessed = witnessed; State = output.State; Regions = output.Regions; Statistics = output.Statistics }))
