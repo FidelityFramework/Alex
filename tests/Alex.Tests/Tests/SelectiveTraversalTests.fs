@@ -20,13 +20,17 @@ let private fixture offset firstFingerprint secondFingerprint dependencies =
         let binding = node (offset + number + 2) (SemanticKind.Binding(name, false, false, None)) lambda.Type [offset + number + 1] None
         let region fingerprint dependencies : WitnessRegion =
             { Identity = name; Flavor = WitnessRegionKind.ScalarCallable; Root = Some lambda.Id; Anchor = Some binding.Id
-              Path = [binding.Id, [], []]; Members = Set.ofList [lambda.Id; body.Id]
+              Path = [{ Parent = binding.Id; Port = OccurrencePort.StructuralChild; Ordinal = 0; Extent = 1
+                        Stamp = sprintf "fixture:structural:%d:%A" (NodeId.value binding.Id) binding.Children }]
+              Members = Set.ofList [lambda.Id; body.Id]
+              OwnerSupport = SupportKey.WholeOwningAnalysisRegion "fixture-owner"
               Supports = Set.singleton binding.Id; Fingerprint = fingerprint; Dependencies = dependencies }
         [body; lambda; binding], binding, region
     let firstNodes, first, firstRegion = functionNodes 0 "first"
     let secondNodes, second, secondRegion = functionNodes 3 "second"
     let common : WitnessRegion =
         { Identity = "common"; Flavor = WitnessRegionKind.Common; Root = None; Anchor = None; Path = []
+          OwnerSupport = SupportKey.WholeOwningAnalysisRegion "fixture-owner"
           Members = Set.ofList [first.Id; second.Id]; Supports = Set.empty
           Fingerprint = "common-contract"; Dependencies = Set.empty }
     { revision (firstNodes @ secondNodes) with
@@ -35,6 +39,7 @@ let private fixture offset firstFingerprint secondFingerprint dependencies =
             { Codata.empty with
                 WitnessSegmentation = Some {
                     Version = 1; Regions = [common; firstRegion firstFingerprint Set.empty; secondRegion secondFingerprint dependencies] } } }
+    |> declareTraversalReadings
 
 let private registry (forbidden: Set<NodeId>) =
     let rec witness (context: WitnessContext) (node: SemanticNode) =
@@ -44,7 +49,7 @@ let private registry (forbidden: Set<NodeId>) =
             let zipper = atChild body context.Zipper
             visitAllNodes witness { context with Zipper = zipper } zipper.Focus context.TraversalVisited
             let name =
-                match context.Zipper.Path.Head.Parent.Kind with
+                match context.Graph.Nodes[context.Zipper.Path.Head.Parent].Kind with
                 | SemanticKind.Binding(name, _, _, _) -> name
                 | _ -> failwith "Fixture lost declaring binding"
             let operation = FuncOp(FuncDef(name, [], [], [FuncOp(Return [])], FuncVisibility.Private))
@@ -85,7 +90,7 @@ let ``unchanged function bypasses witnesses and rebinds exact current occurrence
     let definition = current.Regions |> List.find (fun region -> region.Region.Identity = "second") |> _.Definitions |> List.exactlyOne
     Assert.Same(oldDefinition.Operation, definition.Operation)
     Assert.Same(after.Nodes[NodeId 104], definition.Occurrence.Focus)
-    Assert.Same(after.Nodes[NodeId 105], definition.Occurrence.Anchor)
+    Assert.Equal(NodeId 105, definition.Occurrence.Anchor)
     Assert.NotSame(oldDefinition.Occurrence.Focus, definition.Occurrence.Focus)
     Assert.Equal(Ok (), Alex.Correspondence.validateOccurrence current.Scope definition.Occurrence)
     match Alex.Correspondence.validateOccurrence current.Scope oldDefinition.Occurrence with
@@ -116,8 +121,12 @@ let ``stale retained breadcrumb cannot enter accepted state`` () =
     let previous = run graph None Set.empty |> accepted
     let next = fixture 100 "first" "second" Set.empty
     let malformed = (segmentation next).Regions |> List.map (fun region ->
-        if region.Identity = "second" then { region with Anchor = Some(NodeId 2); Path = [NodeId 2, [], []] } else region)
-    run (replaceRegions next malformed) (Some previous.State) Set.empty |> refused "absent node"
+        if region.Identity = "second" then
+            { region with Anchor = Some(NodeId 2)
+                          Path = [{ region.Path.Head with Parent = NodeId 2 }] }
+        else region)
+    run (replaceRegions next malformed) (Some previous.State) Set.empty
+    |> refused "whole occurrence path is not in the source context inventory"
 
 [<Fact>]
 let ``retired region is absent from assembled operations and reported`` () =
@@ -126,6 +135,7 @@ let ``retired region is absent from assembled operations and reported`` () =
     let next =
         { graph with Nodes = graph.Nodes |> Map.filter (fun id _ -> NodeId.value id < 3)
                      DeclarationRoots = graph.DeclarationRoots |> List.take 1 }
+        |> declareTraversalReadings
     let regions = (segmentation graph).Regions |> List.filter (fun region -> region.Identity <> "second") |> List.map (fun region ->
         if region.Identity = "common" then { region with Members = Set.singleton(NodeId 2); Fingerprint = "common-retired" } else region)
     let current = run (replaceRegions next regions) (Some previous.State) (Set.ofList [NodeId 0; NodeId 1]) |> accepted

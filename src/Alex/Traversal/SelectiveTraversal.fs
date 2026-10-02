@@ -68,13 +68,8 @@ let private occurrence scope (region: WitnessRegion) =
     match region.Root, region.Anchor with
     | Some root, Some anchor ->
         node root |> Result.bind (fun focus ->
-        node anchor |> Result.bind (fun anchorNode ->
-        region.Path
-        |> List.map (fun (parent, left, right) -> node parent |> Result.map (fun current -> current, left, right))
-        |> collect
-        |> Result.bind (fun path ->
-            let held = { Scope = scope; Focus = focus; Anchor = anchorNode; Path = path }
-            validateOccurrence scope held |> Result.map (fun () -> held))))
+            let held = { Scope = scope; Focus = focus; Anchor = anchor; Path = region.Path }
+            validateOccurrence scope held |> Result.map (fun () -> held))
     | _ -> Result.Error (sprintf "Scalar region '%s' lacks its root or anchor occurrence" region.Identity)
 
 let private validateManifest (revision: Revision) (segmentation: WitnessSegmentation) =
@@ -90,8 +85,13 @@ let private validateManifest (revision: Revision) (segmentation: WitnessSegmenta
     elif common.Length <> 1 then Result.Error "Published witness segmentation must have exactly one common region"
     elif membership.Length <> (Set.ofList membership).Count then Result.Error "Published witness segmentation has overlapping members"
     elif Set.ofList membership <> nodeIds then Result.Error "Published witness segmentation does not exactly cover the current graph"
-    elif regions |> List.exists (fun region -> not (Set.isSubset region.Supports nodeIds) || not (Set.isSubset region.Dependencies identities)) then
-        Result.Error "Published witness segmentation has absent support or dependency identities"
+    elif regions |> List.exists (fun region -> not (Set.isSubset region.Dependencies identities)) then
+        Result.Error "Published witness segmentation has absent dependency identities"
+    elif regions |> List.exists (fun region ->
+        match region.OwnerSupport with
+        | SupportKey.WholeOwningAnalysisRegion identity -> System.String.IsNullOrWhiteSpace identity
+        | _ -> true) then
+        Result.Error "Published witness segmentation lacks its source owning-analysis support account"
     elif common |> List.exists (fun region -> region.Root.IsSome || region.Anchor.IsSome || not region.Path.IsEmpty) then
         Result.Error "Published common witness region must not claim a scalar occurrence"
     elif regions |> List.exists (fun region ->
@@ -131,9 +131,7 @@ let private freshScalar registry revision coeffects scope (region: WitnessRegion
         let root = ref (ScopeContext.root ())
         let visited = ref Set.empty
         let zipper =
-            { Graph = revision; Focus = at.Focus
-              Path = at.Path |> List.map (fun (parent, left, right) ->
-                  { Parent = parent; LeftSiblings = left; RightSiblings = right }) }
+            { Graph = revision; Focus = at.Focus; Path = at.Path }
         let context =
             { Graph = revision; Coeffects = coeffects; Accumulator = accumulator; RootAccumulator = accumulator
               ScopeContext = root; RootScopeContext = root; Zipper = zipper
@@ -150,7 +148,7 @@ let private freshScalar registry revision coeffects scope (region: WitnessRegion
                 | [operation], [definition] when retainable operation &&
                       obj.ReferenceEquals(definition.Operation, operation) &&
                       definition.Occurrence.Focus.Id = at.Focus.Id &&
-                      (definition.Occurrence.Path |> List.map (fun (node, left, right) -> node.Id, left, right)) = region.Path ->
+                      definition.Occurrence.Path = region.Path ->
                     Ok ({ Region = region; Operations = operations; Definitions = [definition]; Reused = false }, visited.Value.Count)
                 | _ -> Result.Error (sprintf "Scalar region '%s' did not witness exactly one source-independent function definition" region.Identity)))
 

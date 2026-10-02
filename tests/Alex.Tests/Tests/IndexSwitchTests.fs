@@ -13,7 +13,7 @@ module Zipper = Alex.Traversal.PSGZipper
 let private position () =
     let selector = node 2 (SemanticKind.PatternBinding "state") intType [] (Some 1)
     let binding = node 1 (SemanticKind.Binding("switch", false, false, None)) intType [2] None
-    at (revision [binding; selector]) 1 [2]
+    at (revision [binding; selector] |> declareTraversalReadings) 1 [2]
 
 let private integer = TInt(IntWidth 32)
 let private cell = TMemRefStatic(1, integer)

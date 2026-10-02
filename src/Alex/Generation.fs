@@ -87,12 +87,12 @@ let private witnessWith
     let refuse reason operations =
         { Reason = reason; Witnessed = operations; ModuleName = moduleName; PointerBits = arch.Pointer }
 
-    // The current whole-revision traversal. This is not a source invalidation
-    // or partition decision.
-    match revision.DeclarationRoots with
-    | [] -> Result.Error (refuse "No declaration roots found in the PSG revision" [])
-    | (entryId, _) :: _ ->
-        match transfer revision entryId coeffects with
+    // Baker supplies actual entry occurrences. Declaration membership is not
+    // a consumer traversal plan or a reason to fetch library bodies.
+    match revision.SourceReadings.Entries |> List.tryFind (fun entry -> revision.Nodes.ContainsKey entry.Focus) with
+    | None -> Result.Error (refuse "No source-authored witness entry bodies found in the PSG revision" [])
+    | Some entry ->
+        match transfer revision entry.Focus coeffects with
         | Result.Error refusal -> Result.Error (refuse refusal.Reason refusal.Witnessed)
         | Result.Ok (operations, scope, definitions, state) ->
             // Preserve exactly what the witnesses produced. This boundary never

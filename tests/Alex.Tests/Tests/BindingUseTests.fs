@@ -62,6 +62,22 @@ let ``formal and immutable reference use published binding accounts without bind
     Assert.Empty output.TopLevelOps
 
 [<Fact>]
+let ``qualified use retains its declaration name without demanding the binding body`` () =
+    let graph = fixture SourceBindingClass.ImmutableValue
+    let qualified = { reading with Kind = SemanticKind.VarRef("Library.value", Some binding) }
+    let graph = { graph with Nodes = graph.Nodes.Add(qualified.Id, qualified) }
+    Assert.Equal("value", graph.SourceReadings.BindingUses[qualified.Id].Name)
+    Assert.False(graph.Nodes.ContainsKey binding)
+    let ctx, accumulator = observe graph
+    MLIRAccumulator.bindNode binding (Arg 7) (TInt(IntWidth 1)) accumulator
+    let output = Alex.Witnesses.VarRefWitness.nanopass.Witness ctx qualified
+    match output.Result with
+    | TRValue value -> Assert.Equal<SSA>(Arg 7, value.SSA)
+    | other -> failwithf "Qualified source binding reading was refused: %A" other
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+
+[<Fact>]
 let ``mutable reference uses its published cell class without a binding body`` () =
     let graph = fixture SourceBindingClass.MutableCell
     let ctx, accumulator = observe graph
@@ -91,8 +107,10 @@ let ``missing or stale binding use refuses rather than inline forwarding a recal
     let graph = { graph with SourceReadings = { graph.SourceReadings with BindingUses = accounts } }
     let graph =
         if defect = "missing-slot-representation" then
-            { graph with Emission = { graph.Emission with Numeric =
-                { graph.Emission.Numeric with OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Remove binding } } }
+            let numeric =
+                { graph.Emission.Numeric with
+                    OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Remove binding }
+            { graph with Emission = { graph.Emission with Numeric = numeric } }
         else graph
     let ctx, accumulator = observe graph
     MLIRAccumulator.bindNode binding (Arg 7) (TInt(IntWidth 1)) accumulator

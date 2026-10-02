@@ -48,11 +48,14 @@ let private boolRows (carriers: ScalarCarrier list) (results: SemanticNode list)
 /// One Boolean literal, as published.
 let private single (value: SemanticNode) : Revision =
     let domain = numericDomain 1
-    { revision [value; domain] with
+    // The domain identity remains complete carrier support; its source-private
+    // inactive body is never part of this published live revision.
+    { revision [value] with
         Emission =
             { Empty.emission with
                 Callable = dataRows [value]
                 Numeric = boolRows [boolCarrier value [value; domain]] [value] } }
+    |> declareTraversalReadings
 
 let private context graph position visited =
     let accumulator = MLIRAccumulator.empty ()
@@ -76,6 +79,7 @@ let ``driver rejects a foreign occurrence even if its node was previously visite
                     Numeric =
                         boolRows [boolCarrier value [value; domain]; boolCarrier root [value; root; domain]]
                                  [value; root] } }
+        |> declareTraversalReadings
     let position = Zipper.create graph root.Id |> require "Missing root"
     let initial = if alreadyVisited then Set.singleton value.Id else Set.empty
     let visited = ref initial
@@ -240,6 +244,7 @@ let ``match refuses an unsettled source guard before visiting any child`` () =
                     Numeric =
                         boolRows [boolCarrier value [value; domain]; boolCarrier choice [value; choice; domain]]
                                  [value; choice] } }
+        |> declareTraversalReadings
     let position = Zipper.create graph choice.Id |> require "Missing match"
     let visited = ref Set.empty
     let ctx = context graph position visited

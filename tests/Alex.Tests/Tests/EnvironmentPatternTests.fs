@@ -45,7 +45,9 @@ let private fixture () =
             Escapes = Map.ofList [first.Id, EscapeKind.StackScoped; second.Id, EscapeKind.StackScoped] }
     let captured : Result<ValueRepresentation, string> = Ok(ValueRepresentation.Scalar SettledSlot.Bool)
     let numeric = { raw.Emission.Numeric with OccurrenceRepresentations = Map.ofList [capture.Id, captured] }
-    let graph = { raw with Codata = codata; Emission = { raw.Emission with Numeric = numeric } }
+    let graph =
+        { raw with Codata = codata; Emission = { raw.Emission with Numeric = numeric } }
+        |> declareTraversalReadings
     let operands = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode capture.Id (Arg 0) (TMemRefStatic(1, TInt(IntWidth 1))) operands
     let position = Zipper.create graph first.Id |> require "Missing environment fixture"
@@ -130,7 +132,7 @@ let ``returned environment cannot substitute a destination of another layout`` (
 [<InlineData("residence", "admitted allocation residence")>]
 [<InlineData("duplicate", "exact unique initializer set")>]
 [<InlineData("missing", "exact unique initializer set")>]
-[<InlineData("proof", "resident layout obligations")>]
+[<InlineData("proof", "no current layout claim facts")>]
 let ``environment construction rejects incomplete residence initialization and evidence`` defect reason =
     let position, first, _, capture, _, layout, operands = fixture ()
     let graph =
@@ -147,3 +149,5 @@ let ``environment construction rejects incomplete residence initialization and e
     match matchAt (pCreateEnvironment first layout initializers) position 64 operands with
     | Result.Error message -> Assert.Contains(reason, message)
     | Result.Ok _ -> failwithf "Invalid environment %s was accepted" defect
+    Assert.Empty operands.AllOps
+    Assert.True((MLIRAccumulator.recallNode first operands).IsNone)

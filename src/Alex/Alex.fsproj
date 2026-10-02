@@ -30,7 +30,6 @@
     <Compile Include="Traversal/ScopeContext.fs" />
     <Compile Include="Traversal/TransferTypes.fs" />
     <Compile Include="Traversal/CoverageValidation.fs" />
-    <Compile Include="Traversal/NanopassArchitecture.fs" />
     <Compile Include="XParsec/PSGCombinators.fs" />
     <Compile Include="Traversal/SequenceOperands.fs" />
     <Compile Include="Traversal/LazyOperands.fs" />
@@ -66,6 +65,7 @@
     <Compile Include="Patterns/EagerPatterns.fs" />
     <Compile Include="Patterns/MutableCallablePatterns.fs" />
     <Compile Include="Patterns/PlatformPatterns.fs" />
+    <Compile Include="Traversal/NanopassArchitecture.fs" />
     <Compile Include="Patterns/SpatialPatterns.fs" />
     <Compile Include="Patterns/MmioPatterns.fs" />
     <Compile Include="Patterns/BorrowedViewPatterns.fs" />

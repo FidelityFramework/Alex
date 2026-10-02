@@ -35,7 +35,7 @@ let ``one shared node retains a distinct enclosing lambda at each Huet position`
             (functionFrom unitType boolType) [0] None
     let first, second = makeLambda 1 "first", makeLambda 2 "second"
     let root = node 3 (SemanticKind.Sequential [first.Id; second.Id]) second.Type [1; 2] None
-    let graph = revision [shared; first; second; root]
+    let graph = revision [shared; first; second; root] |> declareTraversalReadings
     let start = Zipper.create graph root.Id |> require "Missing root"
     let leftUse = start |> atChild first.Id |> atChild shared.Id
     let rightUse = start |> atChild second.Id |> atChild shared.Id
@@ -44,9 +44,10 @@ let ``one shared node retains a distinct enclosing lambda at each Huet position`
     Assert.Equal(second.Id, (Zipper.findEnclosingLambda rightUse |> require "Missing second scope").Id)
     Assert.Same(graph, leftUse.Graph)
     Assert.Same(graph, rightUse.Graph)
-    let reRooted = Zipper.focusOn shared.Id rightUse |> require "Cannot re-root"
-    Assert.True(Zipper.isAtRoot reRooted)
-    Assert.True((Zipper.findEnclosingLambda reRooted).IsNone)
+    // Source accounts retain both actual lambda occurrences. A focus without
+    // an explicit occurrence cannot choose one or manufacture a detached root.
+    Assert.True((Zipper.focusOn shared.Id rightUse).IsNone)
+    Assert.True((Zipper.create graph shared.Id).IsNone)
 
 [<Fact>]
 let ``binding-name parser reads the zipper parent and restores its focus`` () =

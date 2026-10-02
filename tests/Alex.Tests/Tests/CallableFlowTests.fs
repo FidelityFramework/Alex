@@ -101,6 +101,7 @@ let private fixture () =
         { revision nodes with
             Codata = { Codata.empty with CallableCarriers = carriers; CallableFlows = flows }
             Emission = { Empty.emission with Callable = callable; Numeric = numeric } }
+        |> declareTraversalReadings
     revision, NodeId 10, NodeId 11, NodeId 4, NodeId 19, NodeId 20
 
 let private context graph id bits =
@@ -159,6 +160,7 @@ let ``an added opaque actual retracts a previously projected formal on a new gra
             Emission =
                 { graph.Emission with
                     Callable = { graph.Emission.Callable with Flows = remaining graph.Emission.Callable.Flows } } }
+        |> declareTraversalReadings
     match Operands.project (context revised formal 64) formal with
     | Result.Error _ -> ()
     | Result.Ok _ -> failwith "Stale complete callable flow survived the changed actual"

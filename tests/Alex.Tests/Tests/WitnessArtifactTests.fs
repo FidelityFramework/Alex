@@ -81,6 +81,7 @@ let private fixture () =
         |> withEdges [element 0 2 0; element 1 2 1] carriers
         |> withData [3; 4; 5; 6]
         |> withNumeric carriers [0; 1; 2]
+        |> declareTraversalReadings
     let position = Zipper.create graph root.Id |> require "Missing fixture root" |> Zipper.down 0 |> require "Missing child"
     let accumulator = MLIRAccumulator.empty ()
     let rootScope = ref (ScopeContext.root ())
@@ -119,17 +120,32 @@ let ``a refused result leaves no queued declaration for the next occurrence`` (r
     let ctx = { ctx with Zipper = position }
     // The first child queues a declaration and is refused: by its own witness, or by
     // the traversal because it returns no value at a result site. The second child
-    // and the root return their values.
+    // returns its value; the parent must refuse before running its own witness.
     let witness (current: WitnessContext) (held: SemanticNode) =
         if held.Id = NodeId 0 then
             MLIRAccumulator.tryEmitGlobalMemref "queued" (TMemRefStatic(1, TInt(IntWidth 8))) None current.Accumulator
             if refusedByWitness then WitnessOutput.error "The witness refuses this occurrence."
             else WitnessOutput.empty
+        elif held.Id = root.Id then failwith "Parent witness ran after a required child was refused"
         else { WitnessOutput.empty with Result = TRValue { SSA = Arg (NodeId.value held.Id); Type = TInt(IntWidth 1) } }
     Alex.Traversal.NanopassArchitecture.visitAllNodes witness ctx ctx.Zipper.Focus ctx.GlobalVisited
-    let refusal = Assert.Single ctx.Accumulator.Errors
+    Assert.Equal(2, ctx.Accumulator.Errors.Length)
+    let parentRefusal =
+        ctx.Accumulator.Errors
+        |> List.filter (fun diagnostic -> diagnostic.Phase = Some "required child occurrence")
+        |> Assert.Single
+    Assert.Equal(Some root.Id, parentRefusal.NodeId)
+    Assert.Equal("The parent occurrence cannot be witnessed after a required child account or witness was refused.", parentRefusal.Message)
+    let refusal =
+        ctx.Accumulator.Errors
+        |> List.filter (fun diagnostic -> diagnostic.Phase <> Some "required child occurrence")
+        |> Assert.Single
     if refusedByWitness then Assert.Equal("The witness refuses this occurrence.", refusal.Message)
-    else Assert.Equal(Some (NodeId 0), refusal.NodeId)
+    else
+        Assert.Equal(Some (NodeId 0), refusal.NodeId)
+        Assert.Equal(Some "published numeric result", refusal.Phase)
+        Assert.Equal("Witness result at node 0 omitted its source-published scalar value", refusal.Message)
+    Assert.True((MLIRAccumulator.recallNode root.Id ctx.Accumulator).IsNone)
     // The declaration belonged to the refused occurrence. No later occurrence places it.
     Assert.Empty ctx.Accumulator.EmittedDefinitions
     Assert.Empty ctx.Accumulator.PendingStaticGlobals

@@ -65,6 +65,7 @@ let private fixture descriptor =
                           read.Id, scalar SettledSlot.Bool
                           write.Id, scalar SettledSlot.Unit
                           root.Id, scalar SettledSlot.Bool ]
+        |> declareTraversalReadings
     let position = Zipper.create graph root.Id |> require "Missing frame fixture root"
     let slot: ContinuationSlot =
         { Source = source.Id; ValueType = boolType; IsCapture = true
@@ -150,6 +151,7 @@ let ``frame borrow preserves the existing scalar cell without copying its payloa
     let original, frame, _, read, _, slot, operands = fixture descriptor
     // The compiler service publishes the same rows for the borrow as for the read it replaces.
     let graph = { original.Graph with Nodes = original.Graph.Nodes.Add(read, { original.Graph.Nodes[read] with Kind = SemanticKind.FrameBorrow(frame, slot.Source) }) }
+    let graph = declareTraversalReadings graph
     let position = Zipper.create graph original.Focus.Id |> require "Missing borrow fixture root" |> atChild read
     match observe (pBorrowContinuationSlot read frame 64 slot) position operands with
     | Result.Ok ((operations, TRValue value), _) ->
@@ -175,6 +177,7 @@ let ``buffer-valued frame slot retains its descriptor through a static-to-dynami
     let graph =
         { original.Graph with Nodes = nodes }
         |> representing (retyped |> List.map (fun id -> id, buffer (scalar SettledSlot.Bool)))
+        |> declareTraversalReadings
     let root = Zipper.create graph original.Focus.Id |> require "Missing buffer fixture root"
     let slot = { originalSlot with ValueType = native; Holds = CaptureSlotKind.ValueView native }
     // The carrier itself is a value view, not a cell containing one.
@@ -218,6 +221,7 @@ let ``continuation dispatch uses the selector range without changing the graph``
     let graph =
         { raw with Nodes = raw.Nodes.Add(selector.Id, { selector with ValueRange = Some range }) }
         |> transporting (transport dispatch.Id (carrier selector (SettledSlot.Integer(8, None)) range) unsigned)
+        |> declareTraversalReadings
     let position = Zipper.create graph binding.Id |> require "Missing dispatch fixture" |> atChild dispatch.Id
     let operands = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode selector.Id (Arg 0) (TInt(IntWidth 8)) operands
@@ -278,6 +282,7 @@ let private constructionFixture () =
                                         Escapes = [template.Id, EscapeKind.StackScoped; first.Id, EscapeKind.StackScoped; second.Id, EscapeKind.StackScoped] |> Map.ofList
                                         ContinuationFrames = Map.ofList [template.Id, plan] } }
                 |> representing [source.Id, scalar SettledSlot.Bool]
+                |> declareTraversalReadings
     let position = Zipper.create graph root.Id |> require "Missing constructor fixture"
     let operands = MLIRAccumulator.empty ()
     MLIRAccumulator.registerSSAType (Arg 0) (TMemRefStatic(1, TInt(IntWidth 1))) operands
@@ -375,6 +380,7 @@ let ``dispatch witness pulls declared child positions or identifies a missing ch
                             Numeric = { stated.Emission.Numeric with
                                             Values = literals |> List.map (fun literal -> literal.Site, literal) |> Map.ofList
                                             ResultSites = literals |> List.map _.Site |> Set.ofList } } }
+        |> declareTraversalReadings
     let position = Zipper.create graph binding.Id |> require "Missing dispatch witness fixture" |> atChild dispatch.Id
     let accumulator = MLIRAccumulator.empty ()
     let rootScope = ref (ScopeContext.root ())
@@ -418,7 +424,7 @@ let ``empty activation storage has zero extent and admits no slot access`` () =
     let allocation = node 1 (SemanticKind.ContinuationStorage owner.Id) (arrayOf boolType) [] (Some 2)
     let binding = node 2 (SemanticKind.Binding("scratch", false, false, None)) allocation.Type [1] None
     // No Pattern under test reads an emission table of this revision.
-    let graph = revision [owner; allocation; binding]
+    let graph = revision [owner; allocation; binding] |> declareTraversalReadings
     let position = Zipper.create graph binding.Id |> require "Missing zero activation fixture" |> atChild allocation.Id
     let operands = MLIRAccumulator.empty ()
     let operations, value =
@@ -447,6 +453,7 @@ let ``empty activation storage has zero extent and admits no slot access`` () =
 let ``raw caller frame allocation performs no constructor stores`` () =
     let original, plan, allocation, _, _, operands = constructionFixture ()
     let graph = { original.Graph with Nodes = original.Graph.Nodes.Add(allocation, { original.Graph.Nodes[allocation] with Kind = SemanticKind.ContinuationAllocate plan.Owner }) }
+    let graph = declareTraversalReadings graph
     let position = Zipper.create graph original.Focus.Id |> require "Missing caller allocation fixture" |> atChild allocation
     match observe (pAllocateContinuationFrame allocation plan) position operands with
     | Result.Ok (([MLIROp.MemRefOp(MemRefOp.Alloca(ssa, ty, Some 8))], TRValue value), _) ->
@@ -524,6 +531,7 @@ let private ownedRegionFixture () =
                             Callable = { original.Graph.Emission.Callable with
                                             AliasTargets = Map.ofList [formal.Id, formal.Id]
                                             Arguments = Map.ofList [generator.Id, Map.ofList [formal.Id, [0]]] } } }
+        |> declareTraversalReadings
     let position =
         Zipper.create graph owner.Id |> require "Missing owned region fixture"
         |> atChild generator.Id |> atChild body.Id

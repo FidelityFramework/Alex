@@ -47,6 +47,7 @@ let validateOccurrence scope (occurrence: Occurrence) =
         Error "Witness occurrence does not retain the actual current PSG focus and Huet path"
     else
         RevisionNavigation.checkContext (graph scope) occurrence.Focus.Id occurrence.Path
+        |> Result.mapError (fun reason -> "Witness occurrence does not retain the actual current PSG focus and Huet path: " + reason)
         |> Result.bind (fun anchor ->
             if anchor = occurrence.Anchor then Ok ()
             else Error "Witness occurrence anchor differs from its whole source-authored path")

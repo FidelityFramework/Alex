@@ -17,7 +17,7 @@ let private runOn target inputType inputCarrier patterns =
     // A negative component boundary: raw source syntax has no executable
     // publication. The Pattern must refuse before reading numeric premises.
     // The revision holds the nodes as built and states no emission row.
-    let graph = revision (input :: bodies @ [choice])
+    let graph = revision (input :: bodies @ [choice]) |> declareTraversalReadings
     let position = Zipper.create graph choice.Id |> require "Missing raw decision"
     let operands = MLIRAccumulator.empty ()
     for index, body in List.indexed bodies do

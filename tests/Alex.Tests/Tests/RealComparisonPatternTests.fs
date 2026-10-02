@@ -53,6 +53,7 @@ let private comparison bits kind =
                 { stated.Emission with
                     Callable = { stated.Emission.Callable with AliasTargets = Map.ofList [call.Id, call.Id] }
                     Numeric = { stated.Emission.Numeric with Operations = Map.ofList [call.Id, operation] } } }
+        |> declareTraversalReadings
     let operands = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode argument.Id (Arg 0) (physicalType bits) operands
     let position = focus graph call

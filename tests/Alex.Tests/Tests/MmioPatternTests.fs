@@ -40,6 +40,7 @@ let private registerWrite (meets: Meet list) =
                         { stated.Emission.Numeric with
                             OccurrenceRepresentations =
                                 Map.ofList [ (write.Id, Ok(ValueRepresentation.Scalar SettledSlot.Unit)) ] } } }
+        |> declareTraversalReadings
     let operands = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode handle.Id (Arg 0) TIndex operands
     MLIRAccumulator.bindNode value.Id (Arg 1) (TInt(IntWidth 16)) operands

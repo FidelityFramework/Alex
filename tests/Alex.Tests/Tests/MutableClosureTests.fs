@@ -216,8 +216,12 @@ let private inputValue id = { SSA = Alex.Traversal.Values.callableCode id; Type 
 
 let private inputs fixture =
     let operands = MLIRAccumulator.empty ()
-    for id in [fixture.Initial; fixture.Replacement] do
-        let position = Zipper.create fixture.Graph id |> require "Missing input occurrence"
+    // Initial is also shared by the unchanged binding. State the exact cell
+    // initializer and assignment-value occurrences, rather than choose a path.
+    for id, path in
+        [ fixture.Initial, [fixture.Cell; fixture.Initial]
+          fixture.Replacement, [fixture.Assignment; fixture.Replacement] ] do
+        let position = path |> List.fold (fun position child -> atChild child position) fixture.Root
         Operands.bind (context position 64 operands) id (inputValue id) None |> ok
     operands
 
@@ -332,12 +336,13 @@ let ``mutable function read rejects a missing binding value`` () =
 let ``mutable read retracts after a write changes even when prior cell operands remain`` () =
     let f, operands, _, _, _, _ = stages 64
     let assignment = f.Graph.Nodes[f.Assignment]
-    let changed = { assignment with Kind = SemanticKind.Set(f.Target, f.Initial) }
+    let changed = { assignment with Kind = SemanticKind.Set(f.Target, f.Initial); Children = [f.Target; f.Initial] }
     // The source owner publishes nothing for the changed write census, so the revision
     // holds the empty Emission.
     let graph =
         { f.Graph with Nodes = f.Graph.Nodes.Add(assignment.Id, changed)
                        Emission = Empty.emission }
+        |> declareTraversalReadings
     let position = Zipper.create graph f.LatestRead |> require "Missing changed read"
     let ctx = context position 64 operands
     let snapshots = MLIRAccumulator.snapshotOperands operands

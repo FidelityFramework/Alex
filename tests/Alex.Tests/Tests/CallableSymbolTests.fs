@@ -94,6 +94,7 @@ let private fixture saturated =
         { revision (each scopeNodes) with
             Codata = { Codata.empty with CallableCarriers = carriers; Curry = { Codata.empty.Curry with SaturatedCalls = calls } }
             Emission = { Empty.emission with Callable = callable; Numeric = numeric } }
+        |> declareTraversalReadings
     let functions =
         bases |> List.map (fun b ->
             { Binding = NodeId(b + 3); Lambda = NodeId(b + 2); Argument = NodeId(b + 4); Reference = NodeId(b + 5); Call = NodeId(b + 6) })
@@ -161,12 +162,14 @@ let ``module and external spellings and anonymous closure identities are preserv
     let moduleGraph =
         { graph with Nodes = graph.Nodes.Add(moduleNode.Id, moduleNode).Add(fn.Binding, { binding with Parent = Some moduleNode.Id }) }
         |> named (CallableSymbolName.ModuleBinding("Library", "read")) (Some moduleNode.Id) fn
+        |> declareTraversalReadings
     Assert.Equal(Some "Library.read", tryBinding moduleGraph fn.Binding)
     Assert.Equal("Library.read", lambda moduleGraph moduleGraph.Nodes[fn.Lambda] false)
     Assert.Equal(Some "Library.read", tryBinding moduleGraph fn.Binding)
     let externalGraph =
         { graph with Nodes = graph.Nodes.Add(fn.Binding, { binding with Parent = None }) }
         |> named (CallableSymbolName.RootBinding "read") None fn
+        |> declareTraversalReadings
     Assert.Equal(Some "read", tryBinding externalGraph fn.Binding)
     Assert.Equal("read", lambda externalGraph externalGraph.Nodes[fn.Lambda] false)
     // The contract states an anonymous code identity as one published name. It

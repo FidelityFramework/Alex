@@ -73,6 +73,7 @@ let private fixture () =
         { revision (program @ [domain]) with
             Edges = [row]
             Emission = emission }
+        |> declareTraversalReadings
     graph, root.Id, frontier.Id, required.Id, condition.Id
 
 let private context graph root frontier site condition conditionType =
@@ -100,6 +101,13 @@ let ``requirement rejects stale evidence operands and occurrences before emittin
         | "wrong-order" ->
             let node = graph.Nodes[frontier]
             { graph with Nodes = graph.Nodes.Add(frontier, { node with Children = List.rev node.Children }) }
+            |> declareTraversalReadings
+        | "foreign-position" ->
+            // A second actual occurrence is not the retained requirement's
+            // frontier. Never manufacture an undeclared detached root.
+            let alternate = node 6 (SemanticKind.Sequential [site]) unitType [NodeId.value site] None
+            { graph with Nodes = graph.Nodes.Add(alternate.Id, alternate) }
+            |> declareTraversalReadings
         | "wrong-condition" ->
             let edges =
                 graph.Edges |> List.map (fun edge ->
@@ -116,7 +124,7 @@ let ``requirement rejects stale evidence operands and occurrences before emittin
     let ctx = context changed root frontier site condition carrier
     let ctx =
         match defect with
-        | "foreign-position" -> { ctx with Zipper = Zipper.create changed site |> require "Missing detached requirement" }
+        | "foreign-position" -> { ctx with Zipper = at changed 6 [NodeId.value site] }
         | "foreign-snapshot" -> { ctx with Graph = { changed with DeclarationRoots = [] } }
         | _ -> ctx
     let output = Alex.Witnesses.RequirementWitness.nanopass.Witness ctx ctx.Zipper.Focus
@@ -155,6 +163,7 @@ let ``a selected singleton returns its existing body carrier without an invented
                             [selected]
                             [input, inputForm; body, boolForm; selected, boolForm]
                             ([boolType, boolForm] @ inputTypes) } }
+        |> declareTraversalReadings
     let position = Zipper.create graph selected.Id |> require "Missing selected match"
     let operands = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode body.Id (Arg 1) (TInt(IntWidth 1)) operands

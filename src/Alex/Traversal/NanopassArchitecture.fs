@@ -135,43 +135,48 @@ let rec visitAllNodes
         // No re-rooting needed — Huet navigation maintains the path.
 
         // POST-ORDER Phase 1: Visit children FIRST (tree edges)
-        // Navigate down to each child via PSGZipper.down — preserves breadcrumbs.
+        // Read the source disposition before obtaining a body. An omitted
+        // position remains an original ordinal, never a missing-body lookup.
         let declarationLeaf = boundary.DeclarationLeaves.Contains currentNode.Id ||
                               spatial.Required.Contains currentNode.Id
         if not (isScopeBoundary currentNode) && not declarationLeaf then
-            let omittedActuals =
-                demand.Calls.TryFind currentNode.Id
-                |> Option.map (fun call -> Set.difference call.Omitted call.Eager)
-                |> Option.defaultValue Set.empty
-            currentNode.Children |> List.iteri (fun childIndex childId ->
-                if childIndex > 0 && omittedActuals.Contains(childIndex - 1) then () else
-                match Revision.tryNode childId visitedCtx.Graph with
-                | Some childNode when not childNode.IsReachable ->
-                    // Reachability is CCS's decision, read here: a child the graph marks unreachable
-                    // (a module's quotation declaration, D9; anything nothing executes) is not witnessed.
-                    ()
-                | Some childNode ->
-                    // Navigate zipper DOWN to this child — builds path with parent breadcrumb
-                    match PSGZipper.down childIndex visitedCtx.Zipper with
-                    | Some childZipper ->
-                        let childCtx = { visitedCtx with Zipper = childZipper }
-                        visitAllNodes witness childCtx childNode visited
-                    | None ->
-                        Diagnostic.error (Some currentNode.Id) (Some "Traversal") (Some "structural child")
-                            $"Cannot descend to declared child {NodeId.value childId} at index {childIndex}"
-                        |> fun diagnostic -> MLIRAccumulator.addError diagnostic visitedCtx.Accumulator
-                | None ->
-                    Diagnostic.error (Some currentNode.Id) (Some "Traversal") (Some "structural child")
-                        $"Declared child {NodeId.value childId} is absent from the current graph"
-                    |> fun diagnostic -> MLIRAccumulator.addError diagnostic visitedCtx.Accumulator
-            )
+            let refuse reason =
+                Diagnostic.error (Some currentNode.Id) (Some "Traversal") (Some "source child disposition") reason
+                |> fun diagnostic -> MLIRAccumulator.addError diagnostic visitedCtx.Accumulator
+            match visitedCtx.Graph.SourceReadings.Children.TryFind currentNode.Id with
+            | None -> refuse "The current occurrence has no source-authored child disposition account."
+            | Some children when children.Length <> currentNode.Children.Length ->
+                refuse "The source child disposition account does not cover every original position."
+            | Some children ->
+                List.zip currentNode.Children children |> List.iteri (fun ordinal (childId, disposition) ->
+                    let declared =
+                        match disposition.Traversal with
+                        | ChildTraversal.EnterLocal id | ChildTraversal.SourceOmitted(_, id)
+                        | ChildTraversal.EnterImported(_, _, id) -> id
+                    if disposition.Ordinal <> ordinal || declared <> childId then
+                        refuse "The source child disposition differs from its original position."
+                    else
+                        match disposition.Traversal with
+                        | ChildTraversal.SourceOmitted _ -> ()
+                        | ChildTraversal.EnterImported _ ->
+                            refuse "An imported child requires its installed source-authorized scope; local traversal cannot reconstruct it."
+                        | ChildTraversal.EnterLocal _ ->
+                            match PSGZipper.down ordinal visitedCtx.Zipper with
+                            | Some childZipper ->
+                                visitAllNodes witness { visitedCtx with Zipper = childZipper } childZipper.Focus visited
+                            | None -> refuse (sprintf "Cannot enter source-declared local child %d at ordinal %d." (NodeId.value childId) ordinal))
 
         // A reference never places or emits its binding. The binding is witnessed at its own
         // settled structural position; a reference that reaches an unwitnessed binding is a
         // settlement gap reported by the reference witness, never repaired here.
 
         // THEN witness current node (after its structural children)
-        let witnessed = witness visitedCtx currentNode
+        let witnessed =
+            if obj.ReferenceEquals(priorErrors, visitedCtx.Accumulator.Errors) then
+                witness visitedCtx currentNode
+            else
+                WitnessOutput.errorCoded AX4001 (Some currentNode.Id) (Some "Traversal") (Some "required child occurrence")
+                    "The parent occurrence cannot be witnessed after a required child account or witness was refused."
         // The combined registry has already tried skipped witnesses. Validate
         // the chosen result before committing its operations or recalled value.
         let numericAdmission = validateNumericResult visitedCtx.Graph currentNode.Id witnessed.Result
@@ -290,18 +295,17 @@ let combineWitnesses (nanopasses: Nanopass list) : (WitnessContext -> SemanticNo
                 let contextInfo =
                     match node.Kind with
                     | SemanticKind.VarRef (name, Some bindingId) ->
-                        // For VarRef: show what the binding resolves to
-                        match Revision.tryNode bindingId ctx.Graph with
-                        | Some bindingNode ->
-                            let bindingChildKind =
-                                bindingNode.Children
-                                |> List.tryHead
-                                |> Option.bind (fun cid -> Revision.tryNode cid ctx.Graph)
-                                |> Option.map (fun cn -> sprintf "%A" cn.Kind |> fun s -> s.Split('\n').[0])
-                                |> Option.defaultValue "no children"
-                            sprintf "VarRef '%s' -> Binding %d (child: %s). Type: %s" name (NodeId.value bindingId) bindingChildKind typeStr
+                        // The binding's contract need not have an executable
+                        // body in this scope. Diagnostics read the same exact
+                        // binding-use account as the reference witness.
+                        match ctx.Graph.SourceReadings.BindingUses.TryFind node.Id with
+                        | Some contract when contract.Binding = bindingId ->
+                            sprintf "VarRef '%s' -> Binding %d (source declaration: %s). Type: %s"
+                                name (NodeId.value bindingId) contract.Name typeStr
                         | None ->
-                            sprintf "VarRef '%s' -> Binding %d (not found in graph). Type: %s" name (NodeId.value bindingId) typeStr
+                            sprintf "VarRef '%s' -> Binding %d (source binding-use account missing). Type: %s" name (NodeId.value bindingId) typeStr
+                        | Some _ ->
+                            sprintf "VarRef '%s' -> Binding %d (source binding-use account disagrees). Type: %s" name (NodeId.value bindingId) typeStr
                     | _ ->
                         sprintf "Kind: %s. Type: %s" (kindStr.Split('\n').[0]) typeStr
                 WitnessOutput.error (sprintf "No witness handled node %A — %s" node.Id contextInfo)
@@ -329,59 +333,50 @@ let runAllNanopasses
     // Create combined witness that tries all nanopasses at each node
     let combinedWitness = combineWitnesses nanopasses
 
-    // Publication authorizes import declaration scopes separately from runtime
-    // reachability. A declaration-only module still owns its physical imports.
-    let boundaryScopes =
-        let boundary = graph.Emission.Boundary
-        Set.union (boundary.ByScope.Keys |> Set.ofSeq)
-                  (boundary.IntrinsicWriteImports.Values |> Seq.map _.Scope |> Set.ofSeq)
-    let spatial = graph.Emission.Spatial
-    let sourceRoots = Set.unionMany [boundaryScopes; spatial.ByScope.Keys |> Set.ofSeq; spatial.Required; spatial.CodeRoots]
+    let refuse nodeId part reason =
+        Diagnostic.error (Some nodeId) (Some "Traversal") (Some part) reason
+        |> fun diagnostic -> MLIRAccumulator.addError diagnostic sharedAcc
 
-    // Process a single structural root node
-    let processRoot (nodeId: NodeId) =
-        if not (Set.contains nodeId !globalVisited) then
-            match Revision.tryNode nodeId graph with
-            | Some node when node.IsReachable || sourceRoots.Contains nodeId ->
-                match PSGZipper.create graph nodeId with
-                | None ->
-                    Diagnostic.error (Some nodeId) (Some "Traversal") (Some "root occurrence")
-                        (sprintf "Alex traversal could not focus declared root %d in the current graph" (NodeId.value nodeId))
-                    |> fun diagnostic -> MLIRAccumulator.addError diagnostic sharedAcc
-                | Some initialZipper ->
-                    let nodeCtx = {
-                        Graph = graph
-                        Coeffects = coeffects
-                        Accumulator = sharedAcc
-                        RootAccumulator = sharedAcc
-                        ScopeContext = rootScope
-                        RootScopeContext = rootScope
-                        Zipper = initialZipper
-                        GlobalVisited = globalVisited
-                        TraversalVisited = globalVisited  // Default: same as global; LambdaWitness overrides on FPGA
-                    }
-                    visitAllNodes combinedWitness nodeCtx node globalVisited
+    // Entry placement is a Baker fact. Module membership and an open statement
+    // never become a consumer census or a request for inactive bodies.
+    graph.SourceReadings.Entries
+    |> List.fold (fun importedScopes (entry: SourceWitnessEntry) ->
+        // Even an already witnessed body or installed import must have a
+        // current, complete account for every declared entry occurrence.
+        let admitted =
+            match RevisionNavigation.checkContext graph entry.Focus entry.Context with
+            | Result.Error reason ->
+                refuse entry.Focus "source entry" reason
+                false
+            | Result.Ok _ -> true
+        if not admitted then importedScopes else
+        match Revision.tryNode entry.Focus graph with
+        | Some _ when globalVisited.Value.Contains entry.Focus -> importedScopes
+        | Some _ ->
+            match PSGZipper.createAt graph entry.Focus entry.Context with
+            | None -> refuse entry.Focus "source entry" "The declared entry does not match its complete source occurrence account."
+            | Some zipper ->
+                let context =
+                    { Graph = graph; Coeffects = coeffects; Accumulator = sharedAcc; RootAccumulator = sharedAcc
+                      ScopeContext = rootScope; RootScopeContext = rootScope; Zipper = zipper
+                      GlobalVisited = globalVisited; TraversalVisited = globalVisited }
+                visitAllNodes combinedWitness context zipper.Focus globalVisited
+            importedScopes
+        | None when entry.Reason = SourceEntryReason.BoundaryScope ->
+            if Set.contains entry.Focus importedScopes then importedScopes else
+            match graph.SourceReadings.ContextHeaders.TryFind entry.Focus with
             | Some _ ->
-                // Reachability is CCS's decision: an unreachable root is not witnessed.
-                ()
-            | None ->
-                Diagnostic.error (Some nodeId) (Some "Traversal") (Some "root occurrence")
-                    (sprintf "PSG settlement (DeclarationRoots/ModuleClassifications) names root %d, which is absent from the current graph" (NodeId.value nodeId))
-                |> fun diagnostic -> MLIRAccumulator.addError diagnostic sharedAcc
-
-    // The graph's declaration roots own execution. In particular, Baker's
-    // startup root contains its ordered initializer spine; a witness never
-    // discovers or schedules initialization from lexical module membership.
-    for codeRoot in spatial.CodeRoots do
-        processRoot codeRoot
-    for nodeId, _ in graph.DeclarationRoots do
-        processRoot nodeId
-    for KeyValue(moduleId, classification) in graph.ModuleClassifications do
-        for definition in classification.Definitions do
-            processRoot definition
-        processRoot moduleId
-    for scope in sourceRoots do
-        processRoot scope
+                match Alex.Patterns.PlatformPatterns.boundaryImportsAt entry.Focus graph.Emission.Boundary with
+                | Result.Error reason -> refuse entry.Focus "boundary owner" reason
+                | Result.Ok operations -> rootScope.Value <- ScopeContext.addOps operations rootScope.Value
+                Set.add entry.Focus importedScopes
+            | _ ->
+                refuse entry.Focus "boundary owner" "The source entry has no matching body-free context account."
+                importedScopes
+        | None ->
+            refuse entry.Focus "source entry" "The source-authorized entry body is absent from this revision."
+            importedScopes) Set.empty
+    |> ignore
 
 /// Main entry point: Execute all nanopasses and return accumulator
 let executeNanopasses

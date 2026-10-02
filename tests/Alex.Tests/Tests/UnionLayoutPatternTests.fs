@@ -53,7 +53,9 @@ let private stated bits present =
                             SourceTypes = held |> List.map (fun held -> held.Id, held.Type) |> Map.ofList
                             Layouts = Map.ofList [unionType, union]
                             OccurrenceRepresentations = forms |> List.map (fun (id, form) -> id, Ok form) |> Map.ofList } } }
-    let graph = { placed with Codata = { placed.Codata with Escapes = Map.ofList [storage.Id, EscapeKind.StackScoped] } }
+    let graph =
+        { placed with Codata = { placed.Codata with Escapes = Map.ofList [storage.Id, EscapeKind.StackScoped] } }
+        |> declareTraversalReadings
     graph, storage, selected
 
 [<Theory>]

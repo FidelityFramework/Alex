@@ -121,6 +121,7 @@ let arrayRead unsigned =
                     Memory =
                         { stated.Emission.Memory with
                             Operations = Map.ofList [ (call.Id, MemoryWitnessOperation.ArrayAccess access) ] } } }
+        |> declareTraversalReadings
     let position =
         Zipper.create graph binding.Id |> require "Missing fixture binding"
         |> atChild lambda.Id |> atChild call.Id

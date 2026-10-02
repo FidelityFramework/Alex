@@ -56,7 +56,13 @@ let private terminalAdmitted (ctx: WitnessContext) (node: SemanticNode) arms : R
         match requirement, ctx.Zipper.Path with
         | Some contract, step :: _ ->
             Result.Ok (
-                step.Parent.Id = contract.Frontier && step.LeftSiblings = [contract.Site] && step.RightSiblings.IsEmpty
+                step.Parent = contract.Frontier && step.Port = OccurrencePort.StructuralChild
+                && step.Ordinal = 1 && step.Extent = 2
+                && (ctx.Graph.SourceReadings.Ports.TryFind (step.Parent, step.Port)
+                    |> Option.exists (fun account ->
+                        account.Stamp = step.Stamp && account.Extent = step.Extent
+                        && account.Positions.TryFind 0 = Some contract.Site
+                        && account.Positions.TryFind 1 = Some node.Id))
                 && Set.contains contract.Site ctx.TraversalVisited.Value
                 && (MLIRAccumulator.recallNode contract.Site ctx.Accumulator |> Option.exists (fun (_, ty) ->
                     ty = mapTypeAt contract.Site ctx)))

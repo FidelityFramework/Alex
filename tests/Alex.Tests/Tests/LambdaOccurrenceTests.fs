@@ -392,6 +392,7 @@ let ``definition discovered inside a dependency is reused by later reference and
                 Emission =
                     { raw.Emission with
                         Numeric = { raw.Emission.Numeric with Values = Map.add bodyId participants raw.Emission.Numeric.Values } } }
+            |> declareTraversalReadings
         else raw
     let operands = MLIRAccumulator.empty ()
     let rootScope = ref (ScopeContext.root ())

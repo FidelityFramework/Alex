@@ -30,35 +30,30 @@ let pBoundaryDeclaration : PSGParser<MLIROp list * TransferResult> =
 
 /// Witness exactly the imports assigned to this source scope. No call inventory,
 /// signature discovery, symbol reconciliation or declaration hoisting occurs here.
+let boundaryImportsAt (scope: NodeId) (boundary: BoundaryEmissionProjection) : Result<MLIROp list, string> =
+    let rec foreign ids =
+        match ids with
+        | [] -> Result.Ok []
+        | id :: rest ->
+            match boundary.Imports.TryFind id with
+            | None -> Result.Error "Published import scope names an absent declaration."
+            | Some declaration when declaration.Scope <> scope ->
+                Result.Error "Published import has a different source owner scope."
+            | Some declaration ->
+                foreign rest |> Result.map (fun following -> publishedFuncDecl declaration :: following)
+    foreign (boundary.ByScope.TryFind scope |> Option.defaultValue [])
+    |> Result.map (fun declarations ->
+        declarations @ (boundary.IntrinsicWriteImports.Values
+                        |> Seq.filter (fun declaration -> declaration.Scope = scope)
+                        |> Seq.map publishedIntrinsicWriteDecl |> Seq.toList))
+
 let pBoundaryImports : PSGParser<MLIROp list> =
     parser {
         let! node = getCurrentNode
         let! boundary = pBoundary
-        let imports = boundary.ByScope.TryFind node.Id |> Option.defaultValue []
-        let rec witness (ids: NodeId list) : PSGParser<MLIROp list> = parser {
-            match ids with
-            | [] -> return []
-            | id :: rest ->
-                match boundary.Imports.TryFind id with
-                | None -> return! fail (Message "Published import scope names an absent declaration.")
-                | Some declaration ->
-                    do! ensure (declaration.Scope = node.Id) "Published import has a different source owner scope."
-                    let! operation = pPublishedFuncDecl declaration
-                    let! following = witness rest
-                    return operation :: following
-        }
-        let! foreign = witness imports
-        let declarations = boundary.IntrinsicWriteImports.Values |> Seq.filter (fun declaration -> declaration.Scope = node.Id) |> Seq.toList
-        let rec intrinsicImports declarations : PSGParser<MLIROp list> = parser {
-            match declarations with
-            | [] -> return []
-            | declaration :: rest ->
-                let! operation = pPublishedIntrinsicWriteDecl declaration
-                let! following = intrinsicImports rest
-                return operation :: following
-        }
-        let! intrinsic = intrinsicImports declarations
-        return foreign @ intrinsic
+        match boundaryImportsAt node.Id boundary with
+        | Result.Ok declarations -> return declarations
+        | Result.Error reason -> return! fail (Message reason)
     }
 
 /// The source owns whether an adaptation exists and its exact operation.

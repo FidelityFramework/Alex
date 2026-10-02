@@ -346,7 +346,10 @@ let private annotatedIntrinsic applied depth =
                 ValueShapes = callableShapes (aliases @ [root]) |> Map.ofList
                 Symbols = Map.ofList [NodeId root, CallableSymbolName.RootBinding "value"]
                 IntrinsicAliases = Set.ofList (ids aliases) }
-    { revision (wrappers @ holders) with Emission = { Empty.emission with Callable = callable } }, ids annotations, NodeId root
+    let graph =
+        { revision (wrappers @ holders) with Emission = { Empty.emission with Callable = callable } }
+        |> declareTraversalReadings
+    graph, ids annotations, NodeId root
 
 [<Theory>]
 [<InlineData(true, 1)>]
@@ -433,6 +436,7 @@ let private continuationRead foreignOwner =
                 Declarations = callable.Declarations.Add(generator, declared)
                 Symbols = callable.Symbols.Add(generator, CallableSymbolName.Anonymous generator)
                 ClosedData = Set.union callable.ClosedData (Set.ofList (ids [17; 18; 19; 21; 22; 24; 25])) })
+        |> declareTraversalReadings
     graph, frameValue, read
 
 [<Theory>]

@@ -76,7 +76,9 @@ let private fixture () =
         node 3 (SemanticKind.IfThenElse(guard.Id, thenBranch.Id, Some elseBranch.Id)) unitIdentity [0; 1; 2] (Some 4)
     let binding = node 4 (SemanticKind.Binding("effectResult", false, false, None)) unitIdentity [3] None
     let stated = revision [guard; thenBranch; elseBranch; conditional; binding; domainNode 5; domainNode 6; domainNode 7; domainNode 8]
-    let graph = { stated with Emission = { stated.Emission with Callable = callable; Numeric = numeric } }
+    let graph =
+        { stated with Emission = { stated.Emission with Callable = callable; Numeric = numeric } }
+        |> declareTraversalReadings
     let position = Zipper.create graph binding.Id |> require "Missing unit fixture binding" |> atChild conditional.Id
     position, thenBranch.Id, elseBranch.Id
 

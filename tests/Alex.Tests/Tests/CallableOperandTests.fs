@@ -176,7 +176,7 @@ let ``callable signature refuses missing or unresolved boundary representation w
     let fixture = fixture false
     let representations = fixture.Graph.Emission.Numeric.OccurrenceRepresentations.Remove(NodeId 1)
     let representations =
-        if unresolved then representations.Add(NodeId 1, Error "source boundary remains unresolved") else representations
+        if unresolved then representations.Add(NodeId 1, Result.Error "source boundary remains unresolved") else representations
     let graph = fixture.Graph |> withNumeric (fun numeric -> { numeric with OccurrenceRepresentations = representations })
     let ctx = context graph fixture.Owner
     let reason = Operands.project ctx fixture.Owner |> failure
@@ -204,7 +204,7 @@ let ``lazy thunk declaration reads its settled symbol without an implementation 
     | Ok(Some(symbol, _, body)) when not missingSymbol ->
         Assert.Equal("lambda_4", symbol)
         Assert.Equal(NodeId 3, body)
-    | Error reason when missingSymbol -> Assert.Contains("source-published declaration symbol for code 4", reason)
+    | Result.Error reason when missingSymbol -> Assert.Contains("source-published declaration symbol for code 4", reason)
     | other -> failwithf "Unexpected source declaration reading: %A" other
     Assert.Empty ctx.Accumulator.AllOps
 
@@ -419,6 +419,7 @@ let private higherOrder captured returnsCallable =
                 Declarations = adding declarations held.Declarations
                 ClosedData = Set.union held.ClosedData (Set.ofList (ids closed)) })
         |> withNumeric (fun held -> { held with OccurrenceRepresentations = adding forms held.OccurrenceRepresentations })
+        |> declareTraversalReadings
     revised, NodeId binding, NodeId callable, fixture.Owner
 
 /// The same revision without the carrier row of one occurrence.
@@ -557,6 +558,7 @@ let private measuredFixture () =
                 ClosedData = Set.ofList (ids [0; 2; 6]) })
         |> withNumeric (fun numeric ->
             { numeric with OccurrenceRepresentations = adding (represented real [1; 3]) numeric.OccurrenceRepresentations })
+        |> declareTraversalReadings
     measuredGraph, declarationId, existing.Alias, existing.Other, code.Id
 
 [<Fact>]
@@ -622,6 +624,7 @@ let private measuredCallFixture () =
             { numeric with
                 OccurrenceRepresentations =
                     adding (represented byteArray [20] @ represented real [21; 22]) numeric.OccurrenceRepresentations })
+        |> declareTraversalReadings
     called, call.Id, implementation, parameters, row
 
 [<Fact>]
@@ -634,7 +637,20 @@ let ``direct physical parameters require the current instantiated call and retai
     match List.last parameters with
     | _, TypeIdentity.Numeric(_, dimension), _ -> Assert.NotEmpty dimension.Vars
     | _, other, _ -> failwithf "The shared code formal is not a measured number: %A" other
-    Operands.parametersAtCall (context graph implementation) site implementation parameters |> failure |> ignore
+    // The shared implementation also occurs under the measured declaration.
+    // Select the explicit physical binding occurrence for this refusal control;
+    // a unique-occurrence observer must not choose one of those paths for us.
+    let implementationPath =
+        graph.SourceReadings.Contexts[implementation]
+        |> List.find (fun path -> path.Head.Parent = NodeId 18)
+    let outsideCall =
+        { context graph site with
+            Zipper = Zipper.createAt graph implementation implementationPath |> require "Missing physical implementation occurrence" }
+    let reason = Operands.parametersAtCall outsideCall site implementation parameters |> failure
+    Assert.Contains("requires its current Huet occurrence", reason)
+    Assert.Empty outsideCall.Accumulator.AllOps
+    Assert.Empty outsideCall.Accumulator.NodeAssoc
+    Assert.Empty outsideCall.Accumulator.CallableAssoc
 
 [<Theory>]
 [<InlineData("missing source call")>]

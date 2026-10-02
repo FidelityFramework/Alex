@@ -48,6 +48,7 @@ let private stated () =
                             SourceTypes = held |> List.map (fun held -> held.Id, held.Type) |> Map.ofList
                             Layouts = Map.ofList [option, SettledLayout.Union(["None", None; "Some", Some SettledSlot.Bool], Some 1, Some 2, Some 1)]
                             OccurrenceRepresentations = forms |> List.map (fun (id, form) -> id, Ok form) |> Map.ofList } } }
+        |> declareTraversalReadings
     graph, frame, current, view, payload, some, none, storage
 
 // Component inputs are already settled. These tests verify physical witnessing
@@ -63,7 +64,11 @@ let private fixture () =
     MLIRAccumulator.bindNode payload.Id (Arg 1) (TInt(IntWidth 1)) operands
     graph, frame, view, payload, some, none, storage, slot, operands
 
-let private focus graph (node: SemanticNode) = Zipper.create graph node.Id |> require "Missing aggregate fixture focus"
+let private focus graph (node: SemanticNode) =
+    // The frame view has two declared occurrences. Placement is observed at
+    // the exact Some initializer position; observing never chooses a DAG path.
+    if node.Id = NodeId 2 then at graph 4 [2]
+    else Zipper.create graph node.Id |> require "Missing aggregate fixture focus"
 
 [<Theory>]
 [<InlineData(false)>]

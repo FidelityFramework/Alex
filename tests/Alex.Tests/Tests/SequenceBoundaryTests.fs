@@ -33,7 +33,9 @@ let private fixture delegated owned =
         else []
     let raw = revision [payload; site; formal; generator; owner; binding]
     let origins = if owned then Map.ofList [owner.Id, owner.Id] else Map.empty
-    let graph = { raw with Edges = edges; Codata = { raw.Codata with SequenceOrigins = origins } }
+    let graph =
+        { raw with Edges = edges; Codata = { raw.Codata with SequenceOrigins = origins } }
+        |> declareTraversalReadings
     let position = Zipper.create graph binding.Id |> require "Missing sequence binding" |> atChild owner.Id
     position, generator.Id, site.Id, payload.Id
 

@@ -22,9 +22,14 @@ let pRequirement (ctx: WitnessContext) = parser {
         | Some contract -> preturn contract
         | None -> fail (Message "Requirement has no source-published ordered contract.")
     do! ensure (match ctx.Zipper.Path with
-                | step :: _ -> step.Parent.Id = contract.Frontier
-                               && step.LeftSiblings.IsEmpty
-                               && step.RightSiblings = [contract.Continuation]
+                | step :: _ -> step.Parent = contract.Frontier
+                               && step.Port = Fidelity.PSG.OccurrencePort.StructuralChild
+                               && step.Ordinal = 0 && step.Extent = 2
+                               && (ctx.Graph.SourceReadings.Ports.TryFind (step.Parent, step.Port)
+                                   |> Option.exists (fun account ->
+                                       account.Stamp = step.Stamp && account.Extent = step.Extent
+                                       && account.Positions.TryFind 0 = Some contract.Site
+                                       && account.Positions.TryFind 1 = Some contract.Continuation))
                 | [] -> false)
             "Requirement is outside its admitted source frontier."
     let! condition, conditionType = pRecallNode contract.Condition

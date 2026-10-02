@@ -108,6 +108,7 @@ let private fixture () =
         |> withData [3; 4; 5; 6]
         |> withNumeric carriers [1; 2]
         |> withDemand [marker.Id, operand.Id] [marker.Id, [demandRelation 1 0]]
+        |> declareTraversalReadings
     graph, root.Id, marker.Id, operand.Id
 
 [<Fact>]
@@ -162,6 +163,7 @@ let ``explicit demand refuses stale authority or absent scoped values`` defect =
                 Nodes = graph.Nodes.Add(marker, { graph.Nodes[marker] with Children = [] })
                 Demand = { graph.Demand with Operands = Map.empty } }
         | _ -> graph
+    let graph = declareTraversalReadings graph
     let accumulator = MLIRAccumulator.empty ()
     if defect <> "missing value" then MLIRAccumulator.bindNode operand (Arg 0) (TInt(IntWidth 1)) accumulator
     let position = Zipper.create graph root |> require "Missing root" |> atChild marker
@@ -191,6 +193,7 @@ let ``an eager effect remains inside its conditional arm for either guard value`
         |> withData [5; 6; 7; 8]
         |> withNumeric carriers [0; 2; 3; 4]
         |> withDemand [marker.Id, effect.Id] [marker.Id, [demandRelation 2 1]]
+        |> declareTraversalReadings
     let accumulator = MLIRAccumulator.empty ()
     let position = Zipper.create graph choice.Id |> require "Missing conditional"
     let ctx = context graph position accumulator
@@ -237,6 +240,7 @@ let private unitFixture () =
         |> withData [0; 1; 2; 3; 4; 5; 6]
         |> withNumeric [] []
         |> withDemand [marker.Id, effect.Id] [marker.Id, [demandRelation 1 0]]
+        |> declareTraversalReadings
     graph, root.Id, marker.Id, effect.Id
 
 [<Theory>]
@@ -247,13 +251,23 @@ let private unitFixture () =
 [<InlineData("different graph")>]
 let ``unit demand requires successful completion at the actual child occurrence`` defect =
     let graph, root, marker, effect = unitFixture ()
+    // The path-mismatch case uses a second actual parent of the same effect,
+    // rather than declaring the attached effect to be a detached root.
+    let alternate = node 7 (SemanticKind.Sequential [effect]) unitType [NodeId.value effect] None
+    let graph =
+        if defect = "different path" then
+            { graph with Nodes = graph.Nodes.Add(alternate.Id, alternate) }
+            |> declareTraversalReadings
+        else graph
     let operands = MLIRAccumulator.empty ()
     let position = Zipper.create graph root |> require "Missing unit root" |> atChild marker
     let ctx = context graph position operands
     match defect with
     | "visited only" -> ctx.GlobalVisited.Value <- Set.singleton effect
     | "different scope" -> MLIRAccumulator.completeVoid (atChild effect position) (ref (ScopeContext.root ())) operands
-    | "different path" -> MLIRAccumulator.completeVoid (Zipper.create graph effect |> require "Missing detached effect") ctx.ScopeContext operands
+    | "different path" ->
+        let child = Zipper.create graph alternate.Id |> require "Missing alternate effect parent" |> atChild effect
+        MLIRAccumulator.completeVoid child ctx.ScopeContext operands
     | "different graph" ->
         let other = { graph with DeclarationRoots = [] }
         let child = Zipper.create other root |> require "Missing other root" |> atChild marker |> atChild effect
@@ -337,6 +351,7 @@ let ``void Console call output remains in its eager conditional arm before unit 
         |> withData [1; 2; 3; 4; 5; 6; 7; 8]
         |> withNumeric carriers [0]
         |> withDemand [marker.Id, effect.Id] [marker.Id, [demandRelation 2 1]]
+        |> declareTraversalReadings
     let accumulator = MLIRAccumulator.empty ()
     let position = Zipper.create graph choice.Id |> require "Missing unit conditional"
     let ctx = context graph position accumulator
@@ -378,6 +393,7 @@ let ``failed void operand or subtree cannot acquire successful completion`` subt
             let container = { graph.Nodes[effect] with Kind = SemanticKind.Sequential [failure]; Children = [failure] }
             { graph with Nodes = graph.Nodes.Add(failure, child).Add(effect, container) }
         else graph
+    let graph = declareTraversalReadings graph
     let accumulator = MLIRAccumulator.empty ()
     let position = Zipper.create graph root |> require "Missing unit root" |> atChild marker
     let ctx = context graph position accumulator
