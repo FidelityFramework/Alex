@@ -139,6 +139,7 @@ let private fixture captured =
             Edges = edges
             Codata = codata
             Emission = { Empty.emission with Callable = callable; Numeric = numeric } }
+        |> declareTraversalReadings
       Owner = NodeId 5; Alias = NodeId 7; Other = NodeId 8
       Implementation = NodeId 4; Formal = NodeId 0 }
 
@@ -155,6 +156,57 @@ let private code shape ssa : Val = { SSA = ssa; Type = Operands.functionType sha
 let private environment shape ssa : Val =
     { SSA = ssa; Type = Operands.environmentType shape |> require "No environment in captured fixture" }
 let private heldEnvironment value = Operands.environment value |> require "Captured operand lost its environment"
+
+[<Fact>]
+let ``callable signature reads settled boundary representations without participant bodies`` () =
+    let fixture = fixture false
+    // These formals/results belong to another demanded scope. Their published
+    // signature and representation rows remain authoritative component inputs.
+    let graph = { fixture.Graph with Nodes = fixture.Graph.Nodes.Remove(NodeId 1).Remove(NodeId 3) }
+    let ctx = context graph fixture.Owner
+    let shape = Operands.project ctx fixture.Owner |> ok
+    Assert.Equal<MLIRType>(TFunc([boolean], [boolean]), Operands.functionType shape)
+    Assert.Empty ctx.Accumulator.AllOps
+    Assert.True((MLIRAccumulator.recallNode fixture.Owner ctx.Accumulator).IsNone)
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``callable signature refuses missing or unresolved boundary representation with no operands`` unresolved =
+    let fixture = fixture false
+    let representations = fixture.Graph.Emission.Numeric.OccurrenceRepresentations.Remove(NodeId 1)
+    let representations =
+        if unresolved then representations.Add(NodeId 1, Error "source boundary remains unresolved") else representations
+    let graph = fixture.Graph |> withNumeric (fun numeric -> { numeric with OccurrenceRepresentations = representations })
+    let ctx = context graph fixture.Owner
+    let reason = Operands.project ctx fixture.Owner |> failure
+    Assert.Contains("Callable signature data participant 1", reason)
+    Assert.Contains("source-published physical representation", reason)
+    if unresolved then Assert.Contains("source boundary remains unresolved", reason)
+    Assert.Empty ctx.Accumulator.AllOps
+    Assert.True((MLIRAccumulator.recallNode fixture.Owner ctx.Accumulator).IsNone)
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``lazy thunk declaration reads its settled symbol without an implementation body`` missingSymbol =
+    let fixture = fixture false
+    let graph = fixture.Graph |> withCallable (fun callable ->
+        { callable with
+            Declarations = callable.Declarations.Add(fixture.Implementation,
+                { callable.Declarations[fixture.Implementation] with Context = LambdaContext.LazyThunk })
+            Symbols =
+                if missingSymbol then Map.empty
+                else Map.ofList [fixture.Implementation, CallableSymbolName.Anonymous fixture.Implementation] })
+    let graph = { graph with Nodes = graph.Nodes.Remove(fixture.Implementation).Remove(NodeId 1).Remove(NodeId 3) }
+    let ctx = context graph fixture.Owner
+    match Operands.thunkDeclaration ctx fixture.Implementation with
+    | Ok(Some(symbol, _, body)) when not missingSymbol ->
+        Assert.Equal("lambda_4", symbol)
+        Assert.Equal(NodeId 3, body)
+    | Error reason when missingSymbol -> Assert.Contains("source-published declaration symbol for code 4", reason)
+    | other -> failwithf "Unexpected source declaration reading: %A" other
+    Assert.Empty ctx.Accumulator.AllOps
 
 [<Fact>]
 let ``returned closure preserves its own witnessed code and actual environment`` () =

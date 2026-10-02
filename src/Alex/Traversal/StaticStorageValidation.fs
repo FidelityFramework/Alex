@@ -27,13 +27,13 @@ let validate (graph: Revision) (ops: MLIROp list) : Result<unit, string> =
     match graph.StaticStringPool with
     | None -> if not pools.IsEmpty then errors.Add "emitted a byte pool without a settled BAREWire plan"
     | Some pool ->
-        let layoutAnchors = projection.LiteralPoolAnchors
+        let allocationAnchors = projection.LiteralPoolAnchors
         match pools with
         | [name, bytes, alignment, anchors] when name = pool.Symbol ->
             if bytes <> pool.Bytes || bytes.Length <> pool.Size then errors.Add "emitted pool bytes/extent differ from the settled plan"
             if alignment <> pool.Alignment then errors.Add "emitted pool alignment differs from the settled plan"
-            if layoutAnchors |> List.exists (fun anchor -> not (List.contains anchor anchors)) then
-                errors.Add "emitted pool lost its compiler layout obligation anchor"
+            if allocationAnchors |> List.exists (fun anchor -> not (List.contains anchor anchors)) then
+                errors.Add "emitted pool lost its source allocation obligation anchor"
         | _ -> errors.Add "expected exactly one allocation for the settled BAREWire string pool"
         let entries =
             pool.Entries |> List.collect (fun entry -> entry.NodeIds |> List.map (fun id -> id, entry)) |> Map.ofList

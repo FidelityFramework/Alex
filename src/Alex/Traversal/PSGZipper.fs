@@ -29,14 +29,7 @@ open Fidelity.PSG
 /// - The parent node we came from
 /// - The siblings to the left of our chosen child
 /// - The siblings to the right of our chosen child
-type PathStep = {
-    /// The parent node we descended from
-    Parent: SemanticNode
-    /// Siblings to the LEFT of our position (in order)
-    LeftSiblings: NodeId list
-    /// Siblings to the RIGHT of our position (in order)
-    RightSiblings: NodeId list
-}
+type PathStep = OccurrenceBreadcrumb
 
 /// The path from root to current focus (list of steps, most recent first)
 type ZipperPath = PathStep list
@@ -64,22 +57,24 @@ type PSGZipper = {
 // ZIPPER CREATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Create a zipper focused on a specific node
+/// Focus an exact source-authored occurrence. Context identities need not have
+/// executable bodies; the source port account preserves their correspondence.
+let createAt (graph: Revision) (focusId: NodeId) (path: ZipperPath) : PSGZipper option =
+    match Revision.tryNode focusId graph, RevisionNavigation.checkContext graph focusId path with
+    | Some node, Result.Ok _ -> Some { Focus = node; Path = path; Graph = graph }
+    | _ -> None
+
+/// A body with several actual occurrences requires an explicit path. Neither
+/// a missing inventory nor an ambiguous one permits re-rooting the zipper.
 let create (graph: Revision) (focusId: NodeId) : PSGZipper option =
-    match Revision.tryNode focusId graph with
-    | Some node ->
-        Some {
-            Focus = node
-            Path = []  // At root, no path
-            Graph = graph
-        }
-    | None -> None
+    match graph.SourceReadings.Contexts.TryFind focusId with
+    | Some [path] -> createAt graph focusId path
+    | _ -> None
 
 /// Create a zipper at the first declaration root
 let fromEntryPoint (graph: Revision) : PSGZipper option =
-    match graph.DeclarationRoots with
-    | (entryId, _) :: _ -> create graph entryId
-    | [] -> None
+    graph.SourceReadings.Entries
+    |> List.tryPick (fun entry -> createAt graph entry.Focus entry.Context)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NAVIGATION
@@ -91,35 +86,19 @@ let up (z: PSGZipper) : PSGZipper option =
     match z.Path with
     | [] -> None  // At root, cannot go up
     | step :: restPath ->
-        Some {
-            Focus = step.Parent
-            Path = restPath
-            Graph = z.Graph
-        }
+        createAt z.Graph step.Parent restPath
 
 /// Move DOWN to a specific child by index
 /// Records siblings left behind in the path
 let down (childIndex: int) (z: PSGZipper) : PSGZipper option =
-    let children = z.Focus.Children
-    if childIndex < 0 || childIndex >= List.length children then
-        None
-    else
-        let childId = List.item childIndex children
-        match Revision.tryNode childId z.Graph with
-        | None -> None
-        | Some childNode ->
-            let leftSiblings = List.take childIndex children
-            let rightSiblings = List.skip (childIndex + 1) children
-            let step = {
-                Parent = z.Focus
-                LeftSiblings = leftSiblings
-                RightSiblings = rightSiblings
-            }
-            Some {
-                Focus = childNode
-                Path = step :: z.Path
-                Graph = z.Graph
-            }
+    match RevisionNavigation.tryLocalChild z.Graph z.Focus.Id childIndex,
+          z.Graph.SourceReadings.Ports.TryFind(z.Focus.Id, OccurrencePort.StructuralChild) with
+    | Result.Ok child, Some port ->
+        let step =
+            { Parent = z.Focus.Id; Port = OccurrencePort.StructuralChild
+              Ordinal = childIndex; Extent = port.Extent; Stamp = port.Stamp }
+        createAt z.Graph child (step :: z.Path)
+    | _ -> None
 
 /// Move DOWN to the first child
 let downFirst (z: PSGZipper) : PSGZipper option =
@@ -130,58 +109,26 @@ let left (z: PSGZipper) : PSGZipper option =
     match z.Path with
     | [] -> None  // At root, no siblings
     | step :: restPath ->
-        match List.tryLast step.LeftSiblings with
-        | None -> None  // No left siblings
-        | Some leftId ->
-            match Revision.tryNode leftId z.Graph with
-            | None -> None
-            | Some leftNode ->
-                let newLeftSiblings = List.take (List.length step.LeftSiblings - 1) step.LeftSiblings
-                let newRightSiblings = z.Focus.Id :: step.RightSiblings
-                let newStep = {
-                    Parent = step.Parent
-                    LeftSiblings = newLeftSiblings
-                    RightSiblings = newRightSiblings
-                }
-                Some {
-                    Focus = leftNode
-                    Path = newStep :: restPath
-                    Graph = z.Graph
-                }
+        match z.Graph.SourceReadings.Ports.TryFind(step.Parent, step.Port) with
+        | Some port when step.Ordinal > 0 ->
+            port.Positions.TryFind(step.Ordinal - 1)
+            |> Option.bind (fun child -> createAt z.Graph child ({ step with Ordinal = step.Ordinal - 1 } :: restPath))
+        | _ -> None
 
 /// Move RIGHT to the next sibling
 let right (z: PSGZipper) : PSGZipper option =
     match z.Path with
     | [] -> None  // At root, no siblings
     | step :: restPath ->
-        match step.RightSiblings with
-        | [] -> None  // No right siblings
-        | rightId :: remainingRight ->
-            match Revision.tryNode rightId z.Graph with
-            | None -> None
-            | Some rightNode ->
-                let newLeftSiblings = step.LeftSiblings @ [z.Focus.Id]
-                let newStep = {
-                    Parent = step.Parent
-                    LeftSiblings = newLeftSiblings
-                    RightSiblings = remainingRight
-                }
-                Some {
-                    Focus = rightNode
-                    Path = newStep :: restPath
-                    Graph = z.Graph
-                }
+        match z.Graph.SourceReadings.Ports.TryFind(step.Parent, step.Port) with
+        | Some port when step.Ordinal + 1 < port.Extent ->
+            port.Positions.TryFind(step.Ordinal + 1)
+            |> Option.bind (fun child -> createAt z.Graph child ({ step with Ordinal = step.Ordinal + 1 } :: restPath))
+        | _ -> None
 
-/// Navigate to a specific node by ID (re-roots the zipper there)
+/// Focus the one declared occurrence of a body; an ambiguous occurrence refuses.
 let focusOn (nodeId: NodeId) (z: PSGZipper) : PSGZipper option =
-    match Revision.tryNode nodeId z.Graph with
-    | None -> None
-    | Some node ->
-        Some {
-            Focus = node
-            Path = []  // Re-rooted, path cleared
-            Graph = z.Graph
-        }
+    create z.Graph nodeId
 
 // ═══════════════════════════════════════════════════════════════════════════
 // FOCUS QUERIES
@@ -232,7 +179,7 @@ let requireNode (nodeId: NodeId) (z: PSGZipper) : SemanticNode =
 /// Actual enclosing lambda occurrences, nearest first. Navigation retains a
 /// shared node's current path rather than consulting its single Parent field.
 let enclosingLambdas (z: PSGZipper) : SemanticNode list =
-    z.Focus :: (z.Path |> List.map _.Parent)
+    z.Focus :: (z.Path |> List.choose (fun frame -> z.Graph.Nodes.TryFind frame.Parent))
     |> List.filter (fun node -> match node.Kind with SemanticKind.Lambda _ -> true | _ -> false)
 
 let enclosingLambdaIds (z: PSGZipper) : NodeId list = enclosingLambdas z |> List.map _.Id

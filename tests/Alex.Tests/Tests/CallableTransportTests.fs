@@ -117,6 +117,7 @@ let private fixture captured =
             Edges = edges
             Codata = codata
             Emission = { Empty.emission with Callable = callable; Numeric = numeric } }
+    let graph = declareBindingReadings graph
     graph, NodeId owner, NodeId 8, NodeId 9, NodeId 10, NodeId 12, NodeId 11
 
 let private context graph position accumulator =
@@ -238,6 +239,7 @@ let private annotatedCallee depth =
         { revision nodes with
             Codata = { Codata.empty with CallableCarriers = carriers }
             Emission = { Empty.emission with Callable = callable; Numeric = numeric } }
+    let graph = declareBindingReadings graph
     graph, NodeId reference, ids annotations, NodeId application, NodeId root
 
 [<Theory>]

@@ -38,27 +38,17 @@ let private witnessLiteralNode (ctx: WitnessContext) (node: SemanticNode) : Witn
                     WitnessOutput.errorDiag (Diagnostic.error (Some node.Id) (Some "Literal") (Some "StaticStringPool")
                         "Source string is absent from the settled BAREWire pool.")
                 | Some entry ->
-                    let ops, result = stringPoolView pool entry (Alex.Traversal.Values.values node.Id)
                     // All pool obligations travel on the single allocation, including those
-                    // for duplicate literals; no witness ordering can drop an anchor.
-                    // A literal with no published anchors carries no obligation; a pool member
-                    // absent from the revision is a settlement defect.
-                    let anchorReadings =
-                        pool.Entries
-                        |> List.collect (fun entry -> entry.NodeIds)
-                        |> List.map (fun id ->
-                            match ctx.Graph.Nodes.TryFind id with
-                            | Some literal -> Result.Ok literal.ObligationAnchors
-                            | None ->
-                                Result.Error $"PSG settlement (StaticStringPool) did not keep pooled literal {NodeId.value id} resident in the graph")
-                    match anchorReadings |> List.tryPick (function Result.Error reason -> Some reason | Result.Ok _ -> None) with
-                    | Some reason ->
-                        WitnessOutput.errorDiag (Diagnostic.error (Some node.Id) (Some "Literal") (Some "StaticStringPool") reason)
-                    | None ->
-                    let anchors =
-                        anchorReadings
-                        |> List.collect (function Result.Ok names -> names | Result.Error _ -> [])
-                        |> List.distinct
+                    // for duplicate literals. Baker publishes that inventory; another scope's
+                    // literal bodies need not be resident to spell the shared allocation.
+                    let anchors = ctx.Graph.Emission.Storage.LiteralPoolAnchors
+                    if anchors.Length <> (Set.ofList anchors).Count ||
+                       (anchors |> List.exists System.String.IsNullOrWhiteSpace) ||
+                       (node.ObligationAnchors |> List.exists (fun anchor -> not (List.contains anchor anchors))) then
+                        WitnessOutput.errorDiag (Diagnostic.error (Some node.Id) (Some "Literal") (Some "StaticStringPool")
+                            "PSG settlement (StaticStringPool) lacks the complete source-owned allocation obligation inventory for this literal.")
+                    else
+                    let ops, result = stringPoolView pool entry (Alex.Traversal.Values.values node.Id)
                     let globals =
                         if Set.contains pool.Symbol ctx.Accumulator.EmittedGlobals then []
                         else

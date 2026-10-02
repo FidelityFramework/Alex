@@ -19,51 +19,101 @@ The contract is the project `Fidelity.PSG`, in its own repository. The compiler 
 
 | Decision | State |
 | --- | --- |
-| D1 | Built as immutable F# types with a producer in the compiler service. The binary schema is not written. |
+| D1 | Immutable F# contract types and the compiler-service producer are built. The contract now also has a generated indexed binary layout and reader over BAREWire, with a separate .NET mapping owner. See D7–D10 for requirements and remaining implementation gaps; this is not complete consumer or port acceptance. |
 | D2 | Types cross as `TypeIdentity`, with every substitution applied. The refusal of a free variable is not enforced, because the binders of an enclosing declaration are not yet published. |
 | D3 | Built. Alex reads three environment variables for tracing and creates one random identifier per run. Both are listed as debt. |
 | D4 | Built. |
 | D5 | Not built. The identity is the compiler's counter value. See `03_Node_Identity.md`. |
 | D6 | Not built. Composer still reads Alex's operation values. |
 
-## Proposals the owner has not ruled on
+## Required indexed revision architecture: D7–D10
 
-These four were proposed as D7 to D10. Each is stated here as a question with its consequence.
+The owner has directed implementation of these four decisions. They govern the
+work now; the implementation gaps below remain work to complete, not decisions
+awaiting permission. Representation, lifetime and semantic acceptance are
+separate contracts.
 
-### D7. How are the bytes of a revision laid out?
+### D7. Offset-indexed revision images
 
-There are two ways to encode a graph as bytes.
+A revision has a position-independent, offset-indexed layout built on BAREWire's
+memory tier. Fixed-width directory entries identify each child's offset and
+extent; scalar leaves use bounded BARE encodings. Disk, mapped memory and a
+received buffer hold the same image bytes. Reading preserves every published
+identity and settled fact.
 
-A stream encoding writes each value after the previous one. A reader finds the hundredth node by reading the ninety-nine before it. BARE's message encoding is a stream encoding.
+`Fidelity.PSG.Binary` now supplies the generated layout and reader. Opening a
+view validates the envelope and sorted node index and materializes that index.
+`tryNode` then reads a selected node without decoding preceding node bodies.
+Opening or reading one node is not complete structural admission:
+`readRevision` reads every published field and runs the integrity check. Other
+fact tables currently use that complete reading. Source proof discharge and
+current-source authority remain outside representation validation.
 
-An offset-indexed layout writes fixed-width records and a table of positions. A reader finds the hundredth node by reading one table entry and going to that position.
+### D8. JSON inspection through Fidelity.Data
 
-The proposal is the offset-indexed layout, built on BAREWire's memory tier. A witness visits nodes in traversal order and looks up facts by node identity, so it needs the second kind of access. The file on disk holds the same bytes as the buffer in memory.
+The required interchange output is the binary revision. A separate reader
+shipped with the format must render its graph as JSON on demand using
+`Fidelity.Data`. Inspection belongs to independently owned sinks, not inline
+semantic work in the compiler or a serializer in Alex. A sink's lifetime and
+completion remain owned by its host.
 
-### D8. Where does JSON come from?
+The separate [Fidelity.PSG.Json reader](../../Fidelity.PSG/src/Fidelity.PSG.Json/README.md)
+now implements this boundary. It consumes the shared `Binary.readRevision`
+operation before generated writers render every published field with Fidelity.Data.
+There is no runtime reflection, separate binary decoder or semantic repair.
+Wide integers and exact decimal/floating representations retain their meaning.
+The explicit `PsgInspect` process owns its mapping and output sink; compiler
+publication neither renders JSON nor starts or waits for that process.
+Bozzetto's MCP base64 envelope remains a transport projection, distinct from
+this graph reader. Compiled reader checks do not establish acceptance of actual
+socket-delivered images, deployment, other host ports or performance.
 
-Today the compiler writes JSON files of the graph while it compiles, and the cost is paid on every compile.
+### D9. Shared image bytes and explicit mapping ownership
 
-The proposal is that the compiler emits the binary revision only. JSON is rendered from the binary by a separate reader when a person or a tool asks for it. The reader is shipped with the format, so inspection of an intermediate stays available.
+Image references are offsets from the image's start, never process addresses.
+Hosts must support reading the same completed immutable image from mapped
+memory, including a separate process with the appropriate resource access.
+Publication and reader lifetimes must keep those bytes stable.
 
-The owner has directed that JSON work uses `Fidelity.Data`, and that intermediates are written by independent sinks that do not delay the pipeline. The JSON reader of a revision is the first such sink.
+`Fidelity.PSG.Hosting.MappedRevision` now supplies a separate .NET file/mapping
+owner. Its reads serialize with disposal; retained views refuse access to the
+disposed source. The portable contract owns no file or mapping handle.
+`ByteSource.ofArray` provides an owned-copy convenience for a received or local
+buffer; it does not pin an array or establish a zero-copy path. The current
+mapping adapter copies bounded ranges. Cross-process deployment and performance
+acceptance must be demonstrated separately.
 
-### D9. Who may read the buffer?
+### D10. One generated reader over host byte sources
 
-A managed array belongs to one process. A second process cannot read it without a copy.
+Alex, inspection sinks, Bozzetto, Lattice and agents share the format's reader
+instead of implementing independent interpretations of the layout. The reader
+performs representation access only. Each host supplies a bounded, stable byte
+source and owns its availability and disposal: .NET memory, a Fable `DataView`,
+or a Clef memref. These host resources and callbacks never become semantic
+fields of a revision.
 
-The proposal is that a revision's buffer is memory-mapped and position-independent from the first version. Position-independent means every reference inside the buffer is an offset from the start of the buffer, never a machine address. Any process can then map the same bytes and read them where they are. A sink in a separate process depends on this. A pinned managed array remains available as a convenience inside one process.
+The generated PSG reader now uses BAREWire's `ByteSource`; array and .NET mapped
+adapters use the same decoding rules. Alex currently receives a fully read
+immutable `Revision`, not a byte-source view. Fable and Clef host adapters and
+their acceptance remain unimplemented here. The shared boundary is required;
+the .NET implementation does not prove those ports or their performance.
 
-### D10. How many readers are written?
-
-Alex, the JSON reader, Bozzetto, Lattice and agents all read revisions. If each wrote its own reader, each would hold its own opinion of the layout.
-
-The proposal is one reader library, generated from the schema. It is read-only. It reads through a byte source that each host supplies: a span in .NET, a `DataView` in Fable, a memref in Clef. It depends on no host library.
+The [indexed image architecture](../../Fidelity.PSG/docs/Indexed_Revision_Architecture.md)
+and [format description](../../Fidelity.PSG/docs/Binary_Images.md) describe the
+current reader and lifetime boundaries. They do not replace source, witness,
+backend or transport acceptance evidence.
 
 ## Requirements found while building
 
 - The revision header carries the contract version and the producer. The producer is a name today. An implementation epoch is owed.
-- A revision that Alex receives is complete. It is never a pruned dump.
+- A scope that Alex receives is complete for its authorized occurrences and
+  settled boundaries. Completeness does not require retained unused library
+  bodies. Baker owns live scope selection and dependency closure; publication
+  copies its stored rows. Alex cannot turn a retained graph into a scope by
+  filtering it. Initial service attachment supplies demanded scopes; subsequent
+  delivery changes affected scopes against the exact resident base. The current
+  complete-`Revision` reader and manifest do not yet implement that delivery
+  contract.
 - The rewrite record of the nanopasses is not in the revision. It is owed, either inside the revision or referenced from it.
 - A number in a JSON value of `Fidelity.Data` is a 64-bit float. An exact integer above 2^53 needs a string form or an integer case. Obligation constants and addresses reach that range.
 

@@ -52,6 +52,7 @@ let private numericRows (carriers: ScalarCarrier list) results : NumericWitnessP
 let private published nodes callable numeric =
     let stated = revision nodes
     { stated with Emission = { stated.Emission with Callable = callable; Numeric = numeric } }
+    |> declareBindingReadings
 
 [<Fact>]
 let ``conditional guard descends through its actual occurrence and recalls the enclosing operand`` () =

@@ -122,11 +122,10 @@ let pProgramCallableReference (ctx: WitnessContext) binding = parser {
           }
         | None, None -> preturn ([], None)
         | _ -> fail (Message "Program callable instance and physical environment convention disagree.")
-    let! code =
-        match state.Graph.Nodes.TryFind instance.Carrier.Implementation with
-        | Some code -> preturn code
-        | None -> fail (Message $"Baker callable transport did not settle the implementation node {NodeId.value instance.Carrier.Implementation} for program callable reference at node {NodeId.value occurrence}")
-    let symbol = Alex.CodeGeneration.CallableSymbols.lambda state.Graph code false
+    let! symbol =
+        match Alex.CodeGeneration.CallableSymbols.tryBinding state.Graph instance.Carrier.Implementation with
+        | Some symbol -> preturn symbol
+        | None -> fail (Message $"Baker callable transport did not settle the declaration symbol for code {NodeId.value instance.Carrier.Implementation} read by program callable occurrence {NodeId.value occurrence}")
     let! callableOps, value = pCallableValue occurrence shape symbol environment
     return operations @ callableOps, value
 }

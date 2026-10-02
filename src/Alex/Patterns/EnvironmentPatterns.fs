@@ -18,9 +18,7 @@ let private pEnvironmentType (layout: EnvironmentLayout) = parser {
     do! ensure (layout.Bytes >= 0 && layout.Alignment > 0 && (layout.Bytes > 0 || layout.Alignment = 1))
             $"Environment {NodeId.value layout.Owner} has no settled extent and alignment"
     do! ensure (not layout.Obligations.IsEmpty && (layout.Obligations |> List.forall (fun id ->
-        match state.Graph.Nodes |> Map.tryFind id with
-        | Some { Kind = SemanticKind.Obligation _ } -> true
-        | _ -> false))) $"Environment {NodeId.value layout.Owner} has no resident layout obligations"
+        state.Graph.CurrentClaims.ContainsKey id))) $"Environment {NodeId.value layout.Owner} has no current layout claim facts"
     return TMemRefStatic(layout.Bytes, TInt(IntWidth 8))
 }
 

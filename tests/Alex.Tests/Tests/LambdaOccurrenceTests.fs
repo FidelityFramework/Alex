@@ -160,6 +160,7 @@ let ``shared body reads each lambda occurrence's block argument and restores out
                     CallableCarriers = carriers }
             Emission = { Empty.emission with Callable = callable; Numeric = numeric }
             Obligations = [obligation] }
+    let graph = declareBindingReadings graph
     let operands = MLIRAccumulator.empty ()
     let carrier = TMemRefStatic(1, TInt(IntWidth 8))
     MLIRAccumulator.bindNode formal.Id (V(-20, 0)) carrier operands
@@ -358,6 +359,7 @@ let private published (functions: Function list) (domain: SemanticNode) : Revisi
     { revision ((functions |> List.collect nodesOf) @ [domain]) with
         Codata = { Codata.empty with CallableCarriers = carriers }
         Emission = { Empty.emission with Callable = callable; Numeric = numeric } }
+    |> declareBindingReadings
 
 [<Theory>]
 [<InlineData(false)>]
@@ -449,6 +451,7 @@ let ``occurrence-bound formal read emits its settled refinement before consumpti
                             Supports =
                                 Map.ofList [ formal.Id, Set.singleton formal.Id
                                              read.Id, Set.ofList (idsOf [formal; read]) ] } } }
+    let graph = declareBindingReadings graph
     let operands = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode formal.Id (Arg 1) (TInt(IntWidth 64)) operands
     let position = Zipper.create graph read.Id |> require "Missing refined formal read"

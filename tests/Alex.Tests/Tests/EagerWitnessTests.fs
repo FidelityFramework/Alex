@@ -290,6 +290,7 @@ let ``actual unit store completes once before the eager marker returns canonical
                     Callable =
                         { published.Emission.Callable with
                             Symbols = Map.ofList [cell.Id, CallableSymbolName.RootBinding "cell"] } } }
+    let graph = declareBindingReadings graph
     let accumulator = MLIRAccumulator.empty ()
     let cellType = TMemRefStatic(1, TInt(IntWidth 1))
     MLIRAccumulator.bindNode cell.Id (Arg 0) cellType accumulator

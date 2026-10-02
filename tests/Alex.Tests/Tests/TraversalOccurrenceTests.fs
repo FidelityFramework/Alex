@@ -188,6 +188,7 @@ let ``match scrutinee bindings guard and body retain the declared structural occ
                             SourceTypes = numeric.SourceTypes.Add(scrutinee.Id, inputType)
                             OccurrenceRepresentations = numeric.OccurrenceRepresentations.Add(scrutinee.Id, unsettled)
                             TypeRepresentations = numeric.TypeRepresentations.Add(inputType, unsettled) } } }
+    let graph = declareBindingReadings graph
     let position = Zipper.create graph root.Id |> require "Missing root"
     let visited = ref Set.empty
     let ctx = context graph position visited
@@ -206,7 +207,7 @@ let ``match scrutinee bindings guard and body retain the declared structural occ
     let rec witness ctx (node: SemanticNode) =
         Assert.Equal(node.Id, ctx.Zipper.Focus.Id)
         if Map.containsKey node.Id expected then
-            occurrences.Add(node.Id, ctx.Zipper.Path |> List.map (fun step -> step.Parent.Id))
+            occurrences.Add(node.Id, ctx.Zipper.Path |> List.map (fun step -> step.Parent))
         match node.Kind with
         | SemanticKind.CaseElimination _ -> (Alex.Witnesses.MatchWitness.createNanopass (fun () -> witness)).Witness ctx node
         | SemanticKind.IfThenElse _ -> (Alex.Witnesses.ControlFlowWitness.createNanopass (fun () -> witness)).Witness ctx node

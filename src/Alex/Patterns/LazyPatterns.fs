@@ -130,11 +130,10 @@ let pProgramLazyReference (ctx: WitnessContext) binding = parser {
     let environment = { SSA = Values.value occurrence 0; Type = Operands.environmentType shape }
     let! load = pMemRefGetGlobal environment.SSA (staticValueName allocation) environment.Type
     let layout = Operands.contract shape
-    let! thunk =
-        match ctx.Graph.Nodes.TryFind layout.Thunk with
-        | Some thunk -> preturn thunk
-        | None -> fail (Message $"Baker lazy recipe did not settle the thunk node {NodeId.value layout.Thunk} for program lazy reference at node {NodeId.value occurrence}")
-    let symbol = Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph thunk false
+    let! symbol =
+        match Alex.CodeGeneration.CallableSymbols.tryBinding ctx.Graph layout.Thunk with
+        | Some symbol -> preturn symbol
+        | None -> fail (Message $"Baker lazy recipe did not settle the declaration symbol for thunk {NodeId.value layout.Thunk} read by program lazy occurrence {NodeId.value occurrence}")
     let! code, value = pLazyValue occurrence shape symbol environment
     return load :: code, value
 }

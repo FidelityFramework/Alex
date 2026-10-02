@@ -214,9 +214,7 @@ let private pFrameType (frame: ContinuationFrame) = parser {
     do! ensure (frame.Bytes > 0 && frame.Alignment > 0) $"Continuation {NodeId.value frame.Owner} has no settled frame extent and alignment"
     do! ensure (not frame.Obligations.IsEmpty) $"Continuation {NodeId.value frame.Owner} has no resident allocation obligations"
     do! ensure (frame.Obligations |> List.forall (fun id ->
-        match state.Graph.Nodes |> Map.tryFind id with
-        | Some { Kind = SemanticKind.Obligation _ } -> true
-        | _ -> false)) $"Continuation {NodeId.value frame.Owner} references a missing allocation obligation"
+        state.Graph.CurrentClaims.ContainsKey id)) $"Continuation {NodeId.value frame.Owner} references a missing current allocation claim"
     return TMemRefStatic(frame.Bytes, TInt(IntWidth 8))
 }
 

@@ -89,3 +89,90 @@ let coeffects (pointerBits: int) : TransferCoeffects =
 /// Run a Pattern at a position.
 let matchAt parser (position: Zipper.PSGZipper) pointerBits operands =
     tryMatchWithDiagnostics parser position.Graph position.Focus position (coeffects pointerBits) operands
+
+/// Declare the positional accounts of a known finite component fixture. All
+/// paths through shared children are retained; Parent metadata is not a path.
+/// This is fixture authoring, never a production navigation or authority step.
+let declareTraversalReadings (graph: Revision) : Revision =
+    let live = graph.Nodes |> Map.filter (fun _ body -> body.IsReachable)
+    let structural =
+        live |> Map.toList |> List.map (fun (id, body) ->
+            let stamp = sprintf "fixture:structural:%d:%A" (NodeId.value id) body.Children
+            let positions = body.Children |> List.indexed |> List.filter (fun (_, child) -> live.ContainsKey child) |> Map.ofList
+            (id, OccurrencePort.StructuralChild), ({ Extent = body.Children.Length; Stamp = stamp; Positions = positions }: SourcePortAccount))
+    let modules =
+        graph.Nodes |> Map.toList |> List.choose (fun (id, body) ->
+            match body.Kind with
+            | SemanticKind.ModuleDef(name, members) ->
+                let positions = members |> List.indexed |> List.filter (fun (_, child) -> live.ContainsKey child) |> Map.ofList
+                let account : SourcePortAccount =
+                    { Extent = members.Length; Stamp = sprintf "fixture:declarations:%d:%A" (NodeId.value id) members; Positions = positions }
+                Some(id, name, account)
+            | _ -> None)
+    let ports =
+        structural @ (modules |> List.map (fun (id, _, account) -> (id, OccurrencePort.ModuleDeclaration), account)) |> Map.ofList
+    let parents =
+        ports |> Map.toList |> List.collect (fun ((parent, port), account) ->
+            account.Positions |> Map.toList |> List.map (fun (ordinal, child) ->
+                child, ({ Parent = parent; Port = port; Ordinal = ordinal; Extent = account.Extent; Stamp = account.Stamp }: OccurrenceBreadcrumb)))
+        |> List.groupBy fst |> List.map (fun (child, frames) -> child, List.map snd frames) |> Map.ofList
+    let rec paths (seen: Set<NodeId>) (id: NodeId) =
+        if seen |> Set.contains id then failwithf "Fixture positional declaration contains a structural cycle at %d" (NodeId.value id)
+        else
+            match parents.TryFind id with
+            | None -> [[]]
+            | Some frames -> frames |> List.collect (fun frame -> paths (seen.Add id) frame.Parent |> List.map (fun outer -> frame :: outer))
+    let positions = Set.union (live.Keys |> Set.ofSeq) (modules |> List.map (fun (id, _, _) -> id) |> Set.ofList)
+    let contexts = positions |> Seq.map (fun id -> id, paths Set.empty id) |> Map.ofSeq
+    let children =
+        live |> Map.map (fun _ body ->
+            body.Children |> List.mapi (fun ordinal child ->
+                { Ordinal = ordinal
+                  Traversal =
+                    if live.ContainsKey child then ChildTraversal.EnterLocal child
+                    else ChildTraversal.SourceOmitted(SupportKey.WholeOwningAnalysisRegion "fixture-owner", child) }))
+    let headers = modules |> List.map (fun (id, name, account) ->
+        id, ({ Identity = id; Name = name; Ports = Map.ofList [OccurrencePort.ModuleDeclaration, account] }: SourceContextHeader)) |> Map.ofList
+    let entries =
+        contexts |> Map.toList |> List.choose (fun (id, paths) ->
+            if live.ContainsKey id && List.contains [] paths then
+                Some ({ Focus = id; Reason = SourceEntryReason.ExecutableRoot; Context = [] }: SourceWitnessEntry)
+            else None)
+    let claims = graph.Nodes.Values |> Seq.choose (fun node ->
+        match node.Kind with SemanticKind.Obligation info -> Some(node.Id, info) | _ -> None) |> Map.ofSeq
+    { graph with
+        SourceReadings =
+            { graph.SourceReadings with Entries = entries; Ports = ports; Children = children; Contexts = contexts; ContextHeaders = headers }
+        CurrentClaims = claims }
+
+/// Explicit component-fixture declaration of the rows Baker publishes for
+/// these synthetic bindings. Production witnesses never perform this reading.
+/// Call once after stating the fixture's projections; observation cannot repair
+/// a missing or changed account, and `revision` itself still states no facts.
+let declareBindingReadings (graph: Revision) : Revision =
+    let callable = graph.Emission.Callable
+    let storage = graph.Emission.Storage
+    let uses = graph.Nodes |> Map.toList |> List.choose (fun (site, node) ->
+        match node.Kind with
+        | SemanticKind.VarRef(_, Some binding) ->
+            let name, bindingClass =
+                match graph.Nodes.TryFind binding with
+                | Some { Kind = SemanticKind.PatternBinding name } -> name, SourceBindingClass.Formal
+                | Some { Kind = SemanticKind.Binding(name, false, _, _) } -> name, SourceBindingClass.ImmutableValue
+                | Some { Kind = SemanticKind.Binding(name, true, _, _) } -> name, SourceBindingClass.MutableCell
+                | Some { Kind = SemanticKind.Lambda _ } -> sprintf "lambda_%d" (NodeId.value binding), SourceBindingClass.ImmutableValue
+                | Some { Kind = SemanticKind.SeqExpr _ } -> sprintf "sequence_%d" (NodeId.value binding), SourceBindingClass.ImmutableValue
+                | Some { Kind = SemanticKind.LazyExpr _ } -> sprintf "lazy_%d" (NodeId.value binding), SourceBindingClass.ImmutableValue
+                | Some { Kind = SemanticKind.ClosureValue _ } -> sprintf "closure_%d" (NodeId.value binding), SourceBindingClass.ImmutableValue
+                | Some body -> failwithf "Fixture binding-use declaration cannot state binding %d with kind %A" (NodeId.value binding) body.Kind
+                | None -> failwithf "Fixture binding-use declaration requires known binding %d" (NodeId.value binding)
+            Some(site,
+                { Binding = binding; Name = name; Class = bindingClass
+                  IsProgramSlotIntent = storage.Startup |> Option.exists (fun plan -> plan.ValueBindings.Contains binding)
+                  HasProgramSlotAuthority = storage.SlotAuthorities.Contains binding
+                  IsFunctionBinding = callable.FunctionBindings.Contains binding
+                  IsCallableDeclaration = callable.DefinitionOnlyBindings.Contains binding || callable.DefinitionOnlyLambdas.Contains binding
+                  IsPartialApplication = graph.Codata.Curry.PartialAppBindings.Contains binding })
+        | _ -> None) |> Map.ofList
+    { graph with SourceReadings = { graph.SourceReadings with BindingUses = uses } }
+    |> declareTraversalReadings

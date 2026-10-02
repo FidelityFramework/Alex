@@ -68,11 +68,10 @@ let pProgramSequenceReference (ctx: WitnessContext) binding = parser {
     let! instance, shape = pProgramInstance ctx binding
     let environment = { SSA = Values.value occurrence 0; Type = Operands.environmentType shape }
     let! access = pMemRefGetGlobal environment.SSA (Alex.Patterns.MemoryPatterns.staticValueName instance.Allocation) environment.Type
-    let! generator =
-        match state.Graph.Nodes.TryFind instance.Generator with
-        | Some generator -> preturn generator
-        | None -> fail (Message $"PSG settlement (WitnessEmission storage) did not settle a present generator for the program sequence reference at node {NodeId.value occurrence}: generator node {NodeId.value instance.Generator} is absent from the graph")
-    let symbol = Alex.CodeGeneration.CallableSymbols.lambda state.Graph generator false
+    let! symbol =
+        match Alex.CodeGeneration.CallableSymbols.tryBinding state.Graph instance.Generator with
+        | Some symbol -> preturn symbol
+        | None -> fail (Message $"PSG settlement (WitnessEmission storage) did not settle the declaration symbol for generator {NodeId.value instance.Generator} read by program sequence occurrence {NodeId.value occurrence}")
     let! operations, value = Alex.Patterns.ContinuationPatterns.pSequenceValue occurrence shape symbol environment
     return access :: operations, value
 }

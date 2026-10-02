@@ -292,7 +292,7 @@ type LazyOperand = internal {
 /// scope. This is emission completion, not source demand or global visitation.
 type VoidCompletion = internal {
     Graph: Revision
-    Path: (NodeId * NodeId list * NodeId list) list
+    Path: OccurrenceBreadcrumb list
     Scope: ScopeContext ref
 }
 
@@ -474,7 +474,7 @@ module MLIRAccumulator =
     let recallLazy nodeId (acc: MLIRAccumulator) = acc.LazyAssoc.TryFind nodeId
 
     let private occurrencePath (position: PSGZipper) =
-        position.Path |> List.map (fun step -> step.Parent.Id, step.LeftSiblings, step.RightSiblings)
+        position.Path
 
     let forgetVoid nodeId (acc: MLIRAccumulator) = acc.VoidAssoc <- acc.VoidAssoc.Remove nodeId
 
@@ -687,8 +687,8 @@ module EmissionCorrespondence =
                     scope
             let occurrence: Alex.Correspondence.Occurrence =
                 { Scope = scope; Focus = ctx.Zipper.Focus
-                  Anchor = ctx.Zipper.Path |> List.tryLast |> Option.map _.Parent |> Option.defaultValue ctx.Zipper.Focus
-                  Path = ctx.Zipper.Path |> List.map (fun step -> step.Parent, step.LeftSiblings, step.RightSiblings) }
+                  Anchor = ctx.Zipper.Path |> List.tryLast |> Option.map _.Parent |> Option.defaultValue ctx.Zipper.Focus.Id
+                  Path = ctx.Zipper.Path }
             let validation =
                 if not (System.Object.ReferenceEquals(ctx.Graph, ctx.Zipper.Graph)) then
                     Result.Error "Witness zipper and context refer to different checked graphs"

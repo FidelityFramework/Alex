@@ -107,17 +107,20 @@ and private componentsSeen (ctx: WitnessContext) seen permitted value : Result<M
     | CallableValueShape.Callable occurrence ->
         projectSeen ctx seen occurrence |> Result.map (fun shape -> shape.FunctionType :: Option.toList shape.EnvironmentType)
     | CallableValueShape.Data id ->
-        match ctx.Graph.Nodes.TryFind id with
-        | Some node ->
-            let projection = ctx.Graph.Emission.Callable
-            if not (projection.ClosedData.Contains id || permitted id) then
-                Result.Error "Callable data participant lacks its source-settled closed or quantified signature authority."
-            else
+        let projection = ctx.Graph.Emission.Callable
+        if not (projection.ClosedData.Contains id || permitted id) then
+            Result.Error "Callable data participant lacks its source-settled closed or quantified signature authority."
+        else
+            match ctx.Graph.Emission.Numeric.OccurrenceRepresentations.TryFind id with
+            | None ->
+                Result.Error (sprintf "Callable signature data participant %d lacks its source-published physical representation." (NodeId.value id))
+            | Some(Result.Error reason) ->
+                Result.Error (sprintf "Callable signature data participant %d has an unresolved source-published physical representation: %s" (NodeId.value id) reason)
+            | Some(Result.Ok _) ->
                 try
                     let ty = mapTypeAt id ctx
                     Result.Ok(if ty = TVoid then [] else [ty])
                 with ex -> Result.Error ex.Message
-        | None -> Result.Error "Callable signature data participant is absent."
 
 let project ctx occurrence = projectSeen ctx Set.empty occurrence
 let components ctx value = componentsSeen ctx Set.empty (fun _ -> false) value
@@ -158,7 +161,10 @@ let thunkDeclaration (ctx: WitnessContext) implementation =
     | Some { Context = LambdaContext.LazyThunk; Captures = []; Parameters = parameters; Result = body } ->
         match project ctx implementation with
         | Result.Ok shape when (environmentType shape).IsNone ->
-            Result.Ok(Some(Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph ctx.Graph.Nodes[implementation] false, parameters, body))
+            match Alex.CodeGeneration.CallableSymbols.tryBinding ctx.Graph implementation with
+            | Some symbol -> Result.Ok(Some(symbol, parameters, body))
+            | None ->
+                Result.Error (sprintf "Baker lazy thunk settlement lacks the source-published declaration symbol for code %d" (NodeId.value implementation))
         | Result.Ok _ ->
             Result.Error (sprintf "Baker lazy thunk settlement published declaration %d with an environment operand; a direct thunk declaration carries none" (NodeId.value implementation))
         | Result.Error reason ->

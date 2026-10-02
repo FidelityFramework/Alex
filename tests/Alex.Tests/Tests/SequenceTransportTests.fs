@@ -118,6 +118,7 @@ let private fixture () =
                 { stated.Emission with
                     Callable = { stated.Emission.Callable with ValueShapes = shapes }
                     Storage = { stated.Emission.Storage with Sequences = contracts } } }
+    let graph = declareBindingReadings graph
     graph, first, second, alias.Id, reference.Id, annotation.Id, block.Id, condition.Id, left.Id, right.Id, choice.Id
 
 let private context graph position accumulator =

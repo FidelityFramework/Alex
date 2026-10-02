@@ -198,6 +198,7 @@ let private fixture () =
                 { stated.Emission with
                     Callable = callables
                     Numeric = { stated.Emission.Numeric with OccurrenceRepresentations = representations } } }
+    let graph = declareBindingReadings graph
     { Graph = graph; Root = Zipper.create graph root.Id |> require "Missing component root"
       Initial = initial.Id; Replacement = replacement.Id; Cell = cell.Id; FirstRead = firstRead.Id
       Snapshot = snapshot.Id; Assignment = assignment.Id; Target = target.Id; LatestRead = latestRead.Id

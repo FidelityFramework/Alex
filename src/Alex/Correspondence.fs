@@ -20,9 +20,9 @@ type Occurrence = {
     Focus: SemanticNode
     /// The actual traversal root captured with the path. Keeping it separate
     /// makes a truncated/re-rooted breadcrumb list observably different.
-    Anchor: SemanticNode
+    Anchor: NodeId
     /// Actual Huet breadcrumbs, nearest parent first. Node.Parent is not used.
-    Path: (SemanticNode * NodeId list * NodeId list) list
+    Path: OccurrenceBreadcrumb list
 }
 
 [<NoEquality; NoComparison>]
@@ -42,15 +42,14 @@ let validateOccurrence scope (occurrence: Occurrence) =
     let nodes = (graph scope).Nodes
     let current (node: SemanticNode) =
         nodes.TryFind node.Id |> Option.exists (fun actual -> Object.ReferenceEquals(actual, node))
-    let rec path (child: NodeId) (steps: (SemanticNode * NodeId list * NodeId list) list) =
-        match steps with
-        | [] -> child = occurrence.Anchor.Id
-        | (parent, left, right) :: rest ->
-            current parent && parent.Children = left @ [child] @ right && path parent.Id rest
     if not (sameScope scope occurrence.Scope) then Error "Witness occurrence belongs to a different checked graph snapshot or witness run"
-    elif not (current occurrence.Anchor) || not (current occurrence.Focus) || not (path occurrence.Focus.Id occurrence.Path) then
+    elif not (current occurrence.Focus) then
         Error "Witness occurrence does not retain the actual current PSG focus and Huet path"
-    else Ok ()
+    else
+        RevisionNavigation.checkContext (graph scope) occurrence.Focus.Id occurrence.Path
+        |> Result.bind (fun anchor ->
+            if anchor = occurrence.Anchor then Ok ()
+            else Error "Witness occurrence anchor differs from its whole source-authored path")
 
 let definitionSymbol = function
     | MLIROp.SpatialModule(SpatialModuleWitness.Hardware plan) -> Some plan.Name
