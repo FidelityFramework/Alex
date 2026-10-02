@@ -26,6 +26,14 @@ let private sourceOccurrences (graph: Revision) =
     |> Seq.map _.Id
     |> Set.ofSeq
 
+/// Source declaration entries have their own physical completion obligation;
+/// context headers never acquire executable body membership from witnessing.
+let private sourceBoundaryScopes (graph: Revision) =
+    graph.SourceReadings.Entries
+    |> Seq.filter (fun entry -> entry.Reason = SourceEntryReason.BoundaryScope && not (graph.Nodes.ContainsKey entry.Focus))
+    |> Seq.map _.Focus
+    |> Set.ofSeq
+
 /// Report any required source occurrence missing from the shared traversal.
 let private validateCoverageWith
     (expected: Set<NodeId>)
@@ -33,28 +41,34 @@ let private validateCoverageWith
     (allVisited: Set<NodeId>)  // Merged visited set from all nanopasses
     : Diagnostic list =
 
-    let unwitnessedNodes =
-        Set.difference expected allVisited
-        |> Set.toList
-        |> List.map (fun id -> graph.Nodes[id])
-
-    // Generate error diagnostics for each unwitnessed node
-    unwitnessedNodes
-    |> List.map (fun node ->
-        // Extract first line of Kind for readable error message
-        let kindSummary =
-            match node.Kind.ToString().Split('\n') with
-            | lines when lines.Length > 0 -> lines.[0]
-            | _ -> node.Kind.ToString()
-
+    Set.difference expected allVisited
+    |> Set.toList
+    |> List.map (fun identity ->
+        let message =
+            match graph.Nodes.TryFind identity with
+            | Some node ->
+                let kindSummary = node.Kind.ToString().Split('\n').[0]
+                sprintf "Alex traversal did not witness required PSG occurrence '%s' (ID %d): no declaration root or structural parent placed it, or no witness claims its kind." kindSummary (NodeId.value identity)
+            | None ->
+                match graph.SourceReadings.ContextHeaders.TryFind identity with
+                | Some header when header.Identity = identity ->
+                    sprintf "Alex traversal did not witness required source boundary scope '%s' (ID %d): its assigned import plan was not successfully witnessed." header.Name (NodeId.value identity)
+                | _ ->
+                    sprintf "Alex traversal did not witness required source boundary scope (ID %d): its matching body-free context account is absent." (NodeId.value identity)
         Diagnostic.error
-            (Some node.Id)
+            (Some identity)
             (Some "CoverageValidation")
             (Some "Unwitnessed source occurrence")
-            (sprintf "Alex traversal did not witness required PSG occurrence '%s' (ID %d): no declaration root or structural parent placed it, or no witness claims its kind." kindSummary (NodeId.value node.Id)))
+            message)
 
 let validateCoverage (graph: Revision) (allVisited: Set<NodeId>) : Diagnostic list =
     validateCoverageWith (sourceOccurrences graph) graph allVisited
+
+/// Only a successful exact entry/import-plan reading creates this receipt.
+/// Whole traversal and the fresh common region must discharge every assigned
+/// body-free import scope independently of executable-region confinement.
+let validateBoundaryCoverage (graph: Revision) (boundaryScopes: Set<NodeId>) : Diagnostic list =
+    validateCoverageWith (sourceBoundaryScopes graph) graph boundaryScopes
 
 /// The producer owns region membership; this check only restricts the same
 /// whole-revision coverage obligation to those published members.

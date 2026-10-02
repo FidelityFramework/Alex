@@ -76,6 +76,48 @@ let private segmentation (graph: Revision) = graph.Codata.WitnessSegmentation.Va
 let private replaceRegions (graph: Revision) regions =
     { graph with Codata = { graph.Codata with WitnessSegmentation = Some { segmentation graph with Regions = regions } } }
 
+// The source assigns an import entry separately from its exact body partition.
+// This component states only the rows the declaration/traversal readers use.
+let private boundaryScopeFixture () =
+    let graph = fixture 0 "first" "second" Set.empty
+    let scope, identity = NodeId 1000, NodeId 1001
+    let declaration : BoundaryImport =
+        { Identity = identity; Binding = NodeId 1002; Scope = scope
+          Library = "selective-component"; Symbol = "imported"; CallingConvention = "C"
+          DeclarationPath = []; Parameters = []; Result = None
+          Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
+    let readings =
+        { graph.SourceReadings with
+            Entries = graph.SourceReadings.Entries @ [{ Focus = scope; Reason = SourceEntryReason.BoundaryScope; Context = [] }]
+            Contexts = graph.SourceReadings.Contexts.Add(scope, [[]])
+            ContextHeaders = graph.SourceReadings.ContextHeaders.Add(scope, { Identity = scope; Name = "Imports"; Ports = Map.empty }) }
+    let boundary =
+        { graph.Emission.Boundary with
+            Imports = Map.ofList [identity, declaration]; ByScope = Map.ofList [scope, [identity]] }
+    { graph with SourceReadings = readings; Emission = { graph.Emission with Boundary = boundary } }, scope, declaration
+
+[<Fact>]
+let ``selective common witnesses body-free imports without escaping its exact body partition`` () =
+    let graph, scope, declaration = boundaryScopeFixture ()
+    let originalMembers = (segmentation graph).Regions |> List.map _.Members |> Set.unionMany
+    Assert.Equal<Set<NodeId>>(graph.Nodes.Keys |> Set.ofSeq, originalMembers)
+    Assert.DoesNotContain(scope, originalMembers)
+    Assert.False(graph.Nodes.ContainsKey scope)
+    let result = run graph None Set.empty |> accepted
+    let common = result.Regions |> List.find (fun output -> output.Region.Flavor = WitnessRegionKind.Common)
+    Assert.Equal<MLIROp list>([FuncOp(BoundaryFuncDecl declaration)], common.Operations)
+    Assert.Equal<Set<NodeId>>(Set.ofList [NodeId 2; NodeId 5], common.Region.Members)
+    Assert.Equal(2, result.Statistics.WitnessedNodes[common.Region.Identity])
+
+[<Fact>]
+let ``selective common refuses a missing body-free import plan without widening body membership`` () =
+    let graph, scope, _ = boundaryScopeFixture ()
+    let boundary = { graph.Emission.Boundary with ByScope = Map.empty }
+    let graph = { graph with Emission = { graph.Emission with Boundary = boundary } }
+    Assert.False(graph.Nodes.ContainsKey scope)
+    Assert.DoesNotContain(scope, (segmentation graph).Regions |> List.map _.Members |> Set.unionMany)
+    run graph None Set.empty |> refused "no assigned import plan"
+
 [<Fact>]
 let ``unchanged function bypasses witnesses and rebinds exact current occurrence after node renumbering`` () =
     let before = fixture 0 "first-v1" "second-v1" Set.empty

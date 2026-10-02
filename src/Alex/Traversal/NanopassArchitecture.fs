@@ -366,10 +366,24 @@ let runAllNanopasses
             if Set.contains entry.Focus importedScopes then importedScopes else
             match graph.SourceReadings.ContextHeaders.TryFind entry.Focus with
             | Some _ ->
-                match Alex.Patterns.PlatformPatterns.boundaryImportsAt entry.Focus graph.Emission.Boundary with
-                | Result.Error reason -> refuse entry.Focus "boundary owner" reason
-                | Result.Ok operations -> rootScope.Value <- ScopeContext.addOps operations rootScope.Value
-                Set.add entry.Focus importedScopes
+                let boundary = graph.Emission.Boundary
+                let hasPlan =
+                    boundary.ByScope.ContainsKey entry.Focus ||
+                    (boundary.IntrinsicWriteImports.Values |> Seq.exists (fun declaration -> declaration.Scope = entry.Focus))
+                if not hasPlan then
+                    refuse entry.Focus "boundary owner" "The source boundary entry has no assigned import plan."
+                    importedScopes
+                else
+                    match Alex.Patterns.PlatformPatterns.boundaryImportsAt entry.Focus boundary with
+                    | Result.Error reason ->
+                        refuse entry.Focus "boundary owner" reason
+                        importedScopes
+                    | Result.Ok operations ->
+                        rootScope.Value <- ScopeContext.addOps operations rootScope.Value
+                        // A source declaration scope has no executable body, but
+                        // successful import witnessing still discharges coverage.
+                        sharedAcc.BoundaryScopes <- sharedAcc.BoundaryScopes.Add entry.Focus
+                        Set.add entry.Focus importedScopes
             | _ ->
                 refuse entry.Focus "boundary owner" "The source entry has no matching body-free context account."
                 importedScopes
@@ -406,7 +420,9 @@ let executeNanopasses
         runAllNanopasses registry.Nanopasses graph coeffects sharedAcc rootScope globalVisited
 
         // Coverage validation - ensure all reachable nodes were witnessed
-        let coverageDiagnostics = CoverageValidation.validateCoverage graph !globalVisited
+        let coverageDiagnostics =
+            CoverageValidation.validateCoverage graph !globalVisited @
+            CoverageValidation.validateBoundaryCoverage graph sharedAcc.BoundaryScopes
         if not (List.isEmpty coverageDiagnostics) then
             // Add coverage errors to accumulator
             for diag in coverageDiagnostics do

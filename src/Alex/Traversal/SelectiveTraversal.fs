@@ -161,7 +161,9 @@ let private freshCommon registry revision coeffects scope scalarMembers (region:
     let visited = ref scalarMembers
     runAllNanopasses registry.Nanopasses revision coeffects accumulator root visited
     let actual = Set.difference visited.Value scalarMembers
-    let coverage = CoverageValidation.validateRegionCoverage revision region.Members actual
+    let coverage =
+        CoverageValidation.validateRegionCoverage revision region.Members actual @
+        CoverageValidation.validateBoundaryCoverage revision accumulator.BoundaryScopes
     errors accumulator |> Result.bind (fun () ->
         if not coverage.IsEmpty then Result.Error (coverage |> List.map Diagnostic.format |> String.concat "\n")
         elif not (Set.isSubset actual region.Members) then Result.Error "Common witness escaped its published region"

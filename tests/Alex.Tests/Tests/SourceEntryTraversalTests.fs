@@ -23,6 +23,28 @@ let private observe (allowed: Set<NodeId>) (graph: Revision) =
     runAllNanopasses [probe] graph (coeffects 64) accumulator root visited
     accumulator, root.Value, visited.Value
 
+let private boundaryComponent () =
+    let owner, declarationId, binding = NodeId 10, NodeId 11, NodeId 12
+    let declaration : BoundaryImport =
+        { Identity = declarationId; Binding = binding; Scope = owner
+          Library = "component-test"; Symbol = "imported"; CallingConvention = "C"
+          DeclarationPath = []; Parameters = []; Result = None
+          Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
+    let graph = Revision.empty "source-entry-component"
+    let boundary =
+        { graph.Emission.Boundary with
+            Imports = Map.ofList [declarationId, declaration]
+            ByScope = Map.ofList [owner, [declarationId]] }
+    let graph =
+        { graph with
+            SourceReadings =
+                { WitnessSourceReadings.empty with
+                    Entries = [{ Focus = owner; Reason = SourceEntryReason.BoundaryScope; Context = [] }]
+                    Contexts = Map.ofList [owner, [[]]]
+                    ContextHeaders = Map.ofList [owner, { Identity = owner; Name = "Imports"; Ports = Map.empty }] }
+            Emission = { graph.Emission with Boundary = boundary } }
+    owner, declaration, graph
+
 [<Fact>]
 let ``source omitted position needs no inactive body during postorder traversal`` () =
     let local = node 2 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
@@ -87,25 +109,7 @@ let ``visited entry still refuses another undeclared occurrence context`` () =
 
 [<Fact>]
 let ``body-free boundary entry witnesses its assigned imports without declaration bodies`` () =
-    let owner, declarationId, binding = NodeId 10, NodeId 11, NodeId 12
-    let declaration : BoundaryImport =
-        { Identity = declarationId; Binding = binding; Scope = owner
-          Library = "component-test"; Symbol = "imported"; CallingConvention = "C"
-          DeclarationPath = []; Parameters = []; Result = None
-          Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
-    let graph = Revision.empty "source-entry-component"
-    let boundary =
-        { graph.Emission.Boundary with
-            Imports = Map.ofList [declarationId, declaration]
-            ByScope = Map.ofList [owner, [declarationId]] }
-    let graph =
-        { graph with
-            SourceReadings =
-                { WitnessSourceReadings.empty with
-                    Entries = [{ Focus = owner; Reason = SourceEntryReason.BoundaryScope; Context = [] }]
-                    Contexts = Map.ofList [owner, [[]]]
-                    ContextHeaders = Map.ofList [owner, { Identity = owner; Name = "Imports"; Ports = Map.empty }] }
-            Emission = { graph.Emission with Boundary = boundary } }
+    let owner, declaration, graph = boundaryComponent ()
     // This is a component observation of the declared import account; full
     // source acceptance additionally requires its ABI/support declaration facts.
     let accumulator, scope, visited = observe Set.empty graph
@@ -114,7 +118,78 @@ let ``body-free boundary entry witnesses its assigned imports without declaratio
     Assert.Empty accumulator.NodeAssoc
     Assert.Empty accumulator.EmittedDefinitions
     Assert.Empty visited
+    Assert.Equal<Set<NodeId>>(Set.singleton owner, accumulator.BoundaryScopes)
     Assert.Equal<MLIROp list>([FuncOp(BoundaryFuncDecl declaration)], ScopeContext.getOps scope)
+    Assert.Empty(validateCoverage graph visited)
+    Assert.Empty(validateBoundaryCoverage graph accumulator.BoundaryScopes)
+    let missing = Assert.Single(validateBoundaryCoverage graph (accumulator.BoundaryScopes.Remove owner))
+    Assert.Equal(Some owner, missing.NodeId)
+    Assert.Contains("required source boundary scope 'Imports'", missing.Message)
+
+[<Fact>]
+let ``duplicate admitted body-free boundary entries emit and cover their imports once`` () =
+    let owner, declaration, graph = boundaryComponent ()
+    let entry = Assert.Single graph.SourceReadings.Entries
+    let readings = { graph.SourceReadings with Entries = [entry; entry] }
+    let graph = { graph with SourceReadings = readings }
+    let accumulator, scope, visited = observe Set.empty graph
+    Assert.Empty graph.Nodes
+    Assert.Empty accumulator.Errors
+    Assert.Empty accumulator.NodeAssoc
+    Assert.Empty accumulator.EmittedDefinitions
+    Assert.Empty visited
+    Assert.Equal<Set<NodeId>>(Set.singleton owner, accumulator.BoundaryScopes)
+    Assert.Equal<MLIROp list>([FuncOp(BoundaryFuncDecl declaration)], ScopeContext.getOps scope)
+    Assert.Empty(validateCoverage graph visited)
+    Assert.Empty(validateBoundaryCoverage graph accumulator.BoundaryScopes)
+
+[<Theory>]
+[<InlineData(0, "no assigned import plan")>]
+[<InlineData(1, "names an absent declaration")>]
+[<InlineData(2, "different source owner scope")>]
+let ``failed body-free import plan never discharges coverage or installs the scope`` (fault: int) (expectedReason: string) =
+    let owner, declaration, graph = boundaryComponent ()
+    let boundary =
+        match fault with
+        | 0 -> { graph.Emission.Boundary with ByScope = Map.empty }
+        | 1 -> { graph.Emission.Boundary with Imports = Map.empty }
+        | 2 ->
+            { graph.Emission.Boundary with
+                Imports = Map.ofList [declaration.Identity, { declaration with Scope = NodeId 9000 }] }
+        | _ -> failwith "Unknown import-plan control"
+    let entry = Assert.Single graph.SourceReadings.Entries
+    let readings = { graph.SourceReadings with Entries = [entry; entry] }
+    let graph = { graph with SourceReadings = readings; Emission = { graph.Emission with Boundary = boundary } }
+    let accumulator, scope, visited = observe Set.empty graph
+    // Both failed entries remain observable; the first refusal did not install
+    // the scope or make its second declared occurrence disappear.
+    Assert.Equal(2, accumulator.Errors.Length)
+    Assert.All(accumulator.Errors, fun diagnostic -> Assert.Contains(expectedReason, diagnostic.Message))
+    Assert.Empty visited
+    Assert.Empty accumulator.BoundaryScopes
+    Assert.Empty accumulator.NodeAssoc
+    Assert.Empty accumulator.EmittedDefinitions
+    Assert.Empty(ScopeContext.getOps scope)
+    let missing = Assert.Single(validateBoundaryCoverage graph accumulator.BoundaryScopes)
+    Assert.Equal(Some owner, missing.NodeId)
+    Assert.Contains("required source boundary scope 'Imports'", missing.Message)
+
+[<Fact>]
+let ``body-free boundary coverage diagnoses a missing context header without loading a body`` () =
+    let owner, _, graph = boundaryComponent ()
+    let readings = { graph.SourceReadings with ContextHeaders = Map.empty }
+    let graph = { graph with SourceReadings = readings }
+    let accumulator, scope, visited = observe Set.empty graph
+    let refusal = Assert.Single accumulator.Errors
+    Assert.Contains("focus has no live body or context header", refusal.Message)
+    Assert.Empty visited
+    Assert.Empty accumulator.BoundaryScopes
+    Assert.Empty accumulator.NodeAssoc
+    Assert.Empty accumulator.EmittedDefinitions
+    Assert.Empty(ScopeContext.getOps scope)
+    let missing = Assert.Single(validateBoundaryCoverage graph accumulator.BoundaryScopes)
+    Assert.Equal(Some owner, missing.NodeId)
+    Assert.Contains("matching body-free context account is absent", missing.Message)
 
 [<Fact>]
 let ``installed boundary owner still refuses an undeclared duplicate entry context`` () =
@@ -138,6 +213,7 @@ let ``installed boundary owner still refuses an undeclared duplicate entry conte
     Assert.Empty accumulator.NodeAssoc
     Assert.Empty accumulator.EmittedDefinitions
     Assert.Empty visited
+    Assert.Equal<Set<NodeId>>(Set.singleton owner, accumulator.BoundaryScopes)
     Assert.Empty(ScopeContext.getOps scope)
 
 [<Fact>]

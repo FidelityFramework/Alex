@@ -318,6 +318,9 @@ type MLIRAccumulator() =
     member val EmittedDefinitions: Alex.Correspondence.EmittedDefinition list = [] with get, set
     member val AllOps: MLIROp list = [] with get, set                      // Flat operation stream with markers
     member val Errors: Diagnostic list = [] with get, set
+    // Successful body-free declaration witnessing has its own receipt. These
+    // source scope identities are not executable visits or region body members.
+    member val BoundaryScopes: Set<NodeId> = Set.empty with get, set
     member val NodeAssoc: Map<NodeId, SSA * MLIRType> = Map.empty with get, set  // Global SSA bindings (PSG nodes)
     member val CallableAssoc: Map<NodeId, CallableOperand> = Map.empty with get, set
     member val CallableCellAssoc: Map<NodeId, CallableCellOperand> = Map.empty with get, set
