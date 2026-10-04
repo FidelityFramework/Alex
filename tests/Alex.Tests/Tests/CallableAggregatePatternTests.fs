@@ -69,7 +69,8 @@ let private withAccounts (graph: Revision) =
           Flows = inputs |> List.choose c.Flows.TryFind; Joins = inputs |> List.choose c.Joins.TryFind
           Participants = participants; Sources = sources
           Claims = ids |> List.choose (fun id -> graph.CurrentClaims.TryFind id |> Option.map (fun row -> id, row))
-          Symbols = implementationIds |> List.choose (fun id -> c.Symbols.TryFind id |> Option.map (fun name -> id, name)) }
+          Symbols = implementationIds |> List.choose (fun id -> c.Symbols.TryFind id |> Option.map (fun name -> id, name))
+          Inactivity = [] }
     let callable = { c with AggregateDependencies = c.AggregateValues |> Map.map (fun occurrence _ -> account occurrence) }
     let codata =
         { graph.Codata with CallableContracts = callable.Contracts; CallableCarriers = callable.Carriers
@@ -203,7 +204,7 @@ let private fixture union =
     let projection = row read.Id CallableAggregateOperation.Project None None
     let account (value: CallableAggregateValue) : CallableAggregateDependencyAccount =
         { Occurrence = value.Occurrence; Slots = [slot]; Values = [value]; Carriers = List.ofSeq carriers.Values
-          Contracts = [contract]; Flows = []; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = [] }
+          Contracts = [contract]; Flows = []; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = []; Inactivity = [] }
     let declaration : CallableEmissionDeclaration =
         { Lookup = implementation.Id; Implementation = implementation.Id
           Parameters = ["value", boolType, formal.Id]; Result = body.Id; Context = LambdaContext.RegularClosure
@@ -443,7 +444,7 @@ let private capturedFixture union selected =
           Dependencies = Map.empty; Calls = [] }
     let account (value: CallableAggregateValue) : CallableAggregateDependencyAccount =
         { Occurrence = value.Occurrence; Slots = [slot]; Values = [value]; Carriers = [firstCarrier; secondCarrier]
-          Contracts = [contract]; Flows = [flow]; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = [] }
+          Contracts = [contract]; Flows = [flow]; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = []; Inactivity = [] }
     let capture : ContinuationSlot =
         { Source = NodeId 6; ValueType = boolType; IsCapture = true; Holds = CaptureSlotKind.Scalar SettledSlot.Bool
           Field = { Name = "flag"; Slot = SettledSlot.Bool; Offset = Some 0; Size = Some 1; Align = Some 1 } }
@@ -837,7 +838,7 @@ let ``absent callable Result case retains the selected scalar payload without in
     let row = { row with Participants = valueParticipants row }
     let account : CallableAggregateDependencyAccount =
         { Occurrence = initialization.Id; Slots = [slot]; Values = [row]; Carriers = []; Contracts = []
-          Flows = []; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = [] }
+          Flows = []; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = []; Inactivity = [] }
     let held = [payload; initialization]
     let raw = revision held
     let absentComponent = ValueRepresentation.CallableComponent(slot.Identity, ValueRepresentation.Record([], Some([], 0, 1)))
