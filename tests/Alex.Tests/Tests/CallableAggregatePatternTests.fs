@@ -49,10 +49,11 @@ let private fixture union =
     let carriers = [code.Id, carrier code.Id; read.Id, carrier read.Id] |> Map.ofList
     let contract : CallableContract =
         { Identity = implementation.Id; Kind = CallableKind.OrdinaryFlatClosure
+          Convention = CallableConvention.Ordinary
           ParameterTypes = [boolType]; OmittedParameters = []
           ParameterRepresentations = [0, ValueRepresentation.Scalar SettledSlot.Bool]
           ResultType = boolType; ResultRepresentation = ValueRepresentation.Scalar SettledSlot.Bool
-          EnvironmentBytes = None; Participants = [] }
+          EnvironmentBytes = None; SourcePremises = Map.empty; Participants = [] }
     let slot : CallableAggregateSlot =
         { Identity = NodeId 99; AggregateType = aggregateType; Declaration = None; DeclarationFacts = []
           Path = [if union then CallableAggregatePathStep.UnionPayload(1, 0) else CallableAggregatePathStep.RecordField 0]
