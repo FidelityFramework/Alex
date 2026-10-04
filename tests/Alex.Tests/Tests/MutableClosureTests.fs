@@ -99,6 +99,8 @@ let private fixture () =
     let keyed rows = rows |> List.map (fun (number, row) -> NodeId number, row) |> Map.ofList
     let carrier occurrence implementation formal result : CallableCarrier =
         { Occurrence = NodeId occurrence; SourceType = functionType; Implementation = NodeId implementation
+          Kind = CallableKind.OrdinaryFlatClosure; Formation = NodeId implementation
+          EnvironmentValue = None; Contract = Ok cell.Id; Lifetime = []
           Parameters = ["_", unitIdentity, NodeId formal]
           ParameterShapes = [CallableValueShape.Data (NodeId formal)]
           OmittedParameters = Set.empty

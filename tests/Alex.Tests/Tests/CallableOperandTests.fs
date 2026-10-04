@@ -53,6 +53,9 @@ let private formals captured argumentType =
 let private carrierOf captured argumentType source occurrence : CallableCarrier =
     let parameters = formals captured argumentType
     { Occurrence = NodeId occurrence; SourceType = source; Implementation = NodeId 4
+      Kind = CallableKind.OrdinaryFlatClosure; Formation = NodeId (if captured then 5 else 4)
+      EnvironmentValue = if captured then Some(NodeId 6) else None
+      Contract = Ok(NodeId 4); Lifetime = []
       Parameters = parameters
       ParameterShapes = parameters |> List.map (fun (_, _, formal) -> CallableValueShape.Data formal)
       OmittedParameters = Set.empty
@@ -335,6 +338,8 @@ let private higherOrder captured returnsCallable =
     let parameters = ["input", parameterType, NodeId 13]
     let higher occurrence : CallableCarrier =
         { Occurrence = NodeId occurrence; SourceType = ty; Implementation = NodeId implementation
+          Kind = CallableKind.OrdinaryFlatClosure; Formation = NodeId implementation
+          EnvironmentValue = None; Contract = Ok(NodeId implementation); Lifetime = []
           Parameters = parameters
           ParameterShapes = [(if returnsCallable then CallableValueShape.Data else CallableValueShape.Callable) (NodeId 13)]
           OmittedParameters = Set.empty

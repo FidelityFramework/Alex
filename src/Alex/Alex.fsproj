@@ -47,6 +47,7 @@
     <Compile Include="Elements/HWElements.fs" />
     <Compile Include="Elements/SeqElements.fs" />
     <Compile Include="Patterns/MemoryPatterns.fs" />
+    <Compile Include="Patterns/CallableAggregatePatterns.fs" />
     <Compile Include="Patterns/DUPatterns.fs" />
     <Compile Include="Patterns/RecordPatterns.fs" />
     <Compile Include="Patterns/MemRefPatterns.fs" />

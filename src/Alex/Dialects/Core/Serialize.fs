@@ -100,6 +100,7 @@ let ssaToString (ssa: SSA) : string =
     match ssa with
     | V (n, k) -> sprintf "%%v%d_%d" n k
     | CallableAlternative (n, alternative) -> sprintf "%%callable_%d_alternative_%d" n alternative
+    | AggregateComponent (n, slot, alternative, lane) -> sprintf "%%aggregate_%d_slot_%d_alternative_%d_lane_%d" n slot alternative lane
     | ArrayElementIndex (n, element) -> sprintf "%%array_%d_element_%d" n element
     | Arg n -> sprintf "%%arg%d" n
 

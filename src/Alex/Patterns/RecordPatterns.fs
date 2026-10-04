@@ -236,6 +236,39 @@ let pBuildRecordCopyWith
 // RECORD FIELD ASSIGNMENT
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Callable aggregate data copies retain the complete paired representation.
+/// The published physical record placement supplies every byte extent and
+/// field offset; no function value is recalled or copied as a scalar.
+let pBuildRecordComponentCopy
+    (nodeId: NodeId) (structTy: MLIRType) (original: Val)
+    (updatedFields: (string * SSA * MLIRType) list) (updatedNodes: NodeId list)
+    : PSGParser<MLIROp list * TransferResult> = parser {
+    let! state = getUserState
+    let! platform = getTargetPlatform
+    do! ensure (platform <> Alex.Target.FPGA)
+            "Callable record representation copy requires its admitted memory pathway."
+    let! count, element = pMemRefShape nodeId state.Platform.TargetArch structTy
+    let storage = { SSA = Alex.Traversal.Values.value nodeId 0; Type = TMemRefStatic(count, element) }
+    let source = { original with Type = physicalStorageType state.Platform.TargetArch original.Type }
+    let! allocation = pAllocValue nodeId storage.SSA storage.Type
+    let! copy = pAggregateDataCopy source storage
+    let! writes =
+        List.zip updatedFields updatedNodes |> List.mapi (fun ordinal ((name, raw, rawType), valueNode) -> parser {
+            let! adaptations, value, fieldType = pAdapt nodeId valueNode raw rawType
+            let! offset =
+                match structTy with
+                | TStruct(fields, _) ->
+                    match structFieldLookup fields name with
+                    | Some(index, _) -> preturn (structFieldByteOffset structTy index)
+                    | None -> fail (Message "Callable record copy lacks its published data-field placement.")
+                | _ -> fail (Message "Callable record copy lacks its published record placement.")
+            let names = Alex.Traversal.Values.aggregateComponent nodeId nodeId ordinal
+            let! stores = pTypedInsertView storage.SSA value offset (names 40) (names 41) (names 42) fieldType storage.Type
+            return adaptations @ stores
+        }) |> Alex.XParsec.Extensions.sequence
+    return allocation :: copy :: List.concat writes, TRValue { storage with Type = structTy }
+}
+
 /// Store a value into a named field of a TStruct record: `r.Field <- v`.
 /// Records are memref-backed, so the store mutates the record in place and is
 /// visible through every reference to it (including a parameter).

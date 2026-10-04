@@ -18,6 +18,8 @@ let private regular = LambdaContext.RegularClosure
 /// The published boundary of one occurrence of a named callback.
 let private callbackCarrier occurrence implementation argument result : CallableCarrier =
     { Occurrence = NodeId occurrence; SourceType = callbackType; Implementation = NodeId implementation
+      Kind = CallableKind.OrdinaryFlatClosure; Formation = NodeId implementation
+      EnvironmentValue = None; Contract = Ok(NodeId implementation); Lifetime = []
       Parameters = ["argument", boolType, NodeId argument]
       ParameterShapes = [CallableValueShape.Data(NodeId argument)]
       OmittedParameters = Set.empty

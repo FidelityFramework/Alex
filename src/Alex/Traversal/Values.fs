@@ -28,6 +28,9 @@ let unitReturnValue (lambdaId: NodeId) : SSA = V (NodeId.value lambdaId, 1101)
 let callableCode (nodeId: NodeId) : SSA = V (NodeId.value nodeId, 1200)
 /// Each finite mutable-read arm has its own code value, with no bounded ordinal window.
 let callableAlternative (nodeId: NodeId) alternative : SSA = CallableAlternative (NodeId.value nodeId, alternative)
+/// Component names are keyed by the published slot and arm, without an ordinal budget.
+let aggregateComponent (nodeId: NodeId) (slot: NodeId) alternative lane : SSA =
+    AggregateComponent(NodeId.value nodeId, NodeId.value slot, alternative, lane)
 /// Each array initializer position has a distinct physical index name.
 let arrayElementIndex (nodeId: NodeId) element : SSA = ArrayElementIndex (NodeId.value nodeId, element)
 /// The k-th value of a closure's callee prologue (capture extraction and env reconstruction).

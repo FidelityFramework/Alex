@@ -14,6 +14,7 @@ open Alex.XParsec.PSGCombinators
 open Alex.Patterns.DUPatterns
 open Alex.Patterns.LiteralPatterns
 open Alex.CodeGeneration.TypeMapping
+module Components = Alex.Patterns.CallableAggregatePatterns
 
 // ═══════════════════════════════════════════════════════════
 // CATEGORY-SELECTIVE WITNESS (Private)
@@ -25,6 +26,11 @@ let private witnessDU (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput
         match tryMatchWithDiagnostics (pBuildAggregateStorage node.Id) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
         | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
         | Result.Error diagnostic -> WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "DU") (Some "aggregate storage") diagnostic
+    | SemanticKind.DUInitialize(destination, caseName, caseIndex, payload) when Components.hasRows ctx.Graph node.Id ->
+        let pattern = pWithUnitResult node.Id (pBuildDUComponentInitialize ctx node.Id destination caseName caseIndex payload)
+        match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+        | Result.Error diagnostic -> WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "DU") (Some "callable initialization") diagnostic
     | SemanticKind.DUInitialize(destination, caseName, caseIndex, payload) ->
         let pattern = pWithUnitResult node.Id (pBuildDUInitialize node.Id destination caseName caseIndex payload)
         match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
@@ -50,6 +56,11 @@ let private witnessDU (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput
 
     // DUEliminate — extract payload from DU value
     match tryMatch pDUEliminate ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+    | Some ((duValueId, _, _, _), _) when Components.hasRows ctx.Graph node.Id ->
+        match tryMatchWithDiagnostics (Components.pReadComponent ctx node.Id duValueId) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+        | Result.Error diagnostic ->
+            WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "DU") (Some "callable projection") diagnostic
     | Some ((duValueId, caseIndex, _caseName, _), _) ->
         match MLIRAccumulator.recallNode duValueId ctx.Accumulator with
         | Some (duSSA, duType) ->
@@ -74,6 +85,7 @@ let private witnessDU (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput
         // that was never witnessed is a defect, never a payload-free case
         let payloadReading =
             match payloadOpt with
+            | Some payloadId when Components.inputIsCallable ctx.Graph node.Id payloadId -> Result.Ok ([], [])
             | Some payloadId ->
                 match MLIRAccumulator.recallNode payloadId ctx.Accumulator with
                 | Some (ssa, ty) ->
@@ -91,7 +103,11 @@ let private witnessDU (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput
 
         let duTy = mapTypeAt node.Id ctx
 
-        match tryMatchWithDiagnostics (pBuildDUConstruct node.Id tag payload duTy) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+        let construction = pBuildDUConstruct node.Id tag payload duTy
+        let construction =
+            if Components.hasRows ctx.Graph node.Id then Components.pWithConstruction ctx node.Id construction
+            else construction
+        match tryMatchWithDiagnostics construction ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
         | Result.Ok ((ops, result), _) -> { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
         | Result.Error diagnostic -> WitnessOutput.error $"DUConstruct: {diagnostic}"
 

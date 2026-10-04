@@ -162,6 +162,7 @@ let mlirTypeSize (arch: Architecture) (ty: MLIRType) : int =
 type SSA =
     | V of node: int * ordinal: int   // %v<node>_<k>
     | CallableAlternative of node: int * alternative: int // Source-settled mutable read dispatch arm
+    | AggregateComponent of node: int * slot: int * alternative: int * lane: int
     | ArrayElementIndex of node: int * element: int // Unbounded literal element ordinal, disjoint from local temporaries
     | Arg of int                      // %arg0, %arg1, ...
 

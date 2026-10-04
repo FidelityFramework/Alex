@@ -33,6 +33,8 @@ let private callableForm : Result<ValueRepresentation, string> =
 let private codeCarrier (occurrence: SemanticNode) (implementation: SemanticNode)
                         (parameters: (string * TypeIdentity * NodeId) list) (body: SemanticNode) : CallableCarrier =
     { Occurrence = occurrence.Id; SourceType = occurrence.Type; Implementation = implementation.Id
+      Kind = CallableKind.OrdinaryFlatClosure; Formation = implementation.Id
+      EnvironmentValue = None; Contract = Ok implementation.Id; Lifetime = []
       Parameters = parameters
       ParameterShapes = parameters |> List.map (fun (_, _, formal) -> CallableValueShape.Data formal)
       OmittedParameters = Set.empty

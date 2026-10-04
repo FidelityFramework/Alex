@@ -18,6 +18,15 @@ open Alex.Dialects.Core.Types
 open Alex.CodeGeneration.TypeMapping
 open Alex.Traversal.TransferTypes
 
+/// Copy two views whose exact physical type was supplied by the source-owned
+/// aggregate placement. This spells one portable operation and no C call.
+let pAggregateDataCopy (source: Val) (destination: Val) : PSGParser<MLIROp> =
+    parser {
+        do! ensure (source.Type = destination.Type)
+                "Aggregate representation copy requires identical published storage views."
+        return MLIROp.MemRefOp(MemRefOp.Copy(source.SSA, destination.SSA, source.Type, destination.Type))
+    }
+
 // All Elements use XParsec state for platform/type context
 
 // ═══════════════════════════════════════════════════════════

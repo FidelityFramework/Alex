@@ -55,6 +55,9 @@ let private fixture captured =
           node 12 (SemanticKind.Sequential [NodeId 8; NodeId 11; NodeId 10]) ty [8; 11; 10] None ]
     let carrier occurrence : CallableCarrier =
         { Occurrence = NodeId occurrence; SourceType = ty; Implementation = NodeId 3
+          Kind = CallableKind.OrdinaryFlatClosure; Formation = NodeId (if captured then 6 else 3)
+          EnvironmentValue = if captured then Some(NodeId 7) else None
+          Contract = Ok(NodeId 3); Lifetime = []
           Parameters = parameters
           ParameterShapes = parameters |> List.map (fun (_, _, formal) -> CallableValueShape.Data formal)
           OmittedParameters = Set.empty
@@ -204,6 +207,8 @@ let private annotatedCallee depth =
     let occurrences = [2; 3; reference] @ annotations
     let carrier occurrence : CallableCarrier =
         { Occurrence = NodeId occurrence; SourceType = signature; Implementation = NodeId 2
+          Kind = CallableKind.OrdinaryFlatClosure; Formation = NodeId 2
+          EnvironmentValue = None; Contract = Ok(NodeId 2); Lifetime = []
           Parameters = parameters; ParameterShapes = [CallableValueShape.Data(NodeId 0)]
           OmittedParameters = Set.empty
           Result = NodeId 1; ResultShape = CallableValueShape.Data(NodeId 1)

@@ -34,6 +34,10 @@ let rec representationType = function
     | ValueRepresentation.Record(fields, placement) ->
         let bytes = placement |> Option.map (fun (offsets, size, alignment) -> { Offsets = offsets; Size = size; Align = alignment })
         TStruct(fields |> List.map (fun (name, form) -> name, representationType form), bytes)
+    | ValueRepresentation.CallableComponent(_, data) -> representationType data
+    | ValueRepresentation.Union(_, Some(_, bytes, alignment)) when bytes >= 0 && alignment > 0 ->
+        TMemRefStatic(bytes, TInt(IntWidth 8))
+    | ValueRepresentation.Union _ -> failwith "TypeMapping: source union has no complete physical data placement"
     | ValueRepresentation.Tag cases when cases > 0 -> TTag cases
     | ValueRepresentation.Tag _ -> failwith "TypeMapping: source tag has no cases"
 

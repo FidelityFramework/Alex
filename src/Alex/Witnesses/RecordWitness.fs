@@ -16,6 +16,7 @@ open Alex.Traversal.TransferTypes
 open Alex.Traversal.NanopassArchitecture
 open Alex.XParsec.PSGCombinators
 open Alex.Patterns.RecordPatterns
+module Components = Alex.Patterns.CallableAggregatePatterns
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CATEGORY-SELECTIVE WITNESS (Private)
@@ -29,28 +30,37 @@ let private witnessRecord (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
         // Recall each field value SSA from accumulator.
         let structTy = mapTypeAt node.Id ctx
 
+        let componentRows = Components.hasRows ctx.Graph node.Id
+        let dataFields = fields |> List.filter (fun (_, value) -> not (Components.inputIsCallable ctx.Graph node.Id value))
+        let withComponents pattern =
+            if componentRows then Components.pWithConstruction ctx node.Id pattern else pattern
+
         let fieldValues =
-            fields |> List.choose (fun (fieldName, fieldNodeId) ->
+            dataFields |> List.choose (fun (fieldName, fieldNodeId) ->
                 match MLIRAccumulator.recallNode fieldNodeId ctx.Accumulator with
                 | Some (fieldSSA, fieldType) -> Some (fieldName, fieldSSA, fieldType)
                 | None -> None)
 
-        if fieldValues.Length <> fields.Length then
-            WitnessOutput.error $"RecordExpr: Only {fieldValues.Length} of {fields.Length} field values witnessed"
+        if fieldValues.Length <> dataFields.Length then
+            WitnessOutput.error $"RecordExpr: Only {fieldValues.Length} of {dataFields.Length} field values witnessed"
         else
             match copyFrom with
             | Some origId ->
                 // Copy-and-update: recall original record SSA, delegate to pBuildRecordCopyWith
                 match MLIRAccumulator.recallNode origId ctx.Accumulator with
-                | Some (origSSA, _origTy) ->
-                    match tryMatchWithDiagnostics (pBuildRecordCopyWith node.Id structTy origSSA fieldValues (fields |> List.map snd)) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                | Some (origSSA, origTy) ->
+                    let construction =
+                        if componentRows then
+                            pBuildRecordComponentCopy node.Id structTy { SSA = origSSA; Type = origTy } fieldValues (dataFields |> List.map snd)
+                        else pBuildRecordCopyWith node.Id structTy origSSA fieldValues (dataFields |> List.map snd)
+                    match tryMatchWithDiagnostics (withComponents construction) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
                     | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
                     | Result.Error diagnostic -> WitnessOutput.error $"RecordExpr copy-with: {diagnostic}"
                 | None ->
                     WitnessOutput.error "RecordExpr copy-with: Original record not in accumulator"
             | None ->
                 // Full construction: all field values provided
-                match tryMatchWithDiagnostics (pBuildRecord node.Id structTy fieldValues (fields |> List.map snd)) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                match tryMatchWithDiagnostics (withComponents (pBuildRecord node.Id structTy fieldValues (dataFields |> List.map snd))) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
                 | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
                 | Result.Error diagnostic -> WitnessOutput.error $"RecordExpr: {diagnostic}"
 
@@ -82,6 +92,10 @@ let private witnessRecord (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
 
         // FieldSet on a TStruct record: r.Field <- v
         match node.Kind with
+        | SemanticKind.FieldSet (structId, fieldName, _) when Components.hasRows ctx.Graph node.Id ->
+            match tryMatchWithDiagnostics (Components.pAssignComponents ctx node.Id structId) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+            | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+            | Result.Error diagnostic -> WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Record") (Some "callable assignment") $"RecordFieldSet '{fieldName}': {diagnostic}"
         | SemanticKind.FieldSet (structId, fieldName, valueId) ->
             match MLIRAccumulator.recallNode structId ctx.Accumulator, MLIRAccumulator.recallNode valueId ctx.Accumulator with
             | Some (structSSA, (TStruct _ as structTy)), Some (valueSSA, _) ->
@@ -96,6 +110,10 @@ let private witnessRecord (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
 
         // Try FieldGet on TStruct
         match tryMatch pFieldGet ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+        | Some ((structId, _), _) when Components.hasRows ctx.Graph node.Id ->
+            match tryMatchWithDiagnostics (Components.pReadComponent ctx node.Id structId) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+            | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+            | Result.Error diagnostic -> WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Record") (Some "callable projection") diagnostic
         | Some ((structId, fieldName), _) ->
             match MLIRAccumulator.recallNode structId ctx.Accumulator with
             | Some (structSSA, structTy) ->

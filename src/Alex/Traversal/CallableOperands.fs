@@ -202,7 +202,9 @@ let reproject (ctx: WitnessContext) source destination =
     | Some value ->
         project ctx destination |> Result.bind (fun shape ->
             let sameExact (left: CallableCarrier) (right: CallableCarrier) =
-                left.Implementation = right.Implementation && left.Environment = right.Environment
+                left.Implementation = right.Implementation && left.Environment = right.Environment &&
+                left.Kind = right.Kind && left.Formation = right.Formation &&
+                left.EnvironmentValue = right.EnvironmentValue && left.Contract = right.Contract
             let exactAlternatives = function
                 | Exact carrier -> [carrier]
                 | Flow flow -> flow.Alternatives |> List.choose ctx.Graph.Codata.CallableCarriers.TryFind

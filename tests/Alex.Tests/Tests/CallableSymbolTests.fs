@@ -31,6 +31,8 @@ let private participants b = [NodeId b; NodeId(b + 1); NodeId(b + 2); NodeId(b +
 
 let private carrier b occurrence : CallableCarrier =
     { Occurrence = NodeId occurrence; SourceType = signature; Implementation = NodeId(b + 2)
+      Kind = CallableKind.OrdinaryFlatClosure; Formation = NodeId(b + 2)
+      EnvironmentValue = None; Contract = Ok(NodeId(b + 2)); Lifetime = []
       Parameters = ["value", boolType, NodeId b]; ParameterShapes = [CallableValueShape.Data(NodeId b)]
       OmittedParameters = Set.empty
       Result = NodeId(b + 1); ResultShape = CallableValueShape.Data(NodeId(b + 1))
