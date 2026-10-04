@@ -128,6 +128,7 @@ type AlexErrorCode =
 
     // AX4xxx: Pattern match
     | AX4001  // Pattern emission failure
+    | AX4002  // Published native callable component has no admitted reconstruction
 
     // AX5xxx: Scope/control flow
     | AX5001  // Scope isolation failure
@@ -138,7 +139,7 @@ module AlexErrorCode =
         | AX1001 -> "AX1001" | AX1002 -> "AX1002"
         | AX2001 -> "AX2001" | AX2002 -> "AX2002" | AX2003 -> "AX2003" | AX2004 -> "AX2004"
         | AX3001 -> "AX3001" | AX3002 -> "AX3002"
-        | AX4001 -> "AX4001"
+        | AX4001 -> "AX4001" | AX4002 -> "AX4002"
         | AX5001 -> "AX5001"
 
 /// Structured diagnostic capturing WHERE and WHAT went wrong

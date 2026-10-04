@@ -90,8 +90,33 @@ let private parameterComponents (ctx: WitnessContext) parameters =
 // CATEGORY-SELECTIVE WITNESS (Private)
 // ═══════════════════════════════════════════════════════════
 
-/// Witness Lambda operations - category-selective (handles only Lambda nodes)
-/// Takes combinator getter (Y-combinator thunk) for recursive self-reference
+/// A source expression marker does not authorize packed closure storage. The
+/// published carrier, receiving contract and declaration must agree that this
+/// occurrence is its own capture-free ordinary implementation.
+let private closedExpression (ctx: WitnessContext) (node: SemanticNode) =
+    if not (ctx.Graph.Codata.Closures.ContainsKey node.Id) then Result.Ok None else
+    let projection = ctx.Graph.Emission.Callable
+    let missing () = Result.Error "Lambda requires Baker's exact closed callable expression contract; packed closure placement is retired."
+    match node.Kind, ctx.Graph.Codata.Closures.TryFind node.Id,
+          projection.Carriers.TryFind node.Id, projection.Declarations.TryFind node.Id with
+    | SemanticKind.Lambda(parameters, body, [], _, LambdaContext.RegularClosure), Some legacy, Some carrier, Some declaration
+        when legacy.Captures.IsEmpty && carrier.Occurrence = node.Id &&
+             carrier.Kind = CallableKind.OrdinaryFlatClosure && carrier.Formation = node.Id &&
+             carrier.Implementation = node.Id && carrier.Environment.IsNone && carrier.EnvironmentValue.IsNone &&
+             carrier.Parameters = parameters && carrier.Result = body &&
+             declaration.Lookup = node.Id && declaration.Implementation = node.Id &&
+             declaration.Parameters = parameters && declaration.Result = body && declaration.Captures.IsEmpty &&
+             declaration.Context = LambdaContext.RegularClosure ->
+        match carrier.Contract |> Result.toOption |> Option.bind projection.Contracts.TryFind with
+        | Some contract when contract.Kind = CallableKind.OrdinaryFlatClosure &&
+                             contract.Convention = CallableConvention.Ordinary && contract.EnvironmentBytes.IsNone ->
+            CallableOperands.project ctx node.Id |> Result.bind (fun shape ->
+                if (CallableOperands.environmentType shape).IsNone then Result.Ok(Some shape)
+                else missing ())
+        | _ -> missing ()
+    | _ -> missing ()
+
+/// Witness the declared body through the existing scoped traversal.
 let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> SemanticNode -> WitnessOutput)) (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput =
     // Get the full combinator (including ourselves) via Y-combinator fixed point
     let combinator = getCombinator()
@@ -99,11 +124,12 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
     let reading =
         tryMatch pLambdaWithCaptures ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator
         |> Option.map (fun (((parameters, _, _), _) as matched) -> matched, parameterComponents ctx parameters)
-    match reading with
-    | Some (((_, _, captures), _), _) when not captures.IsEmpty || ctx.Graph.Codata.Closures.ContainsKey node.Id ->
+    match reading, closedExpression ctx node with
+    | Some (((_, _, captures), _), _), _ when not captures.IsEmpty ->
         WitnessOutput.error "Lambda requires Baker's materialized code/environment contract; packed closure placement is retired."
-    | Some (_, Result.Error reason) -> WitnessOutput.error $"Callable formal components: {reason}"
-    | Some (((params', bodyId, _), _), Result.Ok parameterTypes) ->
+    | Some _, Result.Error reason -> WitnessOutput.error reason
+    | Some (_, Result.Error reason), _ -> WitnessOutput.error $"Callable formal components: {reason}"
+    | Some (((params', bodyId, _), _), Result.Ok parameterTypes), Result.Ok expressionShape ->
         // Check if this is a declaration root Lambda
         let declRootOpt = Map.tryFind node.Id ctx.Graph.Codata.DeclarationRootLambdas
 
@@ -355,12 +381,18 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                         | Result.Error message -> nativeCallback "Native callback thunk" message
                 else ()
 
-                { InlineOps = []; TopLevelOps = []; Result = TRVoid }
+                match expressionShape with
+                | None -> { InlineOps = []; TopLevelOps = []; Result = TRVoid }
+                | Some shape ->
+                    let value = Alex.Patterns.CallablePatterns.pCallableValue node.Id shape funcName None
+                    match tryMatchWithDiagnostics value ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                    | Result.Ok ((operations, result), _) -> { InlineOps = operations; TopLevelOps = []; Result = result }
+                    | Result.Error reason -> WitnessOutput.error $"Closed callable expression: {reason}"
 
             | Result.Error diagnostic ->
                 WitnessOutput.error $"Function '{funcName}': {diagnostic}"
 
-    | None -> WitnessOutput.skip
+    | None, _ -> WitnessOutput.skip
 
 // ═══════════════════════════════════════════════════════════
 // NANOPASS REGISTRATION (Public)

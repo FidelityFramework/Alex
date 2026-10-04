@@ -22,7 +22,7 @@ module Components = Alex.Patterns.CallableAggregatePatterns
 // CATEGORY-SELECTIVE WITNESS (Private)
 // ═══════════════════════════════════════════════════════════════════════════
 
-let private witnessRecord (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput =
+let private witnessRecordCore (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput =
     // Try RecordExpr first
     match tryMatch pRecordExpr ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
     | Some ((fields, copyFrom), _) ->
@@ -31,9 +31,9 @@ let private witnessRecord (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
         let structTy = mapTypeAt node.Id ctx
 
         let componentRows = Components.hasRows ctx.Graph node.Id
-        let dataFields = fields |> List.filter (fun (_, value) -> not (Components.inputIsCallable ctx.Graph node.Id value))
+        let dataFields = fields |> List.filter (fun (name, value) -> not (Components.recordInputIsCallable ctx.Graph node.Id name value))
         let withComponents pattern =
-            if componentRows then Components.pWithConstruction ctx node.Id pattern else pattern
+            if componentRows then Components.pWithConstruction ctx node.Id node.Kind pattern else pattern
 
         let fieldValues =
             dataFields |> List.choose (fun (fieldName, fieldNodeId) ->
@@ -93,7 +93,7 @@ let private witnessRecord (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
         // FieldSet on a TStruct record: r.Field <- v
         match node.Kind with
         | SemanticKind.FieldSet (structId, fieldName, _) when Components.hasRows ctx.Graph node.Id ->
-            match tryMatchWithDiagnostics (Components.pAssignComponents ctx node.Id structId) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+            match tryMatchWithDiagnostics (Components.pAssignComponents ctx node.Id node.Kind) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
             | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
             | Result.Error diagnostic -> WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Record") (Some "callable assignment") $"RecordFieldSet '{fieldName}': {diagnostic}"
         | SemanticKind.FieldSet (structId, fieldName, valueId) ->
@@ -111,7 +111,7 @@ let private witnessRecord (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
         // Try FieldGet on TStruct
         match tryMatch pFieldGet ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
         | Some ((structId, _), _) when Components.hasRows ctx.Graph node.Id ->
-            match tryMatchWithDiagnostics (Components.pReadComponent ctx node.Id structId) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+            match tryMatchWithDiagnostics (Components.pReadComponent ctx node.Id node.Kind) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
             | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
             | Result.Error diagnostic -> WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Record") (Some "callable projection") diagnostic
         | Some ((structId, fieldName), _) ->
@@ -138,6 +138,17 @@ let private witnessRecord (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
 // ═══════════════════════════════════════════════════════════════════════════
 // NANOPASS REGISTRATION (Public)
 // ═══════════════════════════════════════════════════════════════════════════
+
+let private witnessRecord (ctx: WitnessContext) (node: SemanticNode) =
+    let ownsOperation =
+        match node.Kind with
+        | SemanticKind.RecordExpr _ | SemanticKind.FieldGet _ | SemanticKind.FieldSet _ -> true
+        | _ -> false
+    if ownsOperation && Components.requiresComponents ctx.Graph node.Id node.Kind then
+        match Components.validateOperation ctx.Graph node.Id node.Kind with
+        | Result.Error diagnostic -> WitnessOutput.errorDiag diagnostic
+        | Result.Ok _ -> witnessRecordCore ctx node
+    else witnessRecordCore ctx node
 
 /// Record nanopass - witnesses RecordExpr and TStruct FieldGet nodes
 let nanopass : Nanopass = {

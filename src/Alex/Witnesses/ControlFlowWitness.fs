@@ -22,6 +22,7 @@ open Alex.XParsec.PSGCombinators
 open Alex.Patterns.ControlFlowPatterns
 open Alex.Patterns.SequencePatterns
 open Alex.Patterns.LazyPatterns
+open Alex.Patterns.CallablePatterns
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Y-COMBINATOR PATTERN
@@ -157,6 +158,11 @@ let private witnessControlFlowWith (getCombinator: unit -> (WitnessContext -> Se
                     | Some elseId, Some operations ->
                         pSequenceConditional ctx { SSA = condSSA; Type = condType } thenId thenOps elseId operations
                     | _ -> XParsec.Parsers.fail (XParsec.Message "Sequence conditional requires both settled branches.")
+                elif isCallableValue ctx node then
+                    match elseIdOpt, elseOps with
+                    | Some elseId, Some operations ->
+                        pCallableConditional ctx { SSA = condSSA; Type = condType } thenId thenOps elseId operations
+                    | _ -> XParsec.Parsers.fail (XParsec.Message "Callable conditional requires both settled branches.")
                 else
                     let isUnit = Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id
                     let build result = pBuildConditional condSSA thenOps elseOps thenId elseIdOpt result node.Id

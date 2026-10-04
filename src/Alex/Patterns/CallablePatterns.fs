@@ -12,6 +12,8 @@ open Alex.Traversal.TransferTypes
 open Alex.XParsec.PSGCombinators
 open Alex.Elements.FuncElements
 open Alex.Elements.MemRefElements
+open Alex.Elements.IndexElements
+open Alex.Patterns.ControlFlowPatterns
 module Operands = Alex.Traversal.CallableOperands
 module Values = Alex.Traversal.Values
 
@@ -68,6 +70,53 @@ let pCallableForward (ctx: WitnessContext) source : PSGParser<MLIROp list * Tran
     match Operands.reproject ctx source state.Current.Id with
     | Result.Ok value -> return [], TRCallable value
     | Result.Error reason -> return! fail (Message reason)
+}
+
+/// A callable conditional selects its actual code/environment operands in one
+/// structured region. The receiving flow and transport permissions are already
+/// published; no origin, layout or calling convention is chosen here.
+let pCallableConditional (ctx: WitnessContext) (condition: Val)
+                         thenId thenOps elseId elseOps : PSGParser<MLIROp list * TransferResult> = parser {
+    let! state = getUserState
+    let occurrence = state.Current.Id
+    do! ensure (occurrence = ctx.Zipper.Focus.Id && obj.ReferenceEquals(state.Zipper, ctx.Zipper))
+            "Callable conditional requires its actual Huet occurrence."
+    do! ensure (match state.Current.Kind with
+                | SemanticKind.IfThenElse(_, yes, Some no) -> yes = thenId && no = elseId
+                | _ -> false)
+            "Callable conditional differs from its witnessed branch occurrences."
+    do! ensure (condition.Type = TInt(IntWidth 1))
+            "Callable conditional requires its witnessed Boolean condition."
+    let! shape =
+        match Operands.project ctx occurrence with
+        | Result.Ok shape -> preturn shape
+        | Result.Error reason -> fail (Message reason)
+    let arm source operations = parser {
+        match Operands.reproject ctx source occurrence with
+        | Result.Ok value ->
+            let ordinary =
+                match Operands.carrier value with
+                | Exact carrier -> carrier.Kind = CallableKind.OrdinaryFlatClosure
+                | Flow flow -> flow.Alternatives |> List.forall (fun identity ->
+                    state.Graph.Emission.Callable.Carriers.TryFind identity
+                    |> Option.exists (fun carrier -> carrier.Kind = CallableKind.OrdinaryFlatClosure))
+                | Joined _ -> false
+            do! ensure ordinary "Callable conditional native-entry transport is not admitted by this witness pathway."
+            return operations, Operands.values value
+        | Result.Error reason -> return! fail (Message reason)
+    }
+    let! yes = arm thenId thenOps
+    let! no = arm elseId elseOps
+    let code = { SSA = Values.callableCode occurrence; Type = Operands.functionType shape }
+    let environment = Operands.environmentType shape |> Option.map (fun ty -> { SSA = Values.value occurrence 0; Type = ty })
+    let! result =
+        match Operands.create shape code environment with
+        | Result.Ok value -> preturn value
+        | Result.Error reason -> fail (Message reason)
+    let selector = { SSA = Values.value occurrence 2; Type = TIndex }
+    let! cast = pIndexCastU selector.SSA condition.SSA condition.Type TIndex
+    let! operations = pBuildIndexSwitch selector [1L, yes] no (Operands.values result)
+    return cast :: operations, TRCallable result
 }
 
 let private pProgramInstance (ctx: WitnessContext) binding = parser {

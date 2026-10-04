@@ -63,28 +63,15 @@ let pBuildDUInitialize (nodeId: NodeId) (destinationId: NodeId) (caseName: strin
     return adaptations @ writes, result
 }
 
-/// A callable component writes only its data parts. A selected scalar case
-/// still follows ordinary DU initialization, including its payload write.
+/// Destination initialization requires its own source-authored transport
+/// relation. A construction row cannot stand in for that relation.
 let pBuildDUComponentInitialize (ctx: WitnessContext) (nodeId: NodeId) (destinationId: NodeId)
                                 (caseName: string) (caseIndex: int) (payloadId: NodeId option) : PSGParser<MLIROp list * TransferResult> = parser {
     let! state = getUserState
-    let! destination, destinationType = pRecallNode destinationId
-    let target = { SSA = destination; Type = destinationType }
-    let! dataOps, _ =
-        match payloadId with
-        | Some payload when Components.inputIsCallable state.Graph nodeId payload -> parser {
-            let! cases =
-                match settledLayoutAt state.Graph destinationId with
-                | Some(SettledLayout.Union(cases, _, Some bytes, Some alignment))
-                    when bytes > 0 && alignment > 0 && destinationType = TMemRefStatic(bytes, TInt(IntWidth 8)) -> preturn cases
-                | _ -> fail (Message "Callable DU initialization lacks its exact source-published destination layout.")
-            do! ensure (caseIndex >= 0 && caseIndex < cases.Length && fst cases[caseIndex] = caseName && (snd cases[caseIndex]).IsSome)
-                    "Callable DU initialization disagrees with its selected source case."
-            return! pDUCaseAt nodeId target (sourceTypeAt state.Graph destinationId) (int64 caseIndex) []
-          }
-        | _ -> pBuildDUInitialize nodeId destinationId caseName caseIndex payloadId
-    let! componentOps = Components.pWriteComponents ctx nodeId destinationId target
-    return dataOps @ componentOps, TRVoid
+    let operation = SemanticKind.DUInitialize(destinationId, caseName, caseIndex, payloadId)
+    match Components.validateOperation state.Graph nodeId operation with
+    | Result.Error diagnostic -> return! fail (Message diagnostic.Message)
+    | Result.Ok _ -> return! fail (Message "Callable destination initialization has no explicit source-authored transport relation.")
 }
 
 // ═══════════════════════════════════════════════════════════

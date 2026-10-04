@@ -20,7 +20,7 @@ module Components = Alex.Patterns.CallableAggregatePatterns
 // CATEGORY-SELECTIVE WITNESS (Private)
 // ═══════════════════════════════════════════════════════════
 
-let private witnessDU (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput =
+let private witnessDUCore (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput =
     match node.Kind with
     | SemanticKind.AggregateStorage _ ->
         match tryMatchWithDiagnostics (pBuildAggregateStorage node.Id) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
@@ -57,7 +57,7 @@ let private witnessDU (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput
     // DUEliminate — extract payload from DU value
     match tryMatch pDUEliminate ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
     | Some ((duValueId, _, _, _), _) when Components.hasRows ctx.Graph node.Id ->
-        match tryMatchWithDiagnostics (Components.pReadComponent ctx node.Id duValueId) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+        match tryMatchWithDiagnostics (Components.pReadComponent ctx node.Id node.Kind) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
         | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
         | Result.Error diagnostic ->
             WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "DU") (Some "callable projection") diagnostic
@@ -85,7 +85,7 @@ let private witnessDU (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput
         // that was never witnessed is a defect, never a payload-free case
         let payloadReading =
             match payloadOpt with
-            | Some payloadId when Components.inputIsCallable ctx.Graph node.Id payloadId -> Result.Ok ([], [])
+            | Some payloadId when Components.unionInputIsCallable ctx.Graph node.Id caseIndex payloadId -> Result.Ok ([], [])
             | Some payloadId ->
                 match MLIRAccumulator.recallNode payloadId ctx.Accumulator with
                 | Some (ssa, ty) ->
@@ -105,7 +105,7 @@ let private witnessDU (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput
 
         let construction = pBuildDUConstruct node.Id tag payload duTy
         let construction =
-            if Components.hasRows ctx.Graph node.Id then Components.pWithConstruction ctx node.Id construction
+            if Components.hasRows ctx.Graph node.Id then Components.pWithConstruction ctx node.Id node.Kind construction
             else construction
         match tryMatchWithDiagnostics construction ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
         | Result.Ok ((ops, result), _) -> { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
@@ -116,6 +116,18 @@ let private witnessDU (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput
 // ═══════════════════════════════════════════════════════════
 // NANOPASS REGISTRATION
 // ═══════════════════════════════════════════════════════════
+
+let private witnessDU (ctx: WitnessContext) (node: SemanticNode) =
+    let ownsOperation =
+        match node.Kind with
+        | SemanticKind.DUConstruct _ | SemanticKind.UnionCase _
+        | SemanticKind.DUEliminate _ | SemanticKind.DUInitialize _ -> true
+        | _ -> false
+    if ownsOperation && Components.requiresComponents ctx.Graph node.Id node.Kind then
+        match Components.validateOperation ctx.Graph node.Id node.Kind with
+        | Result.Error diagnostic -> WitnessOutput.errorDiag diagnostic
+        | Result.Ok _ -> witnessDUCore ctx node
+    else witnessDUCore ctx node
 
 let nanopass : Nanopass =
     {
