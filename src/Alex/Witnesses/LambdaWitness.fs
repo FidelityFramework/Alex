@@ -139,6 +139,9 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             |> Option.forall (fun plan -> plan.EntryLambda <> node.Id) ->
             WitnessOutput.error "Entry lambda lacks Baker's settled program-initialization relation"
 
+        | Some DeclRoot.LibraryExport ->
+            WitnessOutput.error $"LibraryExport lambda {NodeId.value node.Id} has declaration-retention authority only; no physical entry or ABI contract is published"
+
         | Some DeclRoot.HardwareModule ->
             // HardwareModule Lambda — future: hw.module with Design<S,R> extraction
             // For now, HardwareModule bindings are NOT Lambdas (they're RecordExprs),

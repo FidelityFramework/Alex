@@ -366,6 +366,51 @@ let private published (functions: Function list) (domain: SemanticNode) : Revisi
 [<Theory>]
 [<InlineData(false)>]
 [<InlineData(true)>]
+let ``library retention cannot authorize lambda emission`` (libraryExport: bool) =
+    let owner = makeFunction 0 "retained" []
+    let raw = published [owner] (numericDomain 5)
+    // This component fixture supplies the root row read by the witness. It does
+    // not claim source checking publishes physical authority for a library root.
+    let graph =
+        if libraryExport then
+            { raw with Codata = { raw.Codata with DeclarationRootLambdas = Map.ofList [owner.Lambda.Id, DeclRoot.LibraryExport] } }
+        else raw
+    let operands = MLIRAccumulator.empty ()
+    let scope = ref (ScopeContext.root ())
+    let visited = ref Set.empty
+    let position = Zipper.create graph owner.Lambda.Id |> require "Missing retained lambda"
+    let context =
+        { Coeffects = coeffects 64; Accumulator = operands; RootAccumulator = operands
+          ScopeContext = scope; RootScopeContext = scope; Graph = graph; Zipper = position
+          GlobalVisited = visited; TraversalVisited = visited }
+    let rec witness ctx (node: SemanticNode) =
+        match node.Kind with
+        | SemanticKind.Lambda _ -> (Alex.Witnesses.LambdaWitness.createNanopass (fun () -> witness)).Witness ctx node
+        | SemanticKind.VarRef _ -> Alex.Witnesses.VarRefWitness.nanopass.Witness ctx node
+        | _ -> Alex.Witnesses.StructuralWitness.nanopass.Witness ctx node
+    let output = witness context position.Focus
+    Assert.Empty operands.Errors
+    if libraryExport then
+        match output.Result with
+        | TRError diagnostic ->
+            Assert.Equal($"LibraryExport lambda {NodeId.value owner.Lambda.Id} has declaration-retention authority only; no physical entry or ABI contract is published", diagnostic.Message)
+        | other -> failwithf "Expected the library-retention refusal, got %A" other
+        Assert.Empty output.InlineOps
+        Assert.Empty output.TopLevelOps
+        Assert.Empty(ScopeContext.getOps scope.Value)
+        Assert.Empty operands.EmittedDefinitions
+        Assert.Empty operands.NodeAssoc
+        Assert.Empty operands.SSATypes
+    else
+        Assert.Equal(TRVoid, output.Result)
+        match Assert.Single(ScopeContext.getOps scope.Value) with
+        | MLIROp.FuncOp(FuncOp.FuncDef(_, _, _, _, visibility)) ->
+            Assert.Equal(FuncVisibility.Private, visibility)
+        | other -> failwithf "Expected the ordinary lambda definition, got %A" other
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
 let ``definition discovered inside a dependency is reused by later reference and structural occurrences`` (structuralOccurrence: bool) =
     let dependencyFunction = makeFunction 0 "dependency" []
     let middleFunction = makeFunction 5 "middle" [dependencyFunction]
