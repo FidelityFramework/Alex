@@ -790,6 +790,169 @@ let private nativeFixture union =
         |> requireIntegrity
     graph, aggregate, read
 
+/// A stated Assign publication, rather than a changed projection pretending to
+/// be an assignment. Its current dependency account includes the actual write.
+let private assignmentFixture native =
+    let graph, aggregate, operands =
+        if native then
+            let graph, aggregate, _ = nativeFixture false
+            graph, aggregate, MLIRAccumulator.empty ()
+        else
+            let graph, aggregate, _, operands = fixture false
+            graph, aggregate, operands
+
+    let callable = graph.Emission.Callable
+    let original = callable.AggregateValues[aggregate.Id].Head
+    let value = original.Value.Value
+
+    let write =
+        node 22 (SemanticKind.FieldSet(aggregate.Id, "Work", value)) unitType [ 4; 3 ] None
+
+    let row =
+        { original with
+            Occurrence = write.Id
+            Operation = CallableAggregateOperation.Assign
+            FormationInputs = [ aggregate.Id; value ]
+            Frontier = None
+            Tag = None
+            Participants = []
+        }
+        |> fun row ->
+            { row with
+                Participants = valueParticipants row
+            }
+
+    let callable =
+        { callable with
+            AggregateValues = callable.AggregateValues.Add(write.Id, [ row ])
+            ValueShapes = callable.ValueShapes.Add(write.Id, CallableValueShape.Data write.Id)
+            AliasTargets = callable.AliasTargets.Add(write.Id, write.Id)
+            ClosedData = callable.ClosedData.Add write.Id
+            Supports =
+                callable.Supports.Add(
+                    write.Id,
+                    Set.union callable.Supports[aggregate.Id] (Set.ofList [ value; write.Id ])
+                )
+        }
+
+    let numeric =
+        { graph.Emission.Numeric with
+            SourceTypes = graph.Emission.Numeric.SourceTypes.Add(write.Id, unitType)
+            OccurrenceRepresentations =
+                graph.Emission.Numeric.OccurrenceRepresentations.Add(
+                    write.Id,
+                    Result.Ok(ValueRepresentation.Scalar SettledSlot.Unit)
+                )
+        }
+
+    let graph =
+        { graph with
+            Nodes = graph.Nodes.Add(write.Id, write)
+            Emission =
+                { graph.Emission with
+                    Callable = callable
+                    Numeric = numeric
+                }
+        }
+        |> fun graph ->
+            let traversal = declareTraversalReadings graph
+            let source = graph.SourceReadings
+            // Only this new root and its stated structural descendants acquire
+            // new occurrence paths; the native fixture's lexical header remains.
+            let contexts =
+                [ write.Id; aggregate.Id; value; NodeId 6 ]
+                |> List.fold (fun rows id -> Map.add id traversal.SourceReadings.Contexts[id] rows) source.Contexts
+
+            { graph with
+                SourceReadings =
+                    { source with
+                        Entries =
+                            source.Entries
+                            @ [
+                                {
+                                    Focus = write.Id
+                                    Reason = SourceEntryReason.ExecutableRoot
+                                    Context = []
+                                }
+                            ]
+                        Ports =
+                            source.Ports.Add(
+                                (write.Id, OccurrencePort.StructuralChild),
+                                traversal.SourceReadings.Ports[write.Id, OccurrencePort.StructuralChild]
+                            )
+                        Children = source.Children.Add(write.Id, traversal.SourceReadings.Children[write.Id])
+                        Contexts = contexts
+                    }
+            }
+        |> requireIntegrity
+
+    graph, aggregate, write, operands
+
+[<Fact>]
+let ``published callable assignment passes integrity and writes its exact component`` () =
+    let graph, aggregate, write, operands = assignmentFixture false
+    Assert.Empty(Integrity.check graph)
+    let position = at graph (NodeId.value write.Id) [NodeId.value aggregate.Id]
+    let ctx = { context graph write.Id operands with Zipper = position }
+    let construction = Alex.Witnesses.RecordWitness.nanopass.Witness ctx aggregate
+
+    match construction.Result with
+    | TRValue storage -> MLIRAccumulator.bindNode aggregate.Id storage.SSA storage.Type operands
+    | other -> failwithf "Assignment destination was not constructed: %A" other
+
+    let output = observe false graph write operands
+
+    match output.Result with
+    | TRVoid -> ()
+    | other -> failwithf "A stated callable assignment did not complete: %A" other
+
+    Assert.Empty operands.Errors
+
+    Assert.DoesNotContain(
+        output.InlineOps,
+        function
+        | MLIROp.MemRefOp(MemRefOp.Store(_, _, _, TFunc _, _))
+        | MLIROp.MemRefOp(MemRefOp.StoreAligned(_, _, _, TFunc _, _, _)) -> true
+        | _ -> false
+    )
+
+[<Theory>]
+[<InlineData("aggregate")>]
+[<InlineData("field")>]
+[<InlineData("value")>]
+let ``published callable assignment refuses changed witnessed operands`` variant =
+    let graph, aggregate, write, operands = assignmentFixture false
+    let value = graph.Emission.Callable.AggregateValues[write.Id].Head.Value.Value
+
+    let kind =
+        match variant with
+        | "aggregate" -> SemanticKind.FieldSet(NodeId 6, "Work", value)
+        | "field" -> SemanticKind.FieldSet(aggregate.Id, "Flag", value)
+        | _ -> SemanticKind.FieldSet(aggregate.Id, "Work", NodeId 6)
+
+    let changed, write = changeOperation graph write kind
+
+    observe false changed write operands
+    |> refused "Callable record assignment differs from its witnessed aggregate, field or value operand." write operands
+
+[<Fact>]
+let ``published native callable assignment refuses AX4002 without output`` () =
+    let graph, _, write, operands = assignmentFixture true
+    Assert.Empty(Integrity.check graph)
+    let output = observe false graph write operands
+
+    match output.Result with
+    | TRError diagnostic ->
+        Assert.Equal(Some AX4002, diagnostic.Code)
+        Assert.Equal(Some write.Id, diagnostic.NodeId)
+        Assert.Contains("receiving contract is published", diagnostic.Message)
+    | other -> failwithf "A native callable assignment was admitted: %A" other
+
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+    Assert.Equal(None, MLIRAccumulator.recallCallable write.Id operands)
+    Assert.Equal(None, MLIRAccumulator.recallNode write.Id operands)
+
 [<Theory>]
 [<InlineData(false, false)>]
 [<InlineData(false, true)>]
