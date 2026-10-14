@@ -61,6 +61,59 @@ let pBoundaryImports : PSGParser<MLIROp list> =
 let private pBoundaryAdapt (consumer: NodeId) (operand: NodeId) (adaptation: Meet option) (value: Val) : PSGParser<MLIROp list * Val> =
     pPublishedAdapt consumer operand adaptation value
 
+/// The source entry refers to one admitted import and one explicit loading
+/// assumption. Its ABI is the import's; no ordinary lambda or code environment
+/// is inferred from the retained typechecking declaration.
+let private importedEntry (boundary: BoundaryEmissionProjection) formation =
+    match boundary.Entries.TryFind formation, boundary.Loading with
+    | Some entry, Some loading when entry.Formation = formation && entry.Loading = loading.Identity ->
+        match boundary.Imports.TryFind entry.Import with
+        | Some declaration when
+            declaration.Binding = entry.Declaration
+            && declaration.Library = loading.Contract.Library
+            ->
+            Result.Ok(entry, declaration)
+        | _ -> Result.Error "Imported entry no longer has its exact declaration, import and loading contract."
+    | _ -> Result.Error "Imported entry has no current source-published loading assumption."
+
+let private importedFunctionType (declaration: BoundaryImport) =
+    TFunc(
+        declaration.Parameters |> List.map (snd >> boundaryScalarType),
+        declaration.Result |> Option.map boundaryScalarType |> Option.toList
+    )
+
+/// Form a typed foreign code value only at its admitted formation occurrence.
+/// Immutable aliases forward this actual SSA through existing BindingUses.
+let pImportedFunctionAddress formation : PSGParser<MLIROp list * TransferResult> =
+    parser {
+        let! node = getCurrentNode
+        let! boundary = pBoundary
+        do! ensure (node.Id = formation) "Imported address must be witnessed at its actual formation."
+
+        let! entry, declaration =
+            match importedEntry boundary formation with
+            | Result.Ok value -> preturn value
+            | Result.Error reason -> fail (Message reason)
+
+        do!
+            ensure
+                (match node.Kind with
+                 | SemanticKind.Application(_, [ operand ]) -> operand = entry.Operand
+                 | _ -> false)
+                "Imported address differs from its declared extern operand."
+
+        let! ssa = getNodeSSA formation
+
+        let value =
+            {
+                SSA = ssa
+                Type = importedFunctionType declaration
+            }
+
+        let! operation = pFuncConstant ssa declaration.Symbol value.Type
+        return [ operation ], TRValue value
+    }
+
 /// Immutable byte borrowing is already established by Baker. Physical witnessing
 /// shares the source descriptor; it neither allocates nor reconstructs its extent.
 let pPublishedByteView : PSGParser<MLIROp list * TransferResult> = parser {
@@ -146,7 +199,23 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                         let! resultSSA = getNodeSSA node.Id
                         return [{ SSA = resultSSA; Type = boundaryScalarType ty }]
                       }
-                let! operation = pFuncCallResults results declaration.Symbol values
+                let! operation =
+                    match call.Entry with
+                    | None -> pFuncCallResults results declaration.Symbol values
+                    | Some formation -> parser {
+                        let! entry, imported =
+                            match importedEntry boundary formation with
+                            | Result.Ok value -> preturn value
+                            | Result.Error reason -> fail (Message reason)
+                        do! ensure (entry.Import = call.Import && imported = declaration &&
+                                    entry.Transport.Contains call.Callee)
+                                "Imported invocation differs from its source entry and pointer transport."
+                        let! pointerSSA, pointerType = pRecallNode call.Callee
+                        do! ensure (pointerType = importedFunctionType declaration &&
+                                    pointerType = TFunc(List.map _.Type values, List.map _.Type results))
+                                "Imported invocation pointer and operands disagree with its native ABI."
+                        return! pFuncCallIndirectResults results pointerSSA values
+                      }
                 match results with
                 | [] -> return argumentOps @ [operation], TRVoid
                 | [value] ->

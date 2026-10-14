@@ -8,6 +8,7 @@ open Alex.Traversal.TransferTypes
 open Alex.Traversal.NanopassArchitecture
 open Alex.XParsec.PSGCombinators
 open Alex.Patterns.FunctionPointerPatterns
+open Alex.Patterns.PlatformPatterns
 
 let private witness (ctx: WitnessContext) (node: SemanticNode) =
     let observe pattern prefix =
@@ -17,6 +18,8 @@ let private witness (ctx: WitnessContext) (node: SemanticNode) =
     let unsettled phase message =
         WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "FunctionPointer") (Some phase) message
     match Map.tryFind node.Id ctx.Graph.Codata.FunctionPointers with
+    | Some (FunctionPointerPlan.ExternAddress formation) ->
+        observe (pImportedFunctionAddress formation) []
     | Some (FunctionPointerPlan.Address (symbol, lambdaId)) ->
         let projection = ctx.Graph.Emission.Callable
         match projection.Declarations.TryFind lambdaId with
@@ -27,6 +30,10 @@ let private witness (ctx: WitnessContext) (node: SemanticNode) =
                 else mapTypeAt declaration.Result ctx
             observe (pFunctionAddress node.Id symbol types resultType) []
         | None -> unsettled "callback declaration" "The callback entry has no source-published declaration."
+    | Some (FunctionPointerPlan.Invoke _) when ctx.Graph.Emission.Boundary.Calls.ContainsKey node.Id ->
+        // The boundary witness consumes the admitted native ABI and the
+        // original typed pointer value; the legacy index path grants none.
+        WitnessOutput.skip
     | Some (FunctionPointerPlan.Invoke (pointer, arguments, _, _)) ->
         match MLIRAccumulator.recallNode pointer ctx.Accumulator with
         | Some (pointerSSA, TIndex) ->
