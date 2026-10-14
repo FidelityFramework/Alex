@@ -41,6 +41,23 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
             | SemanticKind.Application(callee, _) -> callee = position.Focus.Id
             | _ -> false
         | None -> false
+    let declaredExternOperand binding =
+        let boundary = ctx.Graph.Emission.Boundary
+        match Alex.Traversal.PSGZipper.up ctx.Zipper with
+        | Some parent ->
+            match parent.Focus.Kind, boundary.Entries.TryFind parent.Focus.Id with
+            | SemanticKind.Application(callee, [operand]), Some entry
+                when entry.Formation = parent.Focus.Id && entry.Operand = node.Id && operand = node.Id &&
+                     parent.Focus.Children = [callee; operand] && entry.Declaration = binding &&
+                     Set.isSubset (Set.ofList [parent.Focus.Id; callee; operand; binding]) entry.Transport &&
+                     ctx.Graph.Codata.FunctionPointers.TryFind parent.Focus.Id = Some(FunctionPointerPlan.ExternAddress parent.Focus.Id) ->
+                match ctx.Graph.Nodes.TryFind callee, boundary.Imports.TryFind entry.Import, boundary.Loading with
+                | Some { Kind = SemanticKind.Intrinsic { Module = IntrinsicModule.FnPtr; Operation = "ofExtern" } },
+                  Some imported, Some loading when imported.Identity = entry.Import && imported.Binding = binding &&
+                                                   entry.Loading = loading.Identity -> true
+                | _ -> false
+            | _ -> false
+        | None -> false
     let rec assignmentTarget (position: Alex.Traversal.PSGZipper.PSGZipper) =
         match Alex.Traversal.PSGZipper.up position with
         | Some parent ->
@@ -52,6 +69,11 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
     match tryMatch pVarRef ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
     | Some ((name, bindingIdOpt), _) ->
         match bindingIdOpt with
+        | Some bindingId when declaredExternOperand bindingId ->
+            // The admitted address formation reads the original declaration and
+            // its native ABI. This visited metadata operand has no runtime closure
+            // or SSA value; ordinary callable references keep their normal checks.
+            { InlineOps = []; TopLevelOps = []; Result = TRVoid }
         | Some bindingId ->
             let valueShape = Alex.Traversal.CallableOperands.valueShape ctx node.Id
             let shapeError = match valueShape with Result.Error reason -> Some reason | Result.Ok _ -> None

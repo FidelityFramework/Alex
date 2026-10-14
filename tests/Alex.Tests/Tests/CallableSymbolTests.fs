@@ -370,6 +370,208 @@ let ``imported pointer initialization and immutable read precede the indirect ca
         Assert.Equal((Option.get formed |> fst), pointer)
     | other -> failwithf "Expected one formation and its actual indirect call: %A" other
 
+/// The imported operand is the declaration reference from the real source
+/// shape, including its uncommitted integer formal. Only the native descriptor
+/// commits an ABI; it does not create an ordinary closure's physical signature.
+let private importedDeclarationOperandFixture () =
+    let graph = importedFixture ()
+    let sourceSignature = functionFrom intType intType
+
+    let pointerType =
+        TypeIdentity.Application(
+            {
+                Declaration = { Module = []; Name = "FnPtr" }
+                Parameters = [ TypeParamKind.Type ]
+                NativeKind = Some NTUKind.NTUfnptr
+            },
+            [ sourceSignature ]
+        )
+
+    let sourceNodes =
+        [
+            node 882 (SemanticKind.PatternBinding "count") intType [] (Some 884)
+            node
+                883
+                (SemanticKind.Literal(NativeLiteral.Int(0L, NTUKind.NTUint(NTUWidth.Resolved WidthDimension.Register))))
+                intType
+                []
+                (Some 884)
+            node
+                884
+                (SemanticKind.Lambda([ "count", intType, NodeId 882 ], NodeId 883, [], None, LambdaContext.RegularClosure))
+                sourceSignature
+                [ 882; 883 ]
+                (Some 30)
+            node 30 (SemanticKind.Binding("fixture_extern", false, false, None)) sourceSignature [ 884 ] (Some 35)
+            node
+                925
+                (SemanticKind.Intrinsic
+                    {
+                        Module = IntrinsicModule.FnPtr
+                        Operation = "ofExtern"
+                        Category = IntrinsicCategory.Pure
+                        FullName = "FnPtr.ofExtern"
+                    })
+                (functionFrom sourceSignature pointerType)
+                []
+                (Some 31)
+            node 926 (SemanticKind.VarRef("fixture_extern", Some(NodeId 30))) sourceSignature [] (Some 31)
+            node 31 (SemanticKind.Application(NodeId 925, [ NodeId 926 ])) pointerType [ 925; 926 ] (Some 32)
+            node 32 (SemanticKind.Binding("entry", false, false, None)) pointerType [ 31 ] (Some 35)
+            node 35 (SemanticKind.Sequential [ NodeId 32 ]) pointerType [ 32 ] None
+        ]
+
+    let imported = graph.Emission.Boundary.Imports[NodeId 44]
+
+    let imported =
+        { imported with
+            Parameters = [ NodeId 882, BoundaryScalar.Integer(64, true) ]
+            Result = Some(BoundaryScalar.Integer(64, true))
+        }
+
+    let entry = graph.Emission.Boundary.Entries[NodeId 31]
+
+    let entry =
+        { entry with
+            Operand = NodeId 926
+            SourceType = pointerType
+            Transport = Set.ofList [ NodeId 30; NodeId 31; NodeId 925; NodeId 926 ]
+        }
+
+    let sourceCarrier =
+        {
+            Occurrence = NodeId 926
+            SourceType = sourceSignature
+            Implementation = NodeId 884
+            Kind = CallableKind.OrdinaryFlatClosure
+            Formation = NodeId 884
+            EnvironmentValue = None
+            Contract = Ok(NodeId 884)
+            Lifetime = []
+            Parameters = [ "count", intType, NodeId 882 ]
+            ParameterShapes = [ CallableValueShape.Data(NodeId 882) ]
+            OmittedParameters = Set.empty
+            Result = NodeId 883
+            ResultShape = CallableValueShape.Data(NodeId 883)
+            Environment = None
+        }
+
+    let sourceDeclaration =
+        {
+            Lookup = NodeId 884
+            Implementation = NodeId 884
+            Parameters = sourceCarrier.Parameters
+            Result = NodeId 883
+            Context = LambdaContext.RegularClosure
+            Captures = []
+            Name = CallableSymbolName.LocalBinding(NodeId 30, "fixture_extern")
+            Parent = Some(NodeId 30)
+            Participants = Set.ofList [ NodeId 30; NodeId 882; NodeId 883; NodeId 884 ]
+        }
+
+    { graph with
+        Nodes = sourceNodes |> List.map (fun n -> n.Id, n) |> Map.ofList
+        Emission =
+            { graph.Emission with
+                Boundary =
+                    { graph.Emission.Boundary with
+                        Imports = Map.ofList [ imported.Identity, imported ]
+                        Entries = Map.ofList [ entry.Formation, entry ]
+                        Calls = Map.empty
+                    }
+                Callable =
+                    { graph.Emission.Callable with
+                        Carriers = Map.ofList [ NodeId 926, sourceCarrier ]
+                        DefinitionOnlyBindings = Set.singleton (NodeId 30)
+                        Declarations = Map.ofList [ NodeId 884, sourceDeclaration; NodeId 30, { sourceDeclaration with Lookup = NodeId 30; Parent = Some(NodeId 35) } ]
+                        SignatureData = Map.ofList [ NodeId 884, Set.ofList [ NodeId 882; NodeId 883 ] ]
+                        ValueShapes =
+                            sourceNodes
+                            |> List.map (fun n ->
+                                n.Id,
+                                if n.Id = NodeId 926 then
+                                    CallableValueShape.Callable n.Id
+                                else
+                                    CallableValueShape.Data n.Id)
+                            |> Map.ofList
+                        AliasTargets = sourceNodes |> List.map (fun n -> n.Id, n.Id) |> Map.ofList
+                        ClosedData = Set.ofList [ NodeId 882; NodeId 883 ]
+                    }
+                Numeric =
+                    { graph.Emission.Numeric with
+                        OccurrenceRepresentations = Map.ofList [ NodeId 882, Result.Error "requires an exact settled value occurrence" ]
+                    }
+            }
+    }
+    |> declareBindingReadings
+
+[<Fact>]
+let ``imported declaration operand needs no ordinary formal representation or runtime SSA`` () =
+    let graph = importedDeclarationOperandFixture ()
+    let accumulator = MLIRAccumulator.empty ()
+    let zipper = at graph 35 [ 32; 31; 926 ]
+
+    let ctx =
+        { context graph (NodeId 35) accumulator with
+            Zipper = zipper
+        }
+
+    let output = Alex.Witnesses.VarRefWitness.nanopass.Witness ctx zipper.Focus
+    Assert.Equal(TRVoid, output.Result)
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+    Assert.Null(MLIRAccumulator.recallNode (NodeId 926) accumulator)
+    Assert.True(graph.Emission.Numeric.OccurrenceRepresentations[NodeId 882] |> Result.isError)
+    let formation = at graph 35 [ 32; 31 ]
+
+    let output =
+        Alex.Witnesses.FunctionPointerWitness.nanopass.Witness { ctx with Zipper = formation } formation.Focus
+
+    match output.Result, output.InlineOps with
+    | TRValue value, [ FuncOp(FuncConstant(_, "fixture_extern", ty)) ] ->
+        Assert.Equal(TFunc([ TInt(IntWidth 64) ], [ TInt(IntWidth 64) ]), ty)
+        Assert.Equal(ty, value.Type)
+    | other -> failwithf "Native ABI address formation was not transcribed: %A" other
+
+[<Fact>]
+let ``ordinary callable reference still refuses an unresolved declaration formal`` () =
+    let graph = importedDeclarationOperandFixture ()
+
+    let graph =
+        { graph with
+            Nodes =
+                graph.Nodes.Add(
+                    NodeId 35,
+                    { graph.Nodes[NodeId 35] with
+                        Kind = SemanticKind.Sequential[NodeId 926]
+                        Children = [ NodeId 926 ]
+                    }
+                )
+        }
+        |> declareTraversalReadings
+
+    let accumulator = MLIRAccumulator.empty ()
+    let zipper = at graph 35 [ 926 ]
+
+    let ctx =
+        { context graph (NodeId 35) accumulator with
+            Zipper = zipper
+        }
+
+    let output = Alex.Witnesses.VarRefWitness.nanopass.Witness ctx zipper.Focus
+
+    match output.Result with
+    | TRError diagnostic ->
+        Assert.Contains(
+            "Callable signature data participant 882 has an unresolved source-published physical representation",
+            diagnostic.Message
+        )
+    | other -> failwithf "Ordinary callable gained native-declaration metadata authority: %A" other
+
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+    Assert.Null(MLIRAccumulator.recallNode (NodeId 926) accumulator)
+
 [<Fact>]
 let ``imported call refuses an unwitnessed pointer child instead of rematerializing its symbol`` () =
     let graph = importedFixture ()
