@@ -194,21 +194,9 @@ let pNativeEntrySlot (storage: ProgramStorageEntry) : PSGParser<NodeId * MLIRTyp
     parser {
         let! state = getUserState
 
-        match storage.Shape with
-        | ProgramStorageShape.NativeEntry formation ->
-            let boundary = state.Graph.Emission.Boundary
-
-            match boundary.Entries.TryFind formation with
-            | Some entry when entry.Formation = formation ->
-                match boundary.Imports.TryFind entry.Import, boundary.Loading with
-                | Some imported, Some loading when entry.Declaration = imported.Binding && entry.Loading = loading.Identity ->
-                    let functionType =
-                        TFunc(BoundaryAbi.parameters imported, BoundaryAbi.results imported)
-
-                    return formation, functionType
-                | _ -> return! fail (Message "Native entry slot has no matching current import and selected loading account.")
-            | _ -> return! fail (Message "Native entry slot has no matching current source formation.")
-        | _ -> return! fail (Message "Native entry slot requires its source-issued native entry storage shape.")
+        match nativeEntrySlotType state.Graph storage with
+        | Ok(entry, functionType) -> return entry.Formation, functionType
+        | Result.Error reason -> return! fail (Message reason)
     }
 
 /// Allocate memory for a constructed value — queries escape analysis coeffect

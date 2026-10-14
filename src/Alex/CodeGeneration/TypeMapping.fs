@@ -46,9 +46,66 @@ let private read what = function
     | Some(Error reason) -> failwithf "TypeMapping: %s has no source-published representation: %s" what reason
     | None -> failwithf "TypeMapping: source publication omitted %s" what
 
+/// The native entry and import own the physical function type. Numeric's
+/// callable refusal is not an entry representation and remains unchanged.
+let nativeEntrySlotType (graph: Revision) (storage: ProgramStorageEntry) =
+    match storage.Shape with
+    | ProgramStorageShape.NativeEntry formation ->
+        let boundary = graph.Emission.Boundary
+
+        match boundary.Entries.TryFind formation with
+        | Some entry when entry.Formation = formation && entry.SourceType = storage.SourceType ->
+            match boundary.Imports.TryFind entry.Import, boundary.Loading with
+            | Some imported, Some loading when
+                imported.Binding = entry.Declaration
+                && entry.Loading = loading.Identity
+                && imported.Library = loading.Contract.Library
+                ->
+                Ok(entry, TFunc(BoundaryAbi.parameters imported, BoundaryAbi.results imported))
+            | _ -> Error "Native entry slot has no matching current import and selected loading account."
+        | _ -> Error "Native entry slot has no matching current source formation."
+    | _ -> Error "Native entry slot requires its source-issued native entry storage shape."
+
+let private nativeSlotValueType (graph: Revision) nodeId =
+    let projection = graph.Emission.Storage
+
+    match projection.ProgramStorage.Entries.TryFind(ProgramStorageIdentity.BindingSlot nodeId) with
+    | Some storage when
+        (match storage.Shape with
+         | ProgramStorageShape.NativeEntry _ -> true
+         | _ -> false)
+        ->
+        let entry, functionType =
+            nativeEntrySlotType graph storage
+            |> Result.defaultWith (fun reason -> failwithf "TypeMapping: %s" reason)
+
+        let binding = graph.Nodes.TryFind nodeId
+
+        if
+            not projection.ProgramStorage.Unresolved.IsEmpty
+            || not (projection.SlotAuthorities.Contains nodeId)
+        then
+            failwith "TypeMapping: Native entry slot lacks its source-settled storage authority."
+
+        match binding with
+        | Some node when
+            node.Type = storage.SourceType
+            && entry.Transport.Contains nodeId
+            && node.Children = [ entry.Formation ]
+            && (match node.Kind with
+                | SemanticKind.Binding(_, false, _, _) -> true
+                | _ -> false)
+            ->
+            Some functionType
+        | _ -> failwith "TypeMapping: Native entry slot differs from its original immutable formation binding."
+    | _ -> None
+
 let valueTypeAt (graph: Revision) (nodeId: NodeId) =
-    (numericProjection graph).OccurrenceRepresentations.TryFind nodeId
-    |> read (sprintf "value occurrence %d" (NodeId.value nodeId))
+    match nativeSlotValueType graph nodeId with
+    | Some functionType -> functionType
+    | None ->
+        (numericProjection graph).OccurrenceRepresentations.TryFind nodeId
+        |> read (sprintf "value occurrence %d" (NodeId.value nodeId))
 
 let typeOfIdentity (graph: Revision) (identity: TypeIdentity) =
     (numericProjection graph).TypeRepresentations.TryFind identity |> read "type identity"

@@ -416,6 +416,87 @@ let private requireSlotPattern =
     | Ok(result, _) -> result
     | Result.Error error -> failwith error
 
+let private nativeSlotTypeFixture () =
+    let _, graph = nativeModuleSlotFixture ()
+    let numeric = graph.Emission.Numeric
+
+    let numeric =
+        { numeric with
+            OccurrenceRepresentations =
+                numeric.OccurrenceRepresentations.Add(
+                    NodeId 32,
+                    Result.Error "Native callable values require their source-settled entry and callable components (CCS8410)."
+                )
+        }
+
+    { graph with
+        Emission =
+            { graph.Emission with
+                Numeric = numeric
+            }
+    }
+
+[<Fact>]
+let ``native module type read consumes its exact entry slot`` () =
+    let graph = nativeSlotTypeFixture ()
+    Assert.Equal(TFunc([], []), Alex.CodeGeneration.TypeMapping.valueTypeAt graph (NodeId 32))
+
+[<Fact>]
+let ``native module type read refuses withdrawn binding transport`` () =
+    let graph = nativeSlotTypeFixture ()
+    let boundary = graph.Emission.Boundary
+    let entry = boundary.Entries[NodeId 31]
+
+    let entry =
+        { entry with
+            Transport = entry.Transport.Remove(NodeId 32)
+        }
+
+    let boundary =
+        { boundary with
+            Entries = boundary.Entries.Add(entry.Formation, entry)
+        }
+
+    let graph =
+        { graph with
+            Emission =
+                { graph.Emission with
+                    Boundary = boundary
+                }
+        }
+
+    let error =
+        Assert.Throws<System.Exception>(fun () -> Alex.CodeGeneration.TypeMapping.valueTypeAt graph (NodeId 32) |> ignore)
+
+    Assert.Contains("Native entry slot differs from its original immutable formation binding.", error.Message)
+
+[<Fact>]
+let ``native module type read retains ordinary numeric refusal`` () =
+    let graph = nativeSlotTypeFixture ()
+    let storage = graph.Emission.Storage
+
+    let storage =
+        { storage with
+            ProgramStorage =
+                { storage.ProgramStorage with
+                    Entries = Map.empty
+                }
+        }
+
+    let graph =
+        { graph with
+            Emission =
+                { graph.Emission with
+                    Storage = storage
+                }
+        }
+
+    let error =
+        Assert.Throws<System.Exception>(fun () -> Alex.CodeGeneration.TypeMapping.valueTypeAt graph (NodeId 32) |> ignore)
+
+    Assert.Contains("value occurrence 32 has no source-published representation", error.Message)
+    Assert.Contains("CCS8410", error.Message)
+
 [<Fact>]
 let ``native entry module slot keeps typed initialization and reload`` () =
     let storage, graph = nativeModuleSlotFixture ()
