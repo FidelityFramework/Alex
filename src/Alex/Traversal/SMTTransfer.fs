@@ -87,6 +87,58 @@ let private scope (ob: ObligationInfo) : MLIROp list =
 
     let ops =
         match ob.Body with
+        | ObligationBody.ForeignResultCoverage model ->
+            let projection =
+                ForeignResultCoverage.ofModel model
+                |> Result.defaultWith (fun reason -> invalidArg "ob" (sprintf "Obligation '%s': %s" ob.Id reason))
+
+            let arguments =
+                projection.Arguments |> List.map (fun index -> index, v ()) |> Map.ofList
+
+            let result = v ()
+
+            let declarations =
+                (arguments
+                 |> Map.toList
+                 |> List.map (fun (index, value) ->
+                     smt (SMTDeclareFun(value, ForeignResultCoverage.argumentName index, SMTInt))))
+                @ [ smt (SMTDeclareFun(result, "foreign_result", SMTInt)) ]
+
+            let term =
+                function
+                | ForeignResultCoverage.Term.Argument index -> arguments[index], []
+                | ForeignResultCoverage.Term.Result -> result, []
+                | ForeignResultCoverage.Term.Constant value ->
+                    let name = v ()
+                    name, [ smt (SMTBigIntConstant(name, value)) ]
+            // Structural formatting of the canonical predicate, not graph
+            // analysis or a second coverage formula.
+            let rec predicate =
+                function
+                | ForeignResultCoverage.Predicate.LessOrEqual(left, right) ->
+                    let left, leftOps = term left
+                    let right, rightOps = term right
+                    let value = v ()
+                    value, leftOps @ rightOps @ [ smt (SMTIntCmp(value, SmtLe, left, right)) ]
+                | ForeignResultCoverage.Predicate.And [] ->
+                    let zero, value = v (), v ()
+                    value, [ smt (SMTBigIntConstant(zero, 0I)); smt (SMTEq(value, zero, zero, SMTInt)) ]
+                | ForeignResultCoverage.Predicate.And clauses ->
+                    let values = clauses |> List.map predicate
+                    let value = v ()
+                    value, (values |> List.collect snd) @ [ smt (SMTAnd(value, List.map fst values)) ]
+                | ForeignResultCoverage.Predicate.Implies(premise, conclusion) ->
+                    let premise, premiseOps = predicate premise
+                    let conclusion, conclusionOps = predicate conclusion
+                    let negated, value = v (), v ()
+
+                    value,
+                    premiseOps
+                    @ conclusionOps
+                    @ [ smt (SMTNot(negated, premise)); smt (SMTOr(value, [ negated; conclusion ])) ]
+
+            let conclusion, body = predicate projection.Conclusion
+            anchor conclusion (declarations @ body)
         | ObligationBody.ProgramInitializationOrder(initializerOrdinal, initializerCount, useOrdinals) ->
             let constant (value: int) =
                 let name = v ()
