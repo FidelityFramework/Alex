@@ -388,6 +388,15 @@ type MLIROp =
     /// Exact source inventory accompanies writable storage. None identifies a
     /// legacy unowned declaration; it cannot pass storage correspondence.
     | GlobalMemref of string * MLIRType * Fidelity.PSG.ProgramStorageEntry option
+    /// Compiler-internal typed placeholders retain the original slot/entry
+    /// correspondence until the selected target realizes its code-pointer cell.
+    | NativeEntrySlotDecl of
+        globalName: string *
+        storage: Fidelity.PSG.ProgramStorageEntry *
+        entry: Fidelity.PSG.NodeId *
+        functionType: MLIRType
+    | NativeEntrySlotStore of identity: Fidelity.PSG.ProgramStorageIdentity * entry: Fidelity.PSG.NodeId * destination: Val * value: Val
+    | NativeEntrySlotLoad of identity: Fidelity.PSG.ProgramStorageIdentity * entry: Fidelity.PSG.NodeId * source: Val * result: Val
     /// Exact immutable initializer and residence authority settled by Baker.
     | GlobalArray of string * MLIRType * Fidelity.PSG.MemoryArrayLiteralWitness
     // CIRCT hardware dialects (FPGA targets)
@@ -484,6 +493,17 @@ module BoundaryAbi =
 
     let results (declaration: Fidelity.PSG.BoundaryImport) =
         declaration.Result |> Option.map scalarType |> Option.toList
+
+module NativeEntrySlotSymbols =
+    open Fidelity.PSG
+
+    /// Spelling only: source inventory and typed slot incidence remain authority.
+    let names =
+        function
+        | ProgramStorageIdentity.BindingSlot binding ->
+            let suffix = NodeId.value binding
+            sprintf "__clef_native_entry_slot_store_%d" suffix, sprintf "__clef_native_entry_slot_load_%d" suffix
+        | ProgramStorageIdentity.Allocation _ -> invalidArg "identity" "A native entry slot requires a source binding-slot identity."
 
 module IntrinsicWriteAbi =
     let bufferType (declaration: Fidelity.PSG.IntrinsicWriteImport) =

@@ -356,6 +356,193 @@ let private importedTraversal (graph: Revision) =
     visitAllNodes witness ctx graph.Nodes[NodeId 35] ctx.TraversalVisited
     ctx
 
+/// Component values declare storage and reservation explicitly. This is not
+/// compiler source admission; the real module publication is checked separately.
+let private nativeModuleSlotFixture () =
+    let graph = importedFixture ()
+
+    let space: BAREWire.Platform.MemorySpace =
+        {
+            Name = "program"
+            Kind = "ram"
+            Capacity = 4096L
+            Alignment = 8
+            Granularity = 8
+            Growth = "fixed"
+            Access = "rw"
+            Base = None
+            Notes = ""
+            MapKind = ""
+            Since = ""
+            Until = ""
+        }
+
+    let storage: ProgramStorageEntry =
+        {
+            Identity = ProgramStorageIdentity.BindingSlot(NodeId 32)
+            SourceType = graph.Emission.Boundary.Entries[NodeId 31].SourceType
+            Shape = ProgramStorageShape.NativeEntry(NodeId 31)
+            Bytes = 8
+            Alignment = 8
+            SpaceNode = NodeId 50
+            Space = space
+            Participants = Set.ofList [ NodeId 31; NodeId 32; NodeId 50 ]
+        }
+
+    let projection = graph.Emission.Storage
+
+    let inventory =
+        { projection.ProgramStorage with
+            Entries = Map.ofList [ storage.Identity, storage ]
+        }
+
+    storage,
+    { graph with
+        Emission =
+            { graph.Emission with
+                Storage =
+                    { projection with
+                        ProgramStorage = inventory
+                        SlotAuthorities = Set.singleton (NodeId 32)
+                    }
+            }
+    }
+
+let private nativeSlotPattern graph site pattern accumulator =
+    matchAt pattern (focus graph graph.Nodes[site]) 64 accumulator
+
+let private requireSlotPattern =
+    function
+    | Ok(result, _) -> result
+    | Result.Error error -> failwith error
+
+[<Fact>]
+let ``native entry module slot keeps typed initialization and reload`` () =
+    let storage, graph = nativeModuleSlotFixture ()
+    let accumulator = MLIRAccumulator.empty ()
+    let functionType = TFunc([], [])
+
+    let initialized =
+        nativeSlotPattern
+            graph
+            (NodeId 32)
+            (Alex.Patterns.MemRefPatterns.pGlobalSlotInit (NodeId 32) "module_entry" (V(31, 0)) functionType)
+            accumulator
+        |> requireSlotPattern
+
+    match initialized with
+    | [ MemRefOp(MemRefOp.GetGlobal(_, "module_entry", container)); NativeEntrySlotStore(identity, formation, slot, value) ], TRValue held ->
+        Assert.Equal(storage.Identity, identity)
+        Assert.Equal(NodeId 31, formation)
+        Assert.Equal(TMemRefStatic(8, TInt(IntWidth 8)), container)
+        Assert.Equal(slot, held)
+        Assert.Equal(functionType, value.Type)
+    | other -> failwithf "Typed native slot initialization differed: %A" other
+
+    let reloaded =
+        nativeSlotPattern
+            graph
+            (NodeId 33)
+            (Alex.Patterns.MemRefPatterns.pGlobalSlotLoad (NodeId 32) (NodeId 33) "module_entry" TIndex)
+            accumulator
+        |> requireSlotPattern
+
+    match reloaded with
+    | [ MemRefOp(MemRefOp.GetGlobal(_, "module_entry", container)); NativeEntrySlotLoad(identity, formation, slot, result) ], TRValue held ->
+        Assert.Equal(storage.Identity, identity)
+        Assert.Equal(NodeId 31, formation)
+        Assert.Equal(container, slot.Type)
+        Assert.Equal(functionType, result.Type)
+        Assert.Equal(result, held)
+    | other -> failwithf "Typed native slot reload differed: %A" other
+
+    let declarations = MLIRAccumulator.drainPendingStaticGlobals accumulator
+    Assert.Equal(2, declarations.Length)
+    Assert.Contains(NativeEntrySlotDecl("module_entry", storage, NodeId 31, functionType), declarations)
+    Assert.Contains(GlobalMemref("module_entry", TMemRefStatic(8, TInt(IntWidth 8)), Some storage), declarations)
+
+[<Theory>]
+[<InlineData("entry", "Native entry slot has no matching current source formation.")>]
+[<InlineData("import", "Native entry slot has no matching current import and selected loading account.")>]
+[<InlineData("loading", "Native entry slot has no matching current import and selected loading account.")>]
+let ``native entry module slot refuses withdrawn account`` (withdrawal: string) (reason: string) =
+    let storage, graph = nativeModuleSlotFixture ()
+    let boundary = graph.Emission.Boundary
+
+    let changed =
+        match withdrawal with
+        | "entry" -> { boundary with Entries = Map.empty }
+        | "import" -> { boundary with Imports = Map.empty }
+        | "loading" -> { boundary with Loading = None }
+        | _ -> failwith "Unknown fixture withdrawal"
+
+    let graph =
+        { graph with
+            Emission =
+                { graph.Emission with
+                    Boundary = changed
+                }
+        }
+
+    match nativeSlotPattern graph (NodeId 32) (Alex.Patterns.MemoryPatterns.pNativeEntrySlot storage) (MLIRAccumulator.empty ()) with
+    | Result.Error error -> Assert.Contains(reason, error)
+    | other -> failwithf "Withdrawn native slot account was admitted: %A" other
+
+[<Fact>]
+let ``native entry module slot refuses changed initializer type`` () =
+    let _, graph = nativeModuleSlotFixture ()
+
+    let pattern =
+        Alex.Patterns.MemRefPatterns.pGlobalSlotInit (NodeId 32) "module_entry" (V(31, 0)) (TInt(IntWidth 64))
+
+    match nativeSlotPattern graph (NodeId 32) pattern (MLIRAccumulator.empty ()) with
+    | Result.Error error -> Assert.Contains("Native entry slot differs from its original imported function signature.", error)
+    | other -> failwithf "Changed native initializer type was admitted: %A" other
+
+[<Fact>]
+let ``native entry module slot refuses mutable store`` () =
+    let _, graph = nativeModuleSlotFixture ()
+
+    let pattern =
+        Alex.Patterns.MemRefPatterns.pGlobalSlotStore (NodeId 32) (NodeId 32) "module_entry" (V(31, 0)) (TFunc([], []))
+
+    match nativeSlotPattern graph (NodeId 32) pattern (MLIRAccumulator.empty ()) with
+    | Result.Error error -> Assert.Contains("Native entry module slots do not admit mutable stores.", error)
+    | other -> failwithf "Mutable native slot store was admitted: %A" other
+
+[<Fact>]
+let ``native entry module slot serializes stock typed placeholders`` () =
+    let storage, _ = nativeModuleSlotFixture ()
+    let functionType = TFunc([], [])
+
+    let slot =
+        {
+            SSA = V(32, 0)
+            Type = TMemRefStatic(8, TInt(IntWidth 8))
+        }
+
+    let value = { SSA = V(31, 0); Type = functionType }
+    let result = { SSA = V(33, 2); Type = functionType }
+
+    let ops =
+        [
+            NativeEntrySlotDecl("module_entry", storage, NodeId 31, functionType)
+            NativeEntrySlotStore(storage.Identity, NodeId 31, slot, value)
+            NativeEntrySlotLoad(storage.Identity, NodeId 31, slot, result)
+        ]
+
+    let text =
+        ops
+        |> List.map (Alex.Dialects.Core.Serialize.opToString (Ok 64))
+        |> String.concat "\n"
+
+    Assert.Contains("func.func private @__clef_native_entry_slot_store_32(memref<8xi8>, () -> ())", text)
+    Assert.Contains("func.func private @__clef_native_entry_slot_load_32(memref<8xi8>) -> (() -> ())", text)
+    Assert.Contains("func.call @__clef_native_entry_slot_store_32", text)
+    Assert.Contains("%v33_2 = func.call @__clef_native_entry_slot_load_32", text)
+    Assert.DoesNotContain("memref<1x(", text)
+    Assert.DoesNotContain("!llvm.ptr", text)
+
 [<Fact>]
 let ``imported pointer initialization and immutable read precede the indirect call`` () =
     let ctx = importedFixture () |> importedTraversal

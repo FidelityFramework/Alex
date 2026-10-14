@@ -563,6 +563,17 @@ module MLIRAccumulator =
             acc.EmittedStaticGlobals <- acc.EmittedStaticGlobals.Add(name, (declType, authority))
             acc.PendingStaticGlobals <- MLIROp.GlobalMemref (name, declType, authority) :: acc.PendingStaticGlobals
 
+    /// Queue the typed companion with the same source-owned global declaration;
+    /// both use the existing declaration census and module-scope drain.
+    let tryEmitNativeEntrySlot name slotType storage entry functionType (acc: MLIRAccumulator) =
+        let fresh = not (acc.EmittedStaticGlobals.ContainsKey name)
+        tryEmitGlobalMemref name slotType (Some storage) acc
+
+        if fresh && acc.EmittedStaticGlobals.TryFind name = Some(slotType, Some storage) then
+            acc.PendingStaticGlobals <-
+                MLIROp.NativeEntrySlotDecl(name, storage, entry, functionType)
+                :: acc.PendingStaticGlobals
+
     /// Drain any pending memref.global decls queued during parser emission, clearing the queue.
     /// The witness routes the returned ops into WitnessOutput.TopLevelOps for module-scope placement.
     let drainPendingStaticGlobals (acc: MLIRAccumulator) : MLIROp list =

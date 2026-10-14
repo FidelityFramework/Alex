@@ -117,14 +117,28 @@ let pStoreMutableVariable (nodeId: int) (memrefSSA: SSA) (valueSSA: SSA) (elemTy
 let slotElementType (arch: Architecture) (ty: MLIRType) : MLIRType =
     physicalStorageType arch ty
 
+let private programSlotType arch valueTy (published: ProgramStorageEntry option) =
+    match published with
+    | Some storage when
+        (match storage.Shape with
+         | ProgramStorageShape.NativeEntry _ -> true
+         | _ -> false)
+        ->
+        TMemRefStatic(storage.Bytes, TInt(IntWidth 8))
+    | _ -> TMemRefStatic(1, slotElementType arch valueTy)
+
 /// Observe the exact startup/storage relation. The source binding's
 /// immutability never grants permission to write an immutable image region.
 let pProgramValueAuthority (bindingId: NodeId) : PSGParser<unit> =
     parser {
         let! state = getUserState
         let projection = state.Graph.Emission.Storage
-        do! ensure (projection.SlotAuthorities.Contains bindingId)
+
+        do!
+            ensure
+                (projection.SlotAuthorities.Contains bindingId)
                 $"Program value {NodeId.value bindingId} lacks its settled startup and writable-space authority"
+
         return ()
     }
 
@@ -144,52 +158,119 @@ let pGlobalSlotInit (nodeId: NodeId) (globalName: string) (valueSSA: SSA) (value
         let! ssas = getNodeSSAs nodeId
         do! ensure (ssas.Length >= 2) $"pGlobalSlotInit: Expected at least 2 SSAs, got {ssas.Length}"
         let! state = getUserState
-        let elemTy = slotElementType state.Platform.TargetArch valueTy
-        let slotTy = TMemRefStatic (1, elemTy)
-        let! authority = Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot nodeId) slotTy
-        MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
+        let identity = ProgramStorageIdentity.BindingSlot nodeId
+        let published = state.Graph.Emission.Storage.ProgramStorage.Entries.TryFind identity
+        let slotTy = programSlotType state.Platform.TargetArch valueTy published
+
+        let! authority =
+            Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot nodeId) slotTy
+
         let! getOp = pMemRefGetGlobal ssas.[0] globalName slotTy
-        let! zeroOp = pIndexConst ssas.[1] 0L
-        let! storeOp = pStore valueSSA ssas.[0] [ssas.[1]] elemTy slotTy
-        return ([getOp; zeroOp; storeOp], TRValue { SSA = ssas.[0]; Type = TMemRef elemTy })
+
+        match authority.Shape with
+        | ProgramStorageShape.NativeEntry _ ->
+            let! formation, functionType =
+                Alex.Patterns.MemoryPatterns.pNativeEntrySlot authority
+
+            do! ensure (valueTy = functionType) "Native entry slot differs from its original imported function signature."
+            MLIRAccumulator.tryEmitNativeEntrySlot globalName slotTy authority formation functionType state.Accumulator
+            let slot = { SSA = ssas.[0]; Type = slotTy }
+            let value = { SSA = valueSSA; Type = valueTy }
+            return ([ getOp; MLIROp.NativeEntrySlotStore(identity, formation, slot, value) ], TRValue slot)
+        | _ ->
+            let elemTy = slotElementType state.Platform.TargetArch valueTy
+            MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
+            let! zeroOp = pIndexConst ssas.[1] 0L
+            let! storeOp = pStore valueSSA ssas.[0] [ ssas.[1] ] elemTy slotTy
+
+            return
+                ([ getOp; zeroOp; storeOp ],
+                 TRValue
+                     {
+                         SSA = ssas.[0]
+                         Type = TMemRef elemTy
+                     })
     }
 
 /// Reload a module-level value from its slot. Valid in any function: the slot is a global.
 ///
 /// SSA layout (3 SSAs): [0] = slotSSA, [1] = zeroSSA, [2] = valueSSA
-let pGlobalSlotLoad (bindingId: NodeId) (nodeId: NodeId) (globalName: string) (valueTy: MLIRType) : PSGParser<MLIROp list * TransferResult> =
+let pGlobalSlotLoad
+    (bindingId: NodeId)
+    (nodeId: NodeId)
+    (globalName: string)
+    (valueTy: MLIRType)
+    : PSGParser<MLIROp list * TransferResult> =
     parser {
         do! pProgramValueAuthority bindingId
         let! ssas = getNodeSSAs nodeId
         do! ensure (ssas.Length >= 3) $"pGlobalSlotLoad: Expected at least 3 SSAs, got {ssas.Length}"
         let! state = getUserState
-        let elemTy = slotElementType state.Platform.TargetArch valueTy
-        let slotTy = TMemRefStatic (1, elemTy)
-        let! authority = Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot bindingId) slotTy
-        MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
+        let identity = ProgramStorageIdentity.BindingSlot bindingId
+        let published = state.Graph.Emission.Storage.ProgramStorage.Entries.TryFind identity
+        let slotTy = programSlotType state.Platform.TargetArch valueTy published
+
+        let! authority =
+            Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot bindingId) slotTy
+
         let! getOp = pMemRefGetGlobal ssas.[0] globalName slotTy
-        let! zeroOp = pIndexConst ssas.[1] 0L
-        let! loadOp = pLoadFrom ssas.[2] ssas.[0] [ssas.[1]] elemTy
-        return ([getOp; zeroOp; loadOp], TRValue { SSA = ssas.[2]; Type = valueTy })
+
+        match authority.Shape with
+        | ProgramStorageShape.NativeEntry _ ->
+            let! formation, functionType =
+                Alex.Patterns.MemoryPatterns.pNativeEntrySlot authority
+
+            MLIRAccumulator.tryEmitNativeEntrySlot globalName slotTy authority formation functionType state.Accumulator
+            let slot = { SSA = ssas.[0]; Type = slotTy }
+            let result = { SSA = ssas.[2]; Type = functionType }
+            return ([ getOp; MLIROp.NativeEntrySlotLoad(identity, formation, slot, result) ], TRValue result)
+        | _ ->
+            let elemTy = slotElementType state.Platform.TargetArch valueTy
+            MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
+            let! zeroOp = pIndexConst ssas.[1] 0L
+            let! loadOp = pLoadFrom ssas.[2] ssas.[0] [ ssas.[1] ] elemTy
+            return ([ getOp; zeroOp; loadOp ], TRValue { SSA = ssas.[2]; Type = valueTy })
     }
 
 /// Store into a module-level value slot (`Module.value <- v` on a mutable module-level binding).
 ///
 /// SSA layout (2 SSAs): [0] = slotSSA, [1] = zeroSSA
-let pGlobalSlotStore (bindingId: NodeId) (nodeId: NodeId) (globalName: string) (valueSSA: SSA) (valueTy: MLIRType) : PSGParser<MLIROp list * TransferResult> =
+let pGlobalSlotStore
+    (bindingId: NodeId)
+    (nodeId: NodeId)
+    (globalName: string)
+    (valueSSA: SSA)
+    (valueTy: MLIRType)
+    : PSGParser<MLIROp list * TransferResult> =
     parser {
         do! pProgramValueAuthority bindingId
         let! ssas = getNodeSSAs nodeId
         do! ensure (ssas.Length >= 2) $"pGlobalSlotStore: Expected at least 2 SSAs, got {ssas.Length}"
         let! state = getUserState
+
+        let published =
+            state.Graph.Emission.Storage.ProgramStorage.Entries.TryFind(ProgramStorageIdentity.BindingSlot bindingId)
+
+        do!
+            ensure
+                (published
+                 |> Option.forall (fun storage ->
+                     match storage.Shape with
+                     | ProgramStorageShape.NativeEntry _ -> false
+                     | _ -> true))
+                "Native entry module slots do not admit mutable stores."
+
         let elemTy = slotElementType state.Platform.TargetArch valueTy
-        let slotTy = TMemRefStatic (1, elemTy)
-        let! authority = Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot bindingId) slotTy
+        let slotTy = TMemRefStatic(1, elemTy)
+
+        let! authority =
+            Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot bindingId) slotTy
+
         MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
         let! getOp = pMemRefGetGlobal ssas.[0] globalName slotTy
         let! zeroOp = pIndexConst ssas.[1] 0L
-        let! storeOp = pStore valueSSA ssas.[0] [ssas.[1]] elemTy slotTy
-        return ([getOp; zeroOp; storeOp], TRVoid)
+        let! storeOp = pStore valueSSA ssas.[0] [ ssas.[1] ] elemTy slotTy
+        return ([ getOp; zeroOp; storeOp ], TRVoid)
     }
 
 // ═══════════════════════════════════════════════════════════

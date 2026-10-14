@@ -740,7 +740,7 @@ let private nativeFixture union =
             implementation.Id, premise "lambda" ["RegularClosure"; "value"] [1I; 0I; 0I] [NodeId 0; NodeId 1]
                                    [NodeId 0; NodeId 1] (Some binding.Id) ordinaryType [boolType] ]
     let target : BoundaryPlatformPremise =
-        { Id = "alex-native-component"; Description = None; LibraryPath = None; SourcePaths = Set.singleton range.File
+        { Id = "alex-native-component"; Description = None; LibraryPath = None; Loading = None; SourcePaths = Set.singleton range.File
           Architecture = Some "x86_64"; OS = Some "linux"; RuntimeClaim = Some RuntimeModel.Libc; Substrate = Some SubstrateKind.CPU
           Dimensions = Map.ofList ["Pointer", 64; "Register", 64]; Representations = Map.empty; EndpointReturns = Map.empty }
     let contract = c.Contracts[NodeId 2]

@@ -592,6 +592,52 @@ let rec opToString (pointer: Result<int, string>) (op: MLIROp) : string =
             | None ->
                 failwithf "PSG settlement (program storage) did not settle a storage entry for the writable global @%s: an unowned global has no alignment to write" name
         sprintf "memref.global \"private\" @%s : %s = uninitialized%s" name (typeToString pointer memrefType) alignment
+    | MLIROp.NativeEntrySlotDecl(_globalName, storage, entry, functionType) ->
+        match storage.Shape, functionType with
+        | Fidelity.PSG.ProgramStorageShape.NativeEntry formation, TFunc _ when formation = entry -> ()
+        | _ -> invalidOp "Native entry placeholder declaration differs from its typed source storage formation."
+
+        let storeName, loadName = NativeEntrySlotSymbols.names storage.Identity
+        let slotType = TMemRefStatic(storage.Bytes, TInt(IntWidth 8))
+        let slotText = typeToString pointer slotType
+        let functionText = typeToString pointer functionType
+
+        sprintf
+            "func.func private @%s(%s, %s)\nfunc.func private @%s(%s) -> (%s)"
+            storeName
+            slotText
+            functionText
+            loadName
+            slotText
+            functionText
+    | MLIROp.NativeEntrySlotStore(identity, _entry, destination, value) ->
+        match destination.Type, value.Type with
+        | TMemRefStatic(_, TInt(IntWidth 8)), TFunc _ -> ()
+        | _ -> invalidOp "Native entry placeholder store requires its byte container and typed function value."
+
+        let storeName, _ = NativeEntrySlotSymbols.names identity
+
+        sprintf
+            "func.call @%s(%s, %s) : (%s, %s) -> ()"
+            storeName
+            (ssaToString destination.SSA)
+            (ssaToString value.SSA)
+            (typeToString pointer destination.Type)
+            (typeToString pointer value.Type)
+    | MLIROp.NativeEntrySlotLoad(identity, _entry, source, result) ->
+        match source.Type, result.Type with
+        | TMemRefStatic(_, TInt(IntWidth 8)), TFunc _ -> ()
+        | _ -> invalidOp "Native entry placeholder load requires its byte container and typed function result."
+
+        let _, loadName = NativeEntrySlotSymbols.names identity
+
+        sprintf
+            "%s = func.call @%s(%s) : (%s) -> (%s)"
+            (ssaToString result.SSA)
+            loadName
+            (ssaToString source.SSA)
+            (typeToString pointer source.Type)
+            (typeToString pointer result.Type)
     | MLIROp.GlobalArray(name, memrefType, authority) ->
         let values =
             authority.Initializers |> Option.defaultWith (fun () -> invalidOp "Immutable array lacks its source-published initializer.")

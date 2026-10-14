@@ -161,6 +161,7 @@ let staticValueName (nodeId: NodeId) = sprintf "__clef_static_value_%d" (NodeId.
 let programStorageType arch graph (entry: ProgramStorageEntry) =
     match entry.Shape with
     | ProgramStorageShape.Bytes -> Some(TMemRefStatic(entry.Bytes, TInt(IntWidth 8)))
+    | ProgramStorageShape.NativeEntry _ -> Some(TMemRefStatic(entry.Bytes, TInt(IntWidth 8)))
     | ProgramStorageShape.Scalar slot ->
         let scalar =
             match slot with
@@ -185,6 +186,29 @@ let pProgramStorageDeclaration identity storageTy : PSGParser<ProgramStorageEntr
         let expected = programStorageType state.Platform.TargetArch state.Graph entry
         do! ensure (expected = Some storageTy) (sprintf "Writable declaration %A disagrees with its source-held physical shape" identity)
         return entry
+    }
+
+/// Read the already-admitted original entry and its physical import signature.
+/// The byte container is storage; it never becomes the function value's type.
+let pNativeEntrySlot (storage: ProgramStorageEntry) : PSGParser<NodeId * MLIRType> =
+    parser {
+        let! state = getUserState
+
+        match storage.Shape with
+        | ProgramStorageShape.NativeEntry formation ->
+            let boundary = state.Graph.Emission.Boundary
+
+            match boundary.Entries.TryFind formation with
+            | Some entry when entry.Formation = formation ->
+                match boundary.Imports.TryFind entry.Import, boundary.Loading with
+                | Some imported, Some loading when entry.Declaration = imported.Binding && entry.Loading = loading.Identity ->
+                    let functionType =
+                        TFunc(BoundaryAbi.parameters imported, BoundaryAbi.results imported)
+
+                    return formation, functionType
+                | _ -> return! fail (Message "Native entry slot has no matching current import and selected loading account.")
+            | _ -> return! fail (Message "Native entry slot has no matching current source formation.")
+        | _ -> return! fail (Message "Native entry slot requires its source-issued native entry storage shape.")
     }
 
 /// Allocate memory for a constructed value — queries escape analysis coeffect
