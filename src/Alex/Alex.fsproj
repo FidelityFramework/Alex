@@ -47,6 +47,7 @@
     <Compile Include="Elements/HWElements.fs" />
     <Compile Include="Elements/SeqElements.fs" />
     <Compile Include="Patterns/MemoryPatterns.fs" />
+    <Compile Include="Patterns/FunctionPointerPatterns.fs" />
     <Compile Include="Patterns/CallableAggregatePatterns.fs" />
     <Compile Include="Patterns/DUPatterns.fs" />
     <Compile Include="Patterns/RecordPatterns.fs" />
@@ -60,7 +61,6 @@
     <Compile Include="Patterns/EnvironmentPatterns.fs" />
     <Compile Include="Patterns/LazyPatterns.fs" />
     <Compile Include="Patterns/ApplicationPatterns.fs" />
-    <Compile Include="Patterns/FunctionPointerPatterns.fs" />
     <Compile Include="Patterns/CallablePatterns.fs" />
     <Compile Include="Patterns/SequencePatterns.fs" />
     <Compile Include="Patterns/EagerPatterns.fs" />

@@ -195,7 +195,7 @@ let private fixture union =
         { Occurrence = occurrence; Aggregate = aggregate.Id; Slot = slot.Identity
           Alternatives = [alternative]
           Selector = Some { Lower = 0; UpperExclusive = 1; Storage = None; Slot = None; ByteOffset = None }
-          FormationInputs = [if operation = CallableAggregateOperation.Construct then code.Id else aggregate.Id]
+          FormationInputs = if operation = CallableAggregateOperation.Construct then [code.Id] else [aggregate.Id; code.Id]
           Value = value; SelectedAlternative = selected
           Operation = operation; Frontier = if operation = CallableAggregateOperation.Project then Some occurrence else None
           Tag = tag; Bytes = 0; Alignment = 1; Participants = [] }

@@ -53,6 +53,53 @@ let unionInputIsCallable (graph: Revision) occurrence caseIndex value =
         (graph.Emission.Callable.AggregateSlots.TryFind row.Slot |> Option.exists (fun slot ->
             slot.Path = [CallableAggregatePathStep.UnionPayload(caseIndex, 0)]))))
 
+let private nativeAlternative (graph: Revision) (row: CallableAggregateValue)
+                              (arm: CallableAggregateAlternative) (carrier: CallableCarrier) (contract: CallableContract) (slot: CallableAggregateSlot) =
+    let error text = Result.Error(refusal row.Occurrence (Some row.Slot) AX4002 ("Callable aggregate native entry: receiving contract is published; " + text))
+    let recordOperation =
+        match slot.Path, row.Operation, graph.Nodes.TryFind row.Occurrence with
+        | [CallableAggregatePathStep.RecordField _], CallableAggregateOperation.Construct, Some { Kind = SemanticKind.RecordExpr _ }
+        | [CallableAggregatePathStep.RecordField _], CallableAggregateOperation.Project, Some { Kind = SemanticKind.FieldGet _ } -> true
+        | _ -> false
+    let singleton =
+        row.Alternatives = [arm] && arm.Ordinal = 0 && row.Bytes = 0 &&
+        (row.Selector |> Option.exists (fun selector ->
+            selector.Lower = 0 && selector.UpperExclusive = 1 && selector.Storage.IsNone &&
+            selector.Slot.IsNone && selector.ByteOffset.IsNone))
+    let selected =
+        match row.Operation, row.FormationInputs with
+        | CallableAggregateOperation.Construct, [actual] ->
+            actual = carrier.Occurrence && row.Value = Some actual && row.SelectedAlternative = Some 0
+        | CallableAggregateOperation.Project, [construction; actual] ->
+            actual = carrier.Occurrence && row.Value.IsNone && row.SelectedAlternative.IsNone &&
+            (graph.Emission.Callable.AggregateValues.TryFind construction |> Option.exists (List.exists (fun source ->
+                source.Operation = CallableAggregateOperation.Construct && source.Slot = row.Slot &&
+                source.Value = Some actual && source.SelectedAlternative = Some 0 && source.Alternatives = [arm])))
+        | _ -> false
+    if not recordOperation then
+        error "requires an exact record-field Construct or FieldGet Project; union transport is not admitted."
+    elif not singleton || not selected || arm.Adapter.IsSome ||
+       carrier.Environment.IsSome || carrier.EnvironmentValue.IsSome || arm.EnvironmentPlacement.IsSome ||
+       contract.EnvironmentBytes.IsSome || not carrier.OmittedParameters.IsEmpty || not contract.OmittedParameters.IsEmpty then
+        error "requires one current static Construct/Project selection with no environment, adapter or omitted native formal."
+    else
+        match FunctionPointerPatterns.closedFunctionAddress graph arm.Formation with
+        | Result.Error reason -> error reason
+        | Result.Ok(entry, _, nativeType) ->
+            let lifetime = [entry.Lifetime.Module; entry.Lifetime.Binding; entry.Lifetime.Implementation] |> Set.ofList
+            let heldLifetime = carrier.Lifetime |> List.filter (fun part -> part.Role = ParticipantRole.CallableLifetime) |> List.map _.Node |> Set.ofList
+            let arguments = contract.ParameterRepresentations |> List.map (snd >> representationType)
+            let result = representationType contract.ResultRepresentation
+            let receivingType = TFunc(arguments, if result = TVoid then [] else [result])
+            if entry.Implementation <> carrier.Implementation || entry.Formals <> (carrier.Parameters |> List.map (fun (_, _, id) -> id)) ||
+               entry.Body <> carrier.Result || lifetime <> heldLifetime ||
+               not (Set.isSubset (Set.ofList [row.Occurrence; row.Aggregate; carrier.Occurrence; arm.Formation]) entry.Transport) then
+                error "lost its exact current entry formation, transport, declaration or program-image lifetime."
+            elif List.map fst contract.ParameterRepresentations <> [0 .. entry.Formals.Length - 1] ||
+                 contract.ParameterTypes.Length <> entry.Formals.Length || receivingType <> nativeType then
+                error "receiving contract differs from the complete native invocation ABI."
+            else Result.Ok carrier
+
 let private alternative (graph: Revision) (row: CallableAggregateValue) (arm: CallableAggregateAlternative) =
     let projection = graph.Emission.Callable
     let error text = Result.Error(refusal row.Occurrence (Some row.Slot) AX4001 text)
@@ -62,10 +109,10 @@ let private alternative (graph: Revision) (row: CallableAggregateValue) (arm: Ca
              carrier.Contract = slot.Contract && slot.Contract = Result.Ok arm.Contract ->
         match slot.Contract |> Result.toOption |> Option.bind projection.Contracts.TryFind with
         | Some contract when contract.Kind = carrier.Kind ->
-            // R3-M1: this is the single native-reconstruction admission guard.
-            if carrier.Kind <> CallableKind.OrdinaryFlatClosure then
-                let message = $"Callable aggregate {row.Operation}: the callable receiving contract is published, but native callable-component reconstruction is not admitted by this witness pathway."
-                Result.Error(refusal row.Occurrence (Some row.Slot) AX4002 message)
+            if carrier.Kind = CallableKind.NativeEntry then
+                nativeAlternative graph row arm carrier contract slot
+            elif carrier.Kind <> CallableKind.OrdinaryFlatClosure then
+                error "Callable aggregate alternative has no admitted callable kind."
             elif arm.Adapter.IsSome then
                 error "Callable aggregate adapters require an explicit source-authored relation."
             elif carrier.EnvironmentValue.IsSome <> arm.EnvironmentPlacement.IsSome ||
@@ -364,6 +411,23 @@ let private pWrite (ctx: WitnessContext) (destination: Val) (row: CallableAggreg
                 | _ -> fail (Message "Callable aggregate write has no unique selected source alternative.")
             | _ -> fail (Message "Callable aggregate write lacks its exact source value and selected alternative.")
         let! carrier = pAlternative row alternative
+        if carrier.Kind = CallableKind.NativeEntry then
+            let! nativeType =
+                match FunctionPointerPatterns.closedFunctionAddress state.Graph carrier.Formation with
+                | Result.Ok(_, _, ty) -> preturn ty
+                | Result.Error reason -> fail (Message reason)
+            let actualIsFormation =
+                match MLIRAccumulator.recallNode actual state.Accumulator,
+                      MLIRAccumulator.recallNode carrier.Formation state.Accumulator with
+                | Some(value, ty), Some(formation, formationType) ->
+                    value = formation && ty = nativeType && formationType = nativeType
+                | _ -> false
+            do! ensure actualIsFormation "Callable aggregate native construction lost its exact witnessed TFunc formation SSA."
+            let! storageOps, _ = pStorage row destination
+            // The source layout contains only captured payload/selector data.
+            // Its singleton native code is reconstructed from the current entry.
+            return storageOps
+        else
         let! value =
             match MLIRAccumulator.recallCallable actual state.Accumulator with
             | Some value when Operands.exactCarrier value = Some carrier -> preturn value
@@ -460,21 +524,8 @@ let private pSelect (row: CallableAggregateValue) lane (selector: Val option)
     | _ -> return! fail (Message "Callable aggregate selection has no complete arm/selector correspondence.")
 }
 
-let pReadComponent (ctx: WitnessContext) occurrence operation = parser {
+let private pReadOrdinaryComponent (ctx: WitnessContext) occurrence (row: CallableAggregateValue) storageOps storage = parser {
     let! state = getUserState
-    let! rows = pRows occurrence operation
-    let! aggregate =
-        match operation with
-        | SemanticKind.FieldGet(aggregate, _)
-        | SemanticKind.DUEliminate(aggregate, _, _, _) -> preturn aggregate
-        | _ -> fail (Message "Callable projection requires its witnessed field or union projection.")
-    let! row =
-        match rows with
-        | [row] when row.Aggregate = aggregate &&
-                     (row.Operation = CallableAggregateOperation.Project || row.Operation = CallableAggregateOperation.Snapshot) -> preturn row
-        | _ -> fail (Message "Callable aggregate read has no unique published slot and snapshot frontier.")
-    let! raw, rawType = pRecallNode aggregate
-    let! storageOps, storage = pStorage row { SSA = raw; Type = rawType }
     let! shape =
         match Operands.project ctx occurrence with
         | Result.Ok shape -> preturn shape
@@ -540,4 +591,31 @@ let pReadComponent (ctx: WitnessContext) occurrence operation = parser {
         | Result.Ok result -> preturn result
         | Result.Error reason -> fail (Message reason)
     return storageOps @ selectorOps @ codeOps @ environmentOps, TRCallable result
+}
+
+let pReadComponent (ctx: WitnessContext) occurrence operation = parser {
+    let! state = getUserState
+    let! rows = pRows occurrence operation
+    let! aggregate =
+        match operation with
+        | SemanticKind.FieldGet(aggregate, _)
+        | SemanticKind.DUEliminate(aggregate, _, _, _) -> preturn aggregate
+        | _ -> fail (Message "Callable projection requires its witnessed field or union projection.")
+    let! row =
+        match rows with
+        | [row] when row.Aggregate = aggregate &&
+                     (row.Operation = CallableAggregateOperation.Project || row.Operation = CallableAggregateOperation.Snapshot) -> preturn row
+        | _ -> fail (Message "Callable aggregate read has no unique published slot and snapshot frontier.")
+    let! raw, rawType = pRecallNode aggregate
+    let! storageOps, storage = pStorage row { SSA = raw; Type = rawType }
+    match row.Alternatives with
+    | [arm] when state.Graph.Emission.Callable.Carriers.TryFind arm.Carrier |> Option.exists (fun carrier -> carrier.Kind = CallableKind.NativeEntry) ->
+        let! carrier = pAlternative row arm
+        match FunctionPointerPatterns.closedFunctionAddress state.Graph carrier.Formation with
+        | Result.Ok(_, symbol, ty) ->
+            let! ssa = getNodeSSA occurrence
+            let! constant = pFuncConstant ssa symbol ty
+            return storageOps @ [constant], TRValue { SSA = ssa; Type = ty }
+        | Result.Error reason -> return! fail (Message reason)
+    | _ -> return! pReadOrdinaryComponent ctx occurrence row storageOps storage
 }
