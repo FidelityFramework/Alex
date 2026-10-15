@@ -154,3 +154,65 @@ let ``control flow returns an error and emits nothing for a branch that is not a
         |> List.filter (function MLIROp.SCFOp _ -> true | _ -> false)
     Assert.Empty conditionals
     Assert.Equal(None, MLIRAccumulator.recallNode choice.Id accumulator)
+
+/// Contract-value fixture: a scalar block owns a result slot independently of
+/// its last child. Source settlement alone supplies the optional width meet.
+let private sequentialResult bits admittedMeet =
+    let child = node 0 (SemanticKind.Literal(NativeLiteral.Int(4294967295L, NTUKind.NTUint(NTUWidth.Fixed 64)))) intType [] None
+    let block = node 1 (SemanticKind.Sequential [child.Id]) intType [0] None
+    let carrier site width : ScalarCarrier =
+        { Site = NodeId site; Slot = SettledSlot.Integer(width, None)
+          Range = ValueRange.Bounded(0I, 4294967295I); Representation = None
+          Declaration = None; SourceType = intType; Obligations = []
+          Participants = identities [0; 1] }
+    let carriers = [carrier 0 64; carrier 1 bits]
+    let numeric =
+        { Empty.numeric with
+            Values = carriers |> List.map (fun row -> row.Site, row) |> Map.ofList
+            Required = identities [0; 1]; ResultSites = identities [1]
+            SourceTypes = Map.ofList [child.Id, intType; block.Id, intType]
+            OccurrenceRepresentations = carriers |> List.map (fun row -> row.Site, Ok(ValueRepresentation.Scalar row.Slot)) |> Map.ofList }
+    let stated =
+        published [child; block]
+            (callableRows [0, 0; 1, 1] [] [0, [0]; 1, [0; 1]]) numeric
+    let meets =
+        if admittedMeet then
+            Map.ofList [block.Id, [{Consumer=block.Id;Operand=child.Id;From=64;To=bits;Adapt=MeetKind.Truncate}]]
+        else Map.empty
+    let graph = { stated with Codata = { stated.Codata with Meets = meets } }
+    let accumulator = MLIRAccumulator.empty ()
+    MLIRAccumulator.bindNode child.Id (Arg 0) (TInt(IntWidth 64)) accumulator
+    let scope = ref (ScopeContext.root ())
+    let visited = ref (Set.singleton child.Id)
+    let position = Zipper.create graph block.Id |> require "Missing scalar block"
+    let ctx =
+        { Coeffects = coeffects 64; Accumulator = accumulator; RootAccumulator = accumulator
+          ScopeContext = scope; RootScopeContext = scope; Graph = graph; Zipper = position
+          GlobalVisited = visited; TraversalVisited = visited }
+    visitAllNodes Alex.Witnesses.StructuralWitness.nanopass.Witness ctx block visited
+    accumulator, ScopeContext.getOps scope.Value
+
+[<Fact>]
+let ``scalar block transcribes its published final child meet`` () =
+    let accumulator, operations = sequentialResult 32 true
+    Assert.Empty accumulator.Errors
+    let expected = Alex.Traversal.Values.meetValue (NodeId 1) 0
+    Assert.Equal(Some(expected, TInt(IntWidth 32)), MLIRAccumulator.recallNode (NodeId 1) accumulator)
+    Assert.Equal<MLIROp list>([MLIROp.ArithOp(ArithOp.TruncI(expected, Arg 0, TInt(IntWidth 64), TInt(IntWidth 32)))], operations)
+
+[<Fact>]
+let ``scalar block refuses a changed width without a published meet`` () =
+    let accumulator, operations = sequentialResult 32 false
+    let reported = Assert.Single accumulator.Errors
+    Assert.Equal(Some AX4001, reported.Code)
+    Assert.Equal(Some(NodeId 1), reported.NodeId)
+    Assert.Contains("Witness result at node 1 has carrier TInt (IntWidth 64); source Numeric publication requires TInt (IntWidth 32)", reported.Message)
+    Assert.Empty operations
+    Assert.Equal(None, MLIRAccumulator.recallNode (NodeId 1) accumulator)
+
+[<Fact>]
+let ``scalar block forwards an equal width without an operation`` () =
+    let accumulator, operations = sequentialResult 64 false
+    Assert.Empty accumulator.Errors
+    Assert.Empty operations
+    Assert.Equal(Some(Arg 0, TInt(IntWidth 64)), MLIRAccumulator.recallNode (NodeId 1) accumulator)

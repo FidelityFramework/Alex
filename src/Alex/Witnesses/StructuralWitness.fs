@@ -66,9 +66,10 @@ let private witnessStructural (ctx: WitnessContext) (node: SemanticNode) : Witne
             let lastChildId = List.last childIds
             match MLIRAccumulator.recallNode lastChildId ctx.Accumulator with
             | Some (ssa, ty) ->
-                // Return the forwarded value through the common correspondence
-                // check and binding point; this witness does not mutate it.
-                { InlineOps = []; TopLevelOps = []; Result = TRValue { SSA = ssa; Type = ty } }
+                // The block and its final child have distinct published slots.
+                // Transcribe their settled meet before the common result check.
+                let operations, value, resultType = adaptOperand ctx.Coeffects ctx.Graph node.Id lastChildId ssa ty
+                { InlineOps = operations; TopLevelOps = []; Result = TRValue { SSA = value; Type = resultType } }
             | None when Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id ->
                 // A unit-typed block's last child produces no value
                 { InlineOps = []; TopLevelOps = []; Result = TRVoid }
