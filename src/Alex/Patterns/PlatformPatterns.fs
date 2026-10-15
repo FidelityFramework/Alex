@@ -31,6 +31,14 @@ let pBoundaryDeclaration : PSGParser<MLIROp list * TransferResult> =
 /// Witness exactly the imports assigned to this source scope. No call inventory,
 /// signature discovery, symbol reconciliation or declaration hoisting occurs here.
 let boundaryImportsAt (scope: NodeId) (boundary: BoundaryEmissionProjection) : Result<MLIROp list, string> =
+    let publishedDeclaration (declaration: BoundaryImport) =
+        let resourceCarrier = function BoundaryScalar.ResourceHandle _ -> true | _ -> false
+        if (declaration.Parameters |> List.exists (snd >> resourceCarrier))
+           || (declaration.Result |> Option.exists resourceCarrier) then
+            // The current source import remains the authority. Its resource
+            // signature has no portable scalar spelling or generic-call route.
+            ResourceImport declaration
+        else publishedFuncDeclIn boundary declaration
     let rec foreign ids =
         match ids with
         | [] -> Result.Ok []
@@ -40,7 +48,7 @@ let boundaryImportsAt (scope: NodeId) (boundary: BoundaryEmissionProjection) : R
             | Some declaration when declaration.Scope <> scope ->
                 Result.Error "Published import has a different source owner scope."
             | Some declaration ->
-                foreign rest |> Result.map (fun following -> publishedFuncDeclIn boundary declaration :: following)
+                foreign rest |> Result.map (fun following -> publishedDeclaration declaration :: following)
     foreign (boundary.ByScope.TryFind scope |> Option.defaultValue [])
     |> Result.map (fun declarations ->
         declarations @ (boundary.IntrinsicWriteImports.Values
@@ -60,6 +68,105 @@ let pBoundaryImports : PSGParser<MLIROp list> =
 /// SSA naming and checking physical correspondence are witness bookkeeping.
 let private pBoundaryAdapt (consumer: NodeId) (operand: NodeId) (adaptation: Meet option) (value: Val) : PSGParser<MLIROp list * Val> =
     pPublishedAdapt consumer operand adaptation value
+
+/// Read the source-owned lineage; neither a matching type nor participant
+/// membership can create a resource access. Selection semantics remain with
+/// the published account and its current conversion/cleanup proof premises.
+let internal resourceAccessAt boundary site source kind =
+    BoundaryAbi.resourceAccessAt boundary site source kind
+
+let internal pResourceAlias site sourceId (source: Val) : PSGParser<MLIROp list * TransferResult> = parser {
+    let! state = getUserState
+    let! _ =
+        match resourceAccessAt state.Graph.Emission.Boundary site sourceId BoundaryResourceAccessKind.ImmutableAlias with
+        | Ok rows -> preturn rows
+        | Result.Error reason -> fail (Message reason)
+    do! ensure
+            (source.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph site
+             && (match source.Type with TOpaqueHandle _ | TResourceOption _ -> true | _ -> false))
+            "Immutable resource alias differs from its exact source representation."
+    return [ResourceAlias(site, source)], TRValue source
+}
+
+let private pResourceCall (call: BoundaryCall) (imported: BoundaryImport) : PSGParser<MLIROp list * TransferResult> = parser {
+    let! state = getUserState
+    let boundary = state.Graph.Emission.Boundary
+    do! ensure (call.Entry.IsNone) "Resource calls require their exact direct source invocation."
+    do! ensure (call.ResultAdaptation.IsNone) "Resource conversion cannot be replaced by a numeric result adaptation."
+    let! resource =
+        match call.Resource with
+        | Some(BoundaryResourceUse.AcquireNullable acquisition) -> preturn acquisition.Declaration
+        | Some(BoundaryResourceUse.ReleaseOwned release) -> preturn release.Declaration
+        | None -> fail (Message "Resource call lacks its source conversion and cleanup account.")
+    let! declaration =
+        match boundary.ResourceDeclarations.TryFind resource with
+        | Some declaration when declaration.Identity = resource -> preturn declaration
+        | _ -> fail (Message "Resource call has no exact current resource declaration.")
+    match call.Resource with
+    | Some(BoundaryResourceUse.AcquireNullable _) ->
+        do! ensure
+                (imported.Binding = declaration.Acquisition
+                 && imported.Result = Some(BoundaryScalar.ResourceHandle(resource, true))
+                 && call.Result = imported.Result)
+                "Nullable resource acquisition differs from its declared native result."
+        let rec arguments witnessed = function
+            | [] -> preturn ([], [])
+            | (operand: BoundaryOperand) :: rest -> parser {
+                do! ensure
+                        (match operand.Abi with BoundaryScalar.Integer _ | BoundaryScalar.Boolean -> true | _ -> false)
+                        "Resource acquisition does not admit nested resource or callable native actuals."
+                let! ssa, ty = pRecallNode operand.Actual
+                let raw = { SSA = ssa; Type = ty }
+                let! operations, value =
+                    match Map.tryFind operand.Actual witnessed with
+                    | Some(adaptation, previous, value) -> parser {
+                        do! ensure (adaptation = operand.Adaptation && previous = raw)
+                                "Repeated resource actual disagrees with its source meet or witnessed value."
+                        return [], value
+                      }
+                    | None -> pBoundaryAdapt call.Site operand.Actual operand.Adaptation raw
+                do! ensure (value.Type = BoundaryAbi.scalarType operand.Abi)
+                        "Resource acquisition actual differs from its source-published native ABI."
+                let! remaining, values = arguments (Map.add operand.Actual (operand.Adaptation, raw, value) witnessed) rest
+                return operations @ remaining, value :: values
+              }
+        let! argumentOps, values = arguments Map.empty call.Arguments
+        let resultType = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph call.Site
+        do! ensure
+                (match resultType with TResourceOption _ -> true | _ -> false)
+                "Nullable resource acquisition lacks its source-settled opaque Option representation."
+        let! ssa = getNodeSSA call.Site
+        let result = { SSA = ssa; Type = resultType }
+        return argumentOps @ [ResourceCall(call.Site, values, Some result)], TRValue result
+    | Some(BoundaryResourceUse.ReleaseOwned release) ->
+        do! ensure
+                (imported.Binding = declaration.Release && imported.Result.IsNone && call.Result.IsNone)
+                "Owned resource release differs from its exact unary void declaration."
+        let! operand =
+            match call.Arguments with
+            | [operand] when operand.Abi = BoundaryScalar.ResourceHandle(resource, false) && operand.Adaptation.IsNone -> preturn operand
+            | _ -> fail (Message "Owned resource release lacks its exact nonnull actual at native ordinal zero.")
+        match boundary.Calls.TryFind release.Acquisition with
+        | Some original ->
+            do! ensure
+                    (match original.Resource with
+                     | Some(BoundaryResourceUse.AcquireNullable acquisition) ->
+                         acquisition.Declaration = resource && acquisition.Cleanup = release.Cleanup
+                     | _ -> false)
+                    "Owned resource release differs from its original acquisition and cleanup account."
+        | None -> return! fail (Message "Owned resource release has no current source-published acquisition.")
+        let! ssa, ty = pRecallNode operand.Actual
+        let expected = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual
+        do! ensure
+                (ty = expected
+                 && (match expected with
+                     | TOpaqueHandle(handleType, bits, alignment) ->
+                         handleType = declaration.HandleType && bits = declaration.PointerBits && alignment > 0
+                     | _ -> false))
+                "Owned resource release actual lacks its exact source-settled opaque handle representation."
+        return [ResourceCall(call.Site, [{ SSA = ssa; Type = ty }], None)], TRVoid
+    | None -> return! fail (Message "Resource call lacks its source conversion and cleanup account.")
+}
 
 /// The source entry refers to one admitted import and one explicit loading
 /// assumption. Its ABI is the import's; no ordinary lambda or code environment
@@ -171,6 +278,11 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
         | Some call ->
             match boundary.Imports.TryFind call.Import with
             | None -> return! fail (Message "Published boundary call names an absent import.")
+            | Some declaration when call.Resource.IsSome -> return! pResourceCall call declaration
+            | Some declaration when
+                (List.map snd declaration.Parameters @ Option.toList declaration.Result)
+                |> List.exists (function BoundaryScalar.ResourceHandle _ -> true | _ -> false) ->
+                return! fail (Message "Resource call lacks its source conversion and cleanup account.")
             | Some declaration ->
                 let rec arguments (witnessed: Map<NodeId, Meet option * Val * Val>) (operands: BoundaryOperand list) : PSGParser<MLIROp list * Val list> = parser {
                     match operands with

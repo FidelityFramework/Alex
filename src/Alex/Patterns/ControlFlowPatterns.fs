@@ -366,7 +366,7 @@ let private pBuildMultipleMatchElimination
                 let tagTy = TInt (IntWidth 8)
 
                 // Index 0 is reserved for the result SSA — tag extraction starts at index 1
-                let! tagExtractOps, tagSSA, tagExtractEnd =
+                let! tagExtractOps, tagSSA, tagExtractEnd, tagTy =
                     match scrutineeType with
                     | TIndex ->
                         let indexZeroSSA = allSSAs.[1]
@@ -374,7 +374,7 @@ let private pBuildMultipleMatchElimination
                         let memrefI8Ty = TMemRef (TInt (IntWidth 8))
                         let indexZeroOp = MLIROp.ArithOp (ArithOp.ConstI (indexZeroSSA, 0L, TIndex))
                         let loadOp = MLIROp.MemRefOp (MemRefOp.Load (tagSSA, scrutineeSSA, [indexZeroSSA], tagTy, memrefI8Ty))
-                        preturn ([indexZeroOp; loadOp], tagSSA, 3)
+                        preturn ([indexZeroOp; loadOp], tagSSA, 3, tagTy)
                     // memref.reinterpret_cast keeps the element type of its source, so the
                     // carrier read here is a byte buffer. Any other carrier is an error below.
                     | TMemRef (TInt (IntWidth 8)) | TMemRefStatic (_, TInt (IntWidth 8)) ->
@@ -385,7 +385,16 @@ let private pBuildMultipleMatchElimination
                         let castOp = MLIROp.MemRefOp (MemRefOp.ReinterpretCast (castSSA, scrutineeSSA, 0, 1, scrutineeType, memrefI8Ty))
                         let zeroOp = MLIROp.ArithOp (ArithOp.ConstI (zeroSSA, 0L, TIndex))
                         let loadOp = MLIROp.MemRefOp (MemRefOp.Load (tagSSA, castSSA, [zeroSSA], tagTy, memrefI8Ty))
-                        preturn ([castOp; zeroOp; loadOp], tagSSA, 4)
+                        preturn ([castOp; zeroOp; loadOp], tagSSA, 4, tagTy)
+                    | TResourceOption _ -> parser {
+                        do! ensure (allSSAs.Length >= 4) "Resource match lacks its source-assigned discriminant SSA."
+                        let! operations, result =
+                            Alex.Patterns.MemoryPatterns.pResourceOptionReadAt
+                                nodeId scrutineeNodeId { SSA = scrutineeSSA; Type = scrutineeType } None allSSAs.[3]
+                        match result with
+                        | TRValue tag -> return operations, tag.SSA, 4, tag.Type
+                        | _ -> return! fail (Message "Resource match did not witness its exact published discriminant.")
+                      }
                     | other ->
                         fail (Message $"PSG settlement (Layouts) did not settle a byte-addressable union carrier for the scrutinee (node {NodeId.value scrutineeNodeId}) of the match at node {NodeId.value nodeId}: got {other}")
 
@@ -506,6 +515,15 @@ let pBuildMatchElimination
         match arms with
         | [] -> return! fail (Message "CaseElimination requires a selected body")
         | [(operations, bodyId, _)] ->
+            let! state = getUserState
+            let! selectionOps =
+                match scrutineeType with
+                | TResourceOption _ ->
+                    match BoundaryAbi.resourceAccessAt state.Graph.Emission.Boundary nodeId scrutineeNodeId BoundaryResourceAccessKind.OptionTag with
+                    | Ok _ -> preturn [ResourceOptionTag(nodeId, { SSA = scrutineeSSA; Type = scrutineeType }, None)]
+                    | Result.Error reason -> fail (Message reason)
+                | _ -> preturn []
+            let operations = selectionOps @ operations
             match result with
             | None -> return operations, TRVoid
             | Some (_, expectedType) ->

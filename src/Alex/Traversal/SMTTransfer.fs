@@ -85,8 +85,78 @@ let private scope (ob: ObligationInfo) : MLIROp list =
         statements.Add(smt (SMTAnd(conjunction, clauses)))
         anchor conjunction (List.ofSeq statements)
 
+    // A finite postorder fold formats the canonical logical expression. It
+    // never traverses the program graph or re-enters an elaboration pass.
+    let resource (projection: Result<ResourceProof.Projection, string>) =
+        let projection = projection |> Result.defaultWith (fun reason -> invalidArg "ob" (sprintf "Obligation '%s': %s" ob.Id reason))
+        let sort = function ResourceProof.Sort.Boolean -> SMTBool | ResourceProof.Sort.Integer -> SMTInt
+        let variables = projection.Declarations |> List.map (fun (name, ty) -> name, (v (), sort ty)) |> Map.ofList
+        let declarations = variables |> Map.toList |> List.map (fun (name, (value, ty)) -> smt (SMTDeclareFun(value, name, ty)))
+        let children = function
+            | ResourceProof.Expr.Boolean _ | ResourceProof.Expr.Integer _ | ResourceProof.Expr.Variable _ -> []
+            | ResourceProof.Expr.Not value -> [value]
+            | ResourceProof.Expr.And values | ResourceProof.Expr.Or values | ResourceProof.Expr.Add values -> values
+            | ResourceProof.Expr.Implies(left, right) | ResourceProof.Expr.Equal(left, right)
+            | ResourceProof.Expr.LessThan(left, right) | ResourceProof.Expr.LessOrEqual(left, right)
+            | ResourceProof.Expr.Multiply(left, right) | ResourceProof.Expr.Modulo(left, right) -> [left; right]
+            | ResourceProof.Expr.IfThenElse(condition, left, right) -> [condition; left; right]
+        let ordered =
+            [projection.Premises, false; projection.Conclusion, false]
+            |> List.unfold (function
+                | [] -> None
+                | (expression, true) :: rest -> Some(Some expression, rest)
+                | (expression, false) :: rest ->
+                    Some(None, (children expression |> List.map (fun child -> child, false)) @ ((expression, true) :: rest)))
+            |> List.choose id
+        let values, bodies =
+            ordered
+            |> List.fold (fun (values, bodies) expression ->
+                if Map.containsKey expression values then values, bodies
+                else
+                    let child expression = Map.find expression values
+                    let output = v ()
+                    let boolean value =
+                        let zero, equal = v (), if value then output else v ()
+                        [smt (SMTBigIntConstant(zero, 0I)); smt (SMTEq(equal, zero, zero, SMTInt))]
+                        @ (if value then [] else [smt (SMTNot(output, equal))])
+                    let inferred expression =
+                        ResourceProof.sortOf projection.Declarations expression
+                        |> Result.map sort
+                        |> Result.defaultWith (fun reason -> invalidArg "ob" reason)
+                    let value, body =
+                        match expression with
+                        | ResourceProof.Expr.Variable name -> fst variables[name], []
+                        | ResourceProof.Expr.Integer value -> output, [smt (SMTBigIntConstant(output, value))]
+                        | ResourceProof.Expr.Boolean value -> output, boolean value
+                        | ResourceProof.Expr.Not value -> output, [smt (SMTNot(output, child value))]
+                        | ResourceProof.Expr.And [] -> output, boolean true
+                        | ResourceProof.Expr.Or [] -> output, boolean false
+                        | ResourceProof.Expr.And [value] | ResourceProof.Expr.Or [value] -> child value, []
+                        | ResourceProof.Expr.And operands -> output, [smt (SMTAnd(output, List.map child operands))]
+                        | ResourceProof.Expr.Or operands -> output, [smt (SMTOr(output, List.map child operands))]
+                        | ResourceProof.Expr.Implies(left, right) ->
+                            let negated = v ()
+                            output, [smt (SMTNot(negated, child left)); smt (SMTOr(output, [negated; child right]))]
+                        | ResourceProof.Expr.Equal(left, right) -> output, [smt (SMTEq(output, child left, child right, inferred left))]
+                        | ResourceProof.Expr.LessThan(left, right) -> output, [smt (SMTIntCmp(output, SmtLt, child left, child right))]
+                        | ResourceProof.Expr.LessOrEqual(left, right) -> output, [smt (SMTIntCmp(output, SmtLe, child left, child right))]
+                        | ResourceProof.Expr.Multiply(left, right) -> output, [smt (SMTIntMul(output, child left, child right))]
+                        | ResourceProof.Expr.Modulo(left, right) -> output, [smt (SMTIntMod(output, child left, child right))]
+                        | ResourceProof.Expr.Add [] -> output, [smt (SMTBigIntConstant(output, 0I))]
+                        | ResourceProof.Expr.Add (first :: remaining) ->
+                            remaining |> List.fold (fun (left, body) right ->
+                                let sum = v ()
+                                sum, body @ [smt (SMTIntAdd(sum, left, child right))]) (child first, [])
+                        | ResourceProof.Expr.IfThenElse(condition, left, right) ->
+                            output, [smt (SMTIte(output, child condition, child left, child right, inferred expression))]
+                    Map.add expression value values, body :: bodies) (Map.empty, [])
+        anchor values[projection.Conclusion]
+            (declarations @ (bodies |> List.rev |> List.concat) @ [smt (SMTAssert values[projection.Premises])])
+
     let ops =
         match ob.Body with
+        | ObligationBody.ResourceConversion model -> ResourceProof.ofConversion model |> resource
+        | ObligationBody.ResourceCleanup model -> ResourceProof.ofCleanup model |> resource
         | ObligationBody.ForeignResultCoverage model ->
             let projection =
                 ForeignResultCoverage.ofModel model

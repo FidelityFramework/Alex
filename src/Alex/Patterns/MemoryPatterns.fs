@@ -40,6 +40,55 @@ let pExtractField (ssas: SSA list) (structSSA: SSA) (fieldIndex: int) (structTy:
 // DU PATTERNS
 // ═══════════════════════════════════════════════════════════
 
+/// Read an opaque resource Option through its exact source access account.
+/// The carrier and discriminant stay target independent; no spatial view is formed.
+let internal pResourceOptionReadAt site sourceId (source: Val) (caseIndex: int option) (resultSSA: SSA) : PSGParser<MLIROp list * TransferResult> = parser {
+    let! state = getUserState
+    let boundary = state.Graph.Emission.Boundary
+    let kind = if caseIndex.IsSome then BoundaryResourceAccessKind.OptionPayload else BoundaryResourceAccessKind.OptionTag
+    let! access, declaration =
+        match BoundaryAbi.resourceAccessAt boundary site sourceId kind with
+        | Ok rows -> preturn rows
+        | Result.Error reason -> fail (Message reason)
+    let! acquisition =
+        match boundary.Calls[access.Acquisition].Resource with
+        | Some(BoundaryResourceUse.AcquireNullable acquisition) -> preturn acquisition
+        | _ -> fail (Message "Resource Option read lacks its original nullable conversion.")
+    do! ensure
+            (source.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph sourceId
+             && (match source.Type with TResourceOption _ -> true | _ -> false))
+            "Resource Option read differs from its source-settled subject representation."
+    let! resultType =
+        match caseIndex with
+        | None ->
+            match SettledScalar.tryType acquisition.Tag with
+            | Some(TInt _ as ty) -> preturn ty
+            | _ -> fail (Message "Resource Option tag lacks its source-published integer discriminant carrier.")
+        | Some selected -> parser {
+            do! ensure (selected = acquisition.SomeCase && not access.Selection.IsEmpty)
+                    "Resource payload read lacks its exact source-selected nonnull alternative."
+            let ty = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph site
+            do! ensure
+                    (match ty with
+                     | TOpaqueHandle(handleType, bits, alignment) ->
+                         handleType = declaration.HandleType && bits = declaration.PointerBits && alignment > 0
+                     | _ -> false)
+                    "Resource payload read lacks its source-settled opaque handle representation."
+            return ty
+          }
+    let result = { SSA = resultSSA; Type = resultType }
+    let operation =
+        match caseIndex with
+        | None -> ResourceOptionTag(site, source, Some result)
+        | Some _ -> ResourceOptionPayload(site, source, result)
+    return [operation], TRValue result
+}
+
+let internal pResourceOptionRead site sourceId source caseIndex : PSGParser<MLIROp list * TransferResult> = parser {
+    let! resultSSA = getNodeSSA site
+    return! pResourceOptionReadAt site sourceId source caseIndex resultSSA
+}
+
 /// Extract DU tag (handles both inline and pointer-based DUs)
 /// Pointer-based: Load tag byte from offset 0
 /// Inline: ExtractValue at index 0

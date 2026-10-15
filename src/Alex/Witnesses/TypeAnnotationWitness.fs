@@ -18,6 +18,7 @@ open Alex.XParsec.PSGCombinators
 open Alex.Patterns.CallablePatterns
 open Alex.Patterns.SequencePatterns
 open Alex.Patterns.LazyPatterns
+open XParsec.Combinators
 
 // ═══════════════════════════════════════════════════════════
 // WITNESS IMPLEMENTATION (XParsec patterns only)
@@ -28,6 +29,17 @@ open Alex.Patterns.LazyPatterns
 let private witnessTypeAnnotation (ctx: WitnessContext) (node: SemanticNode) : WitnessOutput =
     // Use XParsec pattern to extract wrapped node ID
     match tryMatch pTypeAnnotation ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+    | Some ((wrappedId, _), _) when
+        ctx.Graph.Emission.Boundary.ResourceAccesses.ContainsKey node.Id
+        || Alex.CodeGeneration.TypeMapping.isResourceOccurrence ctx.Graph node.Id ->
+        let pattern = parser {
+            let! ssa, ty = pRecallNode wrappedId
+            return! Alex.Patterns.PlatformPatterns.pResourceAlias node.Id wrappedId { SSA = ssa; Type = ty }
+        }
+        match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+        | Result.Error reason ->
+            WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "TypeAnnotation") (Some "resource alias") reason
     | Some ((wrappedId, _), _) when isLazyValue ctx node ->
         match tryMatchWithDiagnostics (pLazyForward ctx wrappedId) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
         | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }

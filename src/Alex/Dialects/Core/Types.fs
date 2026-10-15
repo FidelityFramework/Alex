@@ -50,6 +50,12 @@ type MLIRType =
     | TStruct of (string * MLIRType) list * StructBytes option   // Named struct type (record fields) and, on a core, its settled bytes
     | TSeqClock                             // CIRCT !seq.clock type (clock signal for registers)
     | TTag of int                           // DU tag discriminant (case count). Platform elision decides concrete width.
+    /// An exact source-settled opaque resource value. This grants neither
+    /// numeric/address operations nor spatial access and has no portable spelling.
+    | TOpaqueHandle of handleType: Fidelity.PSG.TypeIdentity * bits: int * alignment: int
+    /// Preserve the original settled resource-bearing union verbatim. Only the
+    /// selected backend realizes its data; Alex owns no second layout.
+    | TResourceOption of representation: Fidelity.PSG.ValueRepresentation
 
 /// Shared physical vocabulary for a scalar slot already settled in the PSG.
 /// Absence means this vocabulary has no admitted form; it supplies no default.
@@ -64,6 +70,8 @@ module SettledScalar =
         | Fidelity.PSG.SettledSlot.Real 64 -> Some(TFloat F64)
         | Fidelity.PSG.SettledSlot.Pointer 1 -> Some TIndex
         | Fidelity.PSG.SettledSlot.Unit -> integer 32
+        | Fidelity.PSG.SettledSlot.CHandle(handleType, bits, alignment) when bits > 0 && alignment > 0 ->
+            Some(TOpaqueHandle(handleType, bits, alignment))
         | _ -> None
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -118,6 +126,7 @@ let rec mlirTypeSizeWith (pointer: Result<int, string>) (ty: MLIRType) : int =
     | TInt (IntWidth 0) -> failwith "mlirTypeSize: an integer whose width the node's range was to give reached a size read unnarrowed"
     | TInt w -> intWidthBytes w
     | TFloat F32 -> 4 | TFloat F64 -> 8
+    | TOpaqueHandle _ | TResourceOption _ -> failwith "mlirTypeSize: an opaque resource cannot acquire generic spatial storage authority"
     | TFunc _ -> failwith "mlirTypeSize: a function code SSA has no admitted data-storage layout; settle callable storage before sizing it"
     | TMemRef _ | TMemRefStatic _ | TMemRefScalar _ -> 5 * pointerBytes ()
     | TVector (count, _) ->
@@ -367,6 +376,14 @@ type ModuleText =
 /// Top-level portable operation. Target dialects belong to backend realization.
 /// Single-phase execution with nested accumulators - no scope markers needed
 type MLIROp =
+    /// Resource operations preserve the original source incidence. Their opaque
+    /// values have no portable stock spelling; only a selected backend with the
+    /// current conversion and cleanup accounts may realize them.
+    | ResourceImport of declaration: Fidelity.PSG.BoundaryImport
+    | ResourceCall of site: Fidelity.PSG.NodeId * arguments: Val list * result: Val option
+    | ResourceOptionTag of site: Fidelity.PSG.NodeId * source: Val * result: Val option
+    | ResourceOptionPayload of site: Fidelity.PSG.NodeId * source: Val * result: Val
+    | ResourceAlias of site: Fidelity.PSG.NodeId * source: Val
     /// Published MMIO intent retains its exact source account; target expansion
     /// and any temporary values belong to the selected backend.
     | MmioLoad of site: Fidelity.PSG.NodeId * result: SSA * address: SSA * bits: int
@@ -484,15 +501,37 @@ and SMTOp =
     | SMTAnd of SSA * SSA list                      // result, operands (variadic)
     | SMTOr of SSA * SSA list                       // result, operands (variadic)
     | SMTNot of SSA * SSA                           // result, operand
+    | SMTIte of SSA * SSA * SSA * SSA * SMTType     // result, condition, then, else, result type
     | SMTAssert of SSA                              // assert a !smt.bool value
     | SMTCheck                                      // smt.check sat {} unknown {} unsat {}
 
 module BoundaryAbi =
+    /// Read existing published lineage without classifying branch semantics or
+    /// granting proof authority. Both the witness and target use these same rows.
+    let resourceAccessAt (boundary: Fidelity.PSG.BoundaryEmissionProjection) site source kind =
+        match boundary.ResourceAccesses.TryFind site with
+        | Some access when access.Site = site && access.Source = source && access.Kind = kind ->
+            match boundary.Calls.TryFind access.Acquisition with
+            | Some acquisition ->
+                match acquisition.Resource with
+                | Some(Fidelity.PSG.BoundaryResourceUse.AcquireNullable resource) when
+                    acquisition.Site = access.Acquisition
+                    && resource.Declaration = access.Declaration
+                    && resource.Cleanup = access.Cleanup ->
+                    match boundary.ResourceDeclarations.TryFind access.Declaration with
+                    | Some declaration when declaration.Identity = access.Declaration -> Ok(access, declaration)
+                    | _ -> Error "Resource access has no exact current resource declaration."
+                | _ -> Error "Resource access differs from its original acquisition and cleanup account."
+            | None -> Error "Resource access has no current source-published acquisition."
+        | _ -> Error "Resource access lacks its exact source-published site, subject and operation account."
+
     /// Signless MLIR types spell physical carriers; they do not replace source ABI facts.
     let scalarType = function
         | Fidelity.PSG.BoundaryScalar.Integer(bits, _) -> TInt(IntWidth bits)
         | Fidelity.PSG.BoundaryScalar.Boolean -> TInt(IntWidth 1)
         | Fidelity.PSG.BoundaryScalar.Entry _ -> invalidArg "scalar" "An entry carrier requires its source-published receiving signature."
+        | Fidelity.PSG.BoundaryScalar.ResourceHandle _ ->
+            invalidArg "scalar" "A resource carrier requires its exact direct-call conversion and cleanup accounts."
 
     let signatureType (signature: Fidelity.PSG.NativeEntrySignature) =
         if signature.CallingConvention <> "CDecl" then

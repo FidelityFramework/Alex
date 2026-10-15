@@ -124,6 +124,22 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
             | Some account when account.IsProgramSlotIntent && not account.HasProgramSlotAuthority ->
                 WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "VarRef") (Some "program storage")
                     $"PSG settlement (BindingUses) did not admit physical program slot authority for binding {NodeId.value bindingId} read by VarRef '{name}' at node {NodeId.value node.Id}."
+            | Some account when
+                ctx.Graph.Emission.Boundary.ResourceAccesses.ContainsKey node.Id
+                || Alex.CodeGeneration.TypeMapping.isResourceOccurrence ctx.Graph node.Id ->
+                if account.IsProgramSlotIntent
+                   || (account.Class <> SourceBindingClass.ImmutableValue && account.Class <> SourceBindingClass.Formal) then
+                    WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "VarRef") (Some "resource alias")
+                        "Resource alias requires its exact immutable local source binding."
+                else
+                    let pattern = parser {
+                        let! ssa, ty = pRecallNode bindingId
+                        return! Alex.Patterns.PlatformPatterns.pResourceAlias node.Id bindingId { SSA = ssa; Type = ty }
+                    }
+                    match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                    | Result.Error reason ->
+                        WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "VarRef") (Some "resource alias") reason
             | Some account when isLazyValue ctx node ->
                 match account.Class with
                 | SourceBindingClass.MutableCell ->

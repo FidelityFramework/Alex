@@ -46,6 +46,20 @@ let private witnessBinding (ctx: WitnessContext) (node: SemanticNode) : WitnessO
                 // Only immutable Lambda bindings forward the function value directly.
                 // A mutable binding stores that value in the ordinary mutable cell.
                 match Revision.tryNode valueId ctx.Graph with
+                | _ when ctx.Graph.Emission.Boundary.ResourceAccesses.ContainsKey node.Id
+                         || Alex.CodeGeneration.TypeMapping.isResourceOccurrence ctx.Graph node.Id ->
+                    if isMut || ModuleValues.isSlotBinding ctx.Coeffects.TargetPlatform ctx.Graph node then
+                        WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Binding") (Some "resource alias")
+                            "Resource alias requires its exact immutable local binding."
+                    else
+                        let pattern = parser {
+                            let! ssa, ty = pRecallNode valueId
+                            return! Alex.Patterns.PlatformPatterns.pResourceAlias node.Id valueId { SSA = ssa; Type = ty }
+                        }
+                        match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error reason ->
+                            WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Binding") (Some "resource alias") reason
                 | _ when isLazyValue ctx node ->
                     if isMut then
                         WitnessOutput.error $"Lazy binding '{name}' requires an admitted pair storage contract."

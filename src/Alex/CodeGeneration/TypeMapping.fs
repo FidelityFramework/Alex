@@ -21,6 +21,17 @@ let scalarCarrierAt (graph: Revision) (nodeId: NodeId) : ScalarCarrier option =
 
 let settledScalarType (slot: SettledSlot) : MLIRType option = SettledScalar.tryType slot
 
+let isResourceRepresentation = function
+    | ValueRepresentation.Scalar(SettledSlot.CHandle _) -> true
+    | ValueRepresentation.Union(cases, _) ->
+        cases |> List.exists (fun (_, payloads) ->
+            payloads |> List.exists (function ValueRepresentation.Scalar(SettledSlot.CHandle _) -> true | _ -> false))
+    | _ -> false
+
+let isResourceOccurrence (graph: Revision) nodeId =
+    graph.Emission.Numeric.OccurrenceRepresentations.TryFind nodeId
+    |> Option.exists (function Ok representation -> isResourceRepresentation representation | Error _ -> false)
+
 let scalarCarrierType (carrier: ScalarCarrier) : MLIRType =
     settledScalarType carrier.Slot
     |> Option.defaultWith (fun () -> failwithf "TypeMapping: source carrier at node %d has no admitted scalar physical form: %A" (NodeId.value carrier.Site) carrier.Slot)
@@ -35,6 +46,17 @@ let rec representationType = function
         let bytes = placement |> Option.map (fun (offsets, size, alignment) -> { Offsets = offsets; Size = size; Align = alignment })
         TStruct(fields |> List.map (fun (name, form) -> name, representationType form), bytes)
     | ValueRepresentation.CallableComponent(_, data) -> representationType data
+    | ValueRepresentation.Union(cases, Some(_, bytes, alignment)) as representation when
+        cases.Length = 2 && bytes > 0 && alignment > 0
+        && (cases |> List.filter (snd >> List.isEmpty) |> List.length) = 1
+        && (cases |> List.filter (function
+            | _, [ValueRepresentation.Scalar(SettledSlot.CHandle(_, bits, handleAlignment))] -> bits > 0 && handleAlignment > 0
+            | _ -> false) |> List.length) = 1 ->
+        TResourceOption representation
+    | ValueRepresentation.Union(cases, _) when
+        cases |> List.exists (fun (_, payloads) ->
+            payloads |> List.exists (function ValueRepresentation.Scalar(SettledSlot.CHandle _) -> true | _ -> false)) ->
+        failwith "TypeMapping: resource option requires its complete source-settled case and byte placement"
     | ValueRepresentation.Union(_, Some(_, bytes, alignment)) when bytes >= 0 && alignment > 0 ->
         TMemRefStatic(bytes, TInt(IntWidth 8))
     | ValueRepresentation.Union _ -> failwith "TypeMapping: source union has no complete physical data placement"

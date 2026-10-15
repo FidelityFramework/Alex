@@ -910,7 +910,7 @@ let private nativeUnitBlock (mode: string) =
         }
 
     let registrationCall: BoundaryCall =
-        { Site=NodeId 911; Import=invocation.Import; Callee=NodeId 912; Entry=None
+        { Site=NodeId 911; Import=invocation.Import; Callee=NodeId 912; Entry=None; Resource=None
           Arguments=[{Actual=(if mode="zero-exit-operand" then NodeId 999 else entry.Formation)
                       Formal=invocation.Formal; Abi=BoundaryScalar.Entry invocation.Identity; Adaptation=None}]
           ErasedUnitArguments=[]; Result=Some(BoundaryScalar.Integer(32,true)); ResultAdaptation=None

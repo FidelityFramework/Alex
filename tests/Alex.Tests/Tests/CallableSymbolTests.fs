@@ -338,6 +338,7 @@ let private importedFixture () =
         {
             Site = NodeId 34
             Import = declaration.Identity
+            Resource = None
             Callee = NodeId 33
             Entry = Some entry.Formation
             Arguments = []
@@ -985,3 +986,76 @@ let ``imported invocation refuses its missing source account or wrong physical o
     with
     | Result.Error actual -> Assert.Equal(reason, actual)
     | Result.Ok actual -> failwithf "Changed imported invocation was witnessed: %A" actual
+
+/// Component representation controls only. Actual source resource declaration,
+/// conversion and cleanup admission are separate published-graph gates.
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``opaque resource Option retains its exact source case order and placement`` reversed =
+    let handle = ValueRepresentation.Scalar(SettledSlot.CHandle(unitType, 64, 4))
+    let cases = ["absent", []; "present", [handle]]
+    let representation = ValueRepresentation.Union((if reversed then List.rev cases else cases), Some(4, 12, 4))
+    let actual = Alex.CodeGeneration.TypeMapping.representationType representation
+    Assert.Equal(TResourceOption representation, actual)
+    Assert.Equal(Some(TOpaqueHandle(unitType, 64, 4)), SettledScalar.tryType (SettledSlot.CHandle(unitType, 64, 4)))
+    Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [ResourceAlias(NodeId 1, {SSA=Arg 0;Type=actual})])
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``resource ABI cannot become a generic imported or callable scalar`` nullable =
+    let error = Assert.Throws<System.ArgumentException>(fun () ->
+        BoundaryAbi.scalarType (BoundaryScalar.ResourceHandle(NodeId 1, nullable)) |> ignore)
+    Assert.Contains("requires its exact direct-call conversion and cleanup accounts", error.Message)
+
+/// This deliberately incomplete component fixture has no resource declaration
+/// or proof bodies either: the asserted gate is the missing per-call account,
+/// not a claim that the whole revision would otherwise be admitted.
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``resource boundary refuses a missing per-call conversion and cleanup account`` nullable =
+    let graph = importedFixture ()
+    let boundary = graph.Emission.Boundary
+    let call = boundary.Calls[NodeId 34]
+    let imported = boundary.Imports[call.Import]
+    let scalar = BoundaryScalar.ResourceHandle(NodeId 70, nullable)
+    let imported =
+        if nullable then {imported with Result=Some scalar}
+        else {imported with Parameters=[NodeId 71,scalar];Result=None}
+    let graph =
+        { graph with
+            Emission =
+                { graph.Emission with
+                    Boundary =
+                        { boundary with
+                            Imports = boundary.Imports.Add(imported.Identity, imported)
+                            Calls = boundary.Calls.Add(call.Site, {call with Entry=None;Resource=None}) } } }
+    let accumulator = MLIRAccumulator.empty ()
+    let ctx = context graph call.Site accumulator
+    match Alex.XParsec.PSGCombinators.tryMatchWithDiagnostics
+            Alex.Patterns.PlatformPatterns.pBoundaryCall graph graph.Nodes[call.Site]
+            ctx.Zipper ctx.Coeffects accumulator with
+    | Result.Error reason -> Assert.Equal("Resource call lacks its source conversion and cleanup account.", reason)
+    | Result.Ok _ -> failwith "Resource boundary emitted without a per-call conversion/cleanup account."
+    Assert.Null(MLIRAccumulator.recallNode call.Site accumulator)
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``opaque resource carriers do not acquire generic spatial storage authority`` option =
+    let handle = ValueRepresentation.Scalar(SettledSlot.CHandle(unitType, 64, 8))
+    let carrier = if option then TResourceOption(ValueRepresentation.Union(["absent", []; "present", [handle]], Some(8,16,8))) else TOpaqueHandle(unitType,64,8)
+    let error = Assert.Throws<System.Exception>(fun () -> mlirTypeSizeWith (Ok 64) carrier |> ignore)
+    Assert.Contains("opaque resource cannot acquire generic spatial storage authority", error.Message)
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``resource Option refuses missing placement or an extra opaque alternative`` extra =
+    let handle = ValueRepresentation.Scalar(SettledSlot.CHandle(unitType, 64, 8))
+    let cases = ["absent", []; "present", [handle]] @ (if extra then ["other", [handle]] else [])
+    let representation = ValueRepresentation.Union(cases, if extra then Some(8,16,8) else None)
+    let error = Assert.Throws<System.Exception>(fun () -> Alex.CodeGeneration.TypeMapping.representationType representation |> ignore)
+    Assert.Contains("requires its complete source-settled case and byte placement", error.Message)

@@ -47,7 +47,12 @@ let private witnessDUCore (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
     | Some ((duValueId, _duType), _) ->
         match MLIRAccumulator.recallNode duValueId ctx.Accumulator with
         | Some (duSSA, duType) ->
-            match tryMatchWithDiagnostics (pBuildDUGetTag node.Id duSSA duType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+            let pattern =
+                match duType with
+                | TResourceOption _ ->
+                    Alex.Patterns.MemoryPatterns.pResourceOptionRead node.Id duValueId { SSA = duSSA; Type = duType } None
+                | _ -> pBuildDUGetTag node.Id duSSA duType
+            match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
             | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
             | Result.Error diagnostic -> WitnessOutput.error $"DUGetTag: {diagnostic}"
         | None -> WitnessOutput.error "DUGetTag: DU value not available"
@@ -66,7 +71,12 @@ let private witnessDUCore (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
         | Some (duSSA, duType) ->
             let unionIdentity = sourceTypeAt ctx.Graph duValueId
             let payloadType = mapTypeAt node.Id ctx
-            match tryMatchWithDiagnostics (pBuildDUEliminate node.Id duSSA duType unionIdentity payloadType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+            let pattern =
+                match duType with
+                | TResourceOption _ ->
+                    Alex.Patterns.MemoryPatterns.pResourceOptionRead node.Id duValueId { SSA = duSSA; Type = duType } (Some caseIndex)
+                | _ -> pBuildDUEliminate node.Id duSSA duType unionIdentity payloadType
+            match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
             | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
             | Result.Error diagnostic ->
                 WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "DU") (Some "DUEliminate")

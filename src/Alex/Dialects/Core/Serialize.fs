@@ -63,6 +63,8 @@ let floatWidthToString (width: FloatWidth) : string =
 /// Convert MLIRType to MLIR text format string
 let rec typeToString (pointer: Result<int, string>) (ty: MLIRType) : string =
     match ty with
+    | TOpaqueHandle _ | TResourceOption _ ->
+        raise (TargetRealizationRequired "Opaque resource carriers require the selected backend and their exact source accounts.")
     | TInt width -> intWidthToString width
     | TFloat width -> floatWidthToString width
     | TFunc (paramTypes, resultTypes) ->
@@ -373,6 +375,9 @@ let smtOpToString (pointer: Result<int, string>) (inner: MLIROp -> string) (op: 
         sprintf "%s = smt.or %s" (ssaToString result) (operands |> List.map ssaToString |> String.concat ", ")
     | SMTNot (result, operand) ->
         sprintf "%s = smt.not %s" (ssaToString result) (ssaToString operand)
+    | SMTIte (result, condition, thenValue, elseValue, ty) ->
+        sprintf "%s = smt.ite %s, %s, %s : %s" (ssaToString result) (ssaToString condition)
+            (ssaToString thenValue) (ssaToString elseValue) (smtTypeToString ty)
     | SMTAssert operand ->
         sprintf "smt.assert %s" (ssaToString operand)
     | SMTCheck ->
@@ -760,6 +765,9 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
         let (Fidelity.PSG.NodeId sourceId) = site
         sprintf "module @%s attributes {clef.spatial_source = \"%d\", clef.spatial_kind = \"%s\"} {}"
             (symbolName name) sourceId kind
+    | MLIROp.ResourceImport _ | MLIROp.ResourceCall _
+    | MLIROp.ResourceOptionTag _ | MLIROp.ResourceOptionPayload _ | MLIROp.ResourceAlias _ ->
+        raise (TargetRealizationRequired "Resource operations require the selected backend and their exact source accounts.")
     | MLIROp.RawMLIR text -> portableText text
     | _ ->
         // Block and Region have no text form here: reaching one is a stop, never a comment.
