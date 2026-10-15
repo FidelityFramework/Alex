@@ -8,6 +8,8 @@
              library the contract references, and, for the tests, Alex itself.
     ALEX003  A source of the library rewrites emitted MLIR, starts a process, or loads a
              plugin. The tests start the MLIR verifier and are exempt from the process rule.
+    ALEX004  A library emission spells an LLVM dialect type or operation. Target
+             realization belongs to the selected backend, never the middle end.
   -->
   <UsingTask TaskName="ValidateAlexBoundary"
              TaskFactory="RoslynCodeTaskFactory"
@@ -26,6 +28,7 @@
       <Code Type="Method" Language="cs"><![CDATA[
       public override bool Execute() {
         var compilerService = new Regex(@"\bClef\s*\.\s*Compiler\b|\bFSharp\s*\.\s*Compiler\b");
+        var targetEmission = new Regex(@"(?:->\s*|sprintf\s*|RawMLIR\s*\(?\s*)""[^""]*(?:!llvm[.<]|\bllvm\.[A-Za-z_])");
         var rewriteMarkers = new[] {
           "MLIRNanopass", "declarationCollectionPass", "relocateDefinition",
           "--load-pass-plugin", "--load-dialect-plugin", "--load-plugin",
@@ -38,6 +41,9 @@
           var lines = File.ReadAllLines(path);
           for (var index = 0; index < lines.Length; index++) {
             var line = lines[index];
+            if (Scope == "library" && !line.TrimStart().StartsWith("//", StringComparison.Ordinal) && targetEmission.IsMatch(line))
+              Log.LogError(null, "ALEX004", null, path, index + 1, 0, 0, 0,
+                "LLVM dialect emission belongs to backend realization, never Alex portable output.");
             if (compilerService.IsMatch(line))
               Log.LogError(null, "ALEX001", null, path, index + 1, 0, 0, 0,
                 "Alex reads a published PSG revision only. This line names the compiler service.");

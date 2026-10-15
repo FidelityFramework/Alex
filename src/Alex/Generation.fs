@@ -46,8 +46,9 @@ type Witnessed = {
     Scope: SemanticScope
     Operations: MLIROp list
     Definitions: EmittedDefinition list
-    /// The portable serialization of exactly `Operations`.
-    Text: string
+    /// Portable text, or an explicit requirement for the selected backend to
+    /// realize the preserved structured operations before producing text.
+    Text: ModuleText
     /// `None` where the target expects an unnamed module.
     ModuleName: string option
     PointerBits: Result<int, string>
@@ -69,10 +70,8 @@ type Refusal = {
 }
 
 /// The portable text of a module of operations.
-let serialize (pointerBits: Result<int, string>) (moduleName: string option) (operations: MLIROp list) : string =
-    match moduleName with
-    | None -> sprintf "module {\n%s\n}" (opsToString pointerBits operations "  ")
-    | Some name -> moduleToString pointerBits name operations
+let serialize (pointerBits: Result<int, string>) (moduleName: string option) (operations: MLIROp list) : ModuleText =
+    moduleText pointerBits moduleName operations
 
 let private witnessWith
     (transfer: Revision -> NodeId -> TransferCoeffects -> Result<MLIROp list * SemanticScope * EmittedDefinition list * 'state, TransferRefusal>)

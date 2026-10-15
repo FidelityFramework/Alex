@@ -140,6 +140,7 @@ let private closedReceivingFixture () =
     let scalar = BoundaryScalar.Integer(64, true)
     let invocation : BoundaryCallbackInvocation =
         { Identity = NodeId 40; Import = NodeId 41; Parameter = 0; Formal = NodeId 42; Scope = NodeId 43
+          Extent = BoundaryCallbackExtent.DuringCall
           Signature = {Parameters = [scalar]; Result = Some scalar; CallingConvention = "CDecl"}
           Contract = {Binding = "Foreign.call"; Parameter = 0
                       Signature = {Parameters = [|{Name = "value"; Type = BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Signed,64); PassBy = BAREWire.Descriptors.PassBy.Value}|]
@@ -151,6 +152,7 @@ let private closedReceivingFixture () =
           Formals = [NodeId 0]; Body = NodeId 1
           Lifetime = {Module = NodeId 7; Binding = fn.Binding; Implementation = fn.Lambda}
           Invocation = invocation.Identity; ParameterAdaptations = [None]; ResultAdaptation = None
+          Registrations = Map.empty
           Transport = Set.ofList [fn.Call; fn.Reference]; Participants = Set.empty }
     let graph =
         {graph with

@@ -36,7 +36,7 @@ let pMmioIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
         do! ensure (addressTy = TIndex) "MMIO handle must have the platform pointer representation"
         let elementTy = TInt (IntWidth bits)
         if isRead then
-            return [MLIROp.MmioLoad (s 0, address, s 1, s 2, bits)], TRValue { SSA = s 0; Type = elementTy }
+            return [MLIROp.MmioLoad (node.Id, s 0, address, bits)], TRValue { SSA = s 0; Type = elementTy }
         else
             // The stored value is adapted by the published meet of this occurrence and
             // its operand. No cast is selected from the physical widths.
@@ -44,5 +44,5 @@ let pMmioIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
             do! ensure (match ty with TInt _ -> true | _ -> false) "MMIO write requires an integer"
             let! conversion, stored = pSettledAdaptTo node.Id args.[1] elementTy { SSA = value; Type = ty }
             return! Alex.Patterns.LiteralPatterns.pWithUnitResult node.Id
-                        (preturn (conversion @ [MLIROp.MmioStore (stored.SSA, address, s 1, s 2, bits)], TRVoid))
+                        (preturn (conversion @ [MLIROp.MmioStore (node.Id, stored.SSA, address, bits)], TRVoid))
 }

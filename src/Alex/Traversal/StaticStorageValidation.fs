@@ -5,19 +5,7 @@ module Alex.Traversal.StaticStorageValidation
 open Fidelity.PSG
 open Alex.Dialects.Core.Types
 
-let rec private flatten ops =
-    ops |> List.collect (fun op ->
-        op ::
-        (match op with
-         | MLIROp.FuncOp (FuncOp.FuncDef (_, _, _, body, _))
-         | MLIROp.NoUnwindFunction (FuncOp.FuncDef (_, _, _, body, _))
-         | MLIROp.HWOp (HWOp.HWModule (_, _, _, body))
-         | MLIROp.Block (_, body) | MLIROp.Region body -> flatten body
-         | MLIROp.SCFOp (SCFOp.If (_, yes, no, _)) -> flatten (yes @ Option.defaultValue [] no)
-         | MLIROp.SCFOp (SCFOp.While (condition, body)) -> flatten (condition @ body)
-         | MLIROp.SCFOp (SCFOp.For (_, _, _, _, body)) -> flatten body
-         | MLIROp.SCFOp (SCFOp.IndexSwitch (_, cases, fallback, _)) -> flatten ((cases |> List.collect snd) @ fallback)
-         | _ -> []))
+let private flatten = OperationStructure.flatten
 
 let validate (graph: Revision) (ops: MLIROp list) : Result<unit, string> =
     let all = flatten ops

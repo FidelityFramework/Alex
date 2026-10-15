@@ -19,6 +19,7 @@ These are owner requirements. They apply to every change, by a person or an agen
 ## What Alex produces
 
 - Alex returns operations, their portable text, and the correspondence between each emitted definition and the occurrence it was witnessed at.
+- Bindings and middle-end operations contain no LLVM dialect types, operations or expansion plans. Alex retains target-independent boundary intent; only the selected backend may realize it in LLVM or another target vocabulary. An operation requiring target realization has an explicit unavailable portable-text state, never fabricated or skipped text.
 - Alex opens no file, writes no file and starts no process. Text produced beside the module is returned as a value. The host, or a sink the host owns, decides what is kept.
 - Alex holds no serializer for JSON, TOML or any other interchange format.
 - MLIR-to-MLIR rewriting, declaration hoisting and plugin loading are prohibited (ALEX003).

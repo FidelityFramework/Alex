@@ -359,13 +359,18 @@ type SMTType =
 type SMTCmpPred =
     | SmtLt | SmtLe | SmtGt | SmtGe
 
-/// Top-level MLIR operation (all dialects)
+/// Portable text is unavailable when a structured operation requires target realization.
+type ModuleText =
+    | Available of string
+    | NeedsTargetRealization
+
+/// Top-level portable operation. Target dialects belong to backend realization.
 /// Single-phase execution with nested accumulators - no scope markers needed
 type MLIROp =
-    /// Typed MMIO only becomes LLVM pointers at serialization. The address is
-    /// an opaque handle (index); no generic source dereference is introduced.
-    | MmioLoad of result: SSA * address: SSA * integerAddress: SSA * pointer: SSA * bits: int
-    | MmioStore of value: SSA * address: SSA * integerAddress: SSA * pointer: SSA * bits: int
+    /// Published MMIO intent retains its exact source account; target expansion
+    /// and any temporary values belong to the selected backend.
+    | MmioLoad of site: Fidelity.PSG.NodeId * result: SSA * address: SSA * bits: int
+    | MmioStore of site: Fidelity.PSG.NodeId * value: SSA * address: SSA * bits: int
     | MemRefOp of MemRefOp
     | ArithOp of ArithOp
     | SCFOp of SCFOp
@@ -530,3 +535,25 @@ module IntrinsicWriteAbi =
 
     let results (declaration: Fidelity.PSG.IntrinsicWriteImport) =
         [BoundaryAbi.scalarType declaration.Result]
+
+/// Structural serialization order only; source meaning remains in the PSG.
+module OperationStructure =
+    let flatten (operations: MLIROp list) : MLIROp list =
+        operations
+        |> List.unfold (function
+            | [] -> None
+            | operation :: remaining ->
+                let children =
+                    match operation with
+                    | FuncOp(FuncDef(_, _, _, body, _))
+                    | NoUnwindFunction(FuncDef(_, _, _, body, _))
+                    | HWOp(HWModule(_, _, _, body))
+                    | Block(_, body)
+                    | Region body
+                    | SMTOp(SMTSolver body) -> body
+                    | SCFOp(If(_, yes, no, _)) -> yes @ Option.defaultValue [] no
+                    | SCFOp(While(condition, body)) -> condition @ body
+                    | SCFOp(For(_, _, _, _, body)) -> body
+                    | SCFOp(IndexSwitch(_, cases, fallback, _)) -> (cases |> List.collect snd) @ fallback
+                    | _ -> []
+                Some(operation, children @ remaining))

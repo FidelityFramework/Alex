@@ -7,6 +7,27 @@ module Alex.Dialects.Core.Serialize
 
 open Alex.Dialects.Core.Types
 
+/// Text escapes remain portable. Quoted data, symbols and comments are not
+/// dialect operations; a quoted generic operation is identified by its operands.
+let private portableTokens =
+    System.Text.RegularExpressions.Regex(
+        "(?<comment>//[^\\r\\n]*)|(?<symbol>@(?:\"(?:\\\\[\\s\\S]|[^\"])*\"|[A-Za-z_][A-Za-z0-9_$.]*))|(?<quoted>\"(?:\\\\[\\s\\S]|[^\"])*\")|(?<backend>!llvm(?=[.<])|(?<![\\w$.])llvm\\.[A-Za-z_][A-Za-z0-9_.]*)|(?<other>[^\\s])")
+
+let private portableText (text: string) =
+    let refuse () = invalidArg "text" "ALEX004: LLVM dialect constructs belong to backend realization, never Alex portable output."
+    portableTokens.Matches text
+    |> Seq.cast<System.Text.RegularExpressions.Match>
+    |> Seq.fold (fun quotedOperation token ->
+        if token.Groups.["comment"].Success then quotedOperation
+        else
+            if token.Groups.["backend"].Success || (quotedOperation && token.Value = "(") then refuse ()
+            token.Groups.["quoted"].Success
+            && System.Text.RegularExpressions.Regex.IsMatch(token.Value, "^\"llvm\\.[A-Za-z_][A-Za-z0-9_.]*\"$")) false
+    |> ignore
+    text
+
+exception private TargetRealizationRequired of string
+
 /// MLIR symbol names are bare identifiers ([A-Za-z_][A-Za-z0-9_$.]*). A Clef function name may
 /// carry an apostrophe (`process'`), which is legal in F# and in the linked ELF symbol but not
 /// in a bare MLIR id; it is spelled `$` in the symbol (a character no Clef name contains).
@@ -253,29 +274,10 @@ let combOpToString (pointer: Result<int, string>) (op: CombOp) : string =
         sprintf "%s = comb.mux %s, %s, %s : %s" (ssaToString result) (ssaToString cond) (ssaToString trueVal) (ssaToString falseVal) (hwTypeToString pointer ty)
 
 /// Serialize HWOp to CIRCT MLIR text (hw dialect)
-/// Note: HWModule body serialization delegates to opToString pointer (defined later),
-/// which handles all MLIROp cases. A non-CIRCT op in an hw.module body is a
-/// pipeline error — it means a CPU-dialect op leaked into FPGA output.
-let hwOpToString (pointer: Result<int, string>) (inner: MLIROp -> string) (op: HWOp) : string =
+/// Hardware module containers use the neutral frame grammar below.
+let hwOpToString (pointer: Result<int, string>) (op: HWOp) : string =
     match op with
-    | HWModule (name, inputs, outputs, body) ->
-        let inputsStr = inputs |> List.map (fun (n, ty) -> sprintf "in %%%s: %s" n (hwTypeToString pointer ty)) |> String.concat ", "
-        let outputsStr = outputs |> List.map (fun (n, ty) -> sprintf "out %s: %s" n (hwTypeToString pointer ty)) |> String.concat ", "
-        let portsStr =
-            match inputs, outputs with
-            | [], [] -> ""
-            | _, [] -> inputsStr
-            | [], _ -> outputsStr
-            | _, _ -> sprintf "%s, %s" inputsStr outputsStr
-        let bodyStr = body |> List.map inner |> String.concat "\n    "
-        // hw.module uses named ports — replace %argN with port names (highest index first to avoid partial matches)
-        let bodyWithPorts =
-            inputs
-            |> List.indexed
-            |> List.rev
-            |> List.fold (fun (s: string) (i, (portName, _)) ->
-                s.Replace(sprintf "%%arg%d" i, sprintf "%%%s" portName)) bodyStr
-        sprintf "hw.module @%s(%s) {\n    %s\n}" name portsStr bodyWithPorts
+    | HWModule _ -> invalidOp "Hardware module serialization requires its neutral container frame."
     | HWOutput vals ->
         match vals with
         | [] -> "hw.output"
@@ -496,33 +498,85 @@ let memrefOpToString (pointer: Result<int, string>) (op: MemRefOp) : string =
         sprintf "%s = memref.view %s[%s][] : %s to %s"
             (ssaToString result) (ssaToString source) (ssaToString offsetSSA) (typeToString pointer srcType) (typeToString pointer destType)
 
-/// Serialize top-level MLIROp to MLIR text
+/// Shared portable container grammar. Child holes contain operations, never
+/// backend text or a callback that could introduce target instructions.
+type ContainerPart =
+    | Text of string
+    | Children of prefix: string * separator: string * operations: MLIROp list
+    | NamedChildren of prefix: string * separator: string * arguments: string list * operations: MLIROp list
+
+let private withArgumentNames arguments text =
+    arguments |> List.indexed |> List.rev
+    |> List.fold (fun (body: string) (index, name) -> body.Replace(sprintf "%%arg%d" index, sprintf "%%%s" name)) text
+
+let containerFrame pointer = function
+    | MLIROp.HWOp(HWModule(name, inputs, outputs, body)) ->
+        let inputPorts = inputs |> List.map (fun (name, ty) -> sprintf "in %%%s: %s" name (hwTypeToString pointer ty))
+        let outputPorts = outputs |> List.map (fun (name, ty) -> sprintf "out %s: %s" name (hwTypeToString pointer ty))
+        Some [Text(sprintf "hw.module @%s(%s) {\n    " name (String.concat ", " (inputPorts @ outputPorts)))
+              NamedChildren("", "\n    ", List.map fst inputs, body); Text "\n}"]
+    | MLIROp.FuncOp(FuncDef(name, args, resultTypes, body, _))
+    | MLIROp.NoUnwindFunction(FuncDef(name, args, resultTypes, body, _)) as operation ->
+        let argsStr = args |> List.map (fun (ssa, ty) -> sprintf "%s: %s" (ssaToString ssa) (typeToString pointer ty)) |> String.concat ", "
+        let attributes = match operation with NoUnwindFunction _ -> " attributes {passthrough = [\"nounwind\"]}" | _ -> ""
+        Some [Text(sprintf "func.func @%s(%s) -> %s%s {\n    " (symbolName name) argsStr (resultTypesToString pointer resultTypes) attributes)
+              Children("", "\n    ", body); Text "\n}"]
+    | MLIROp.SCFOp(SCFOp.While(condition, body)) ->
+        Some [Text "scf.while : () -> () {\n      "; Children("", "\n      ", condition)
+              Text "\n    } do {\n      "; Children("", "\n      ", body); Text "\n    }"]
+    | MLIROp.SCFOp(SCFOp.If(condition, yes, no, result)) ->
+        let prefix, suffix =
+            match result with
+            | Some(ssa, ty) -> sprintf "%s = " (ssaToString ssa), sprintf " -> (%s)" (typeToString pointer ty)
+            | None -> "", ""
+        let first = [Text(sprintf "%sscf.if %s%s {\n      " prefix (ssaToString condition) suffix); Children("", "\n      ", yes)]
+        Some(first @ (match no with
+                      | Some body -> [Text "\n    } else {\n      "; Children("", "\n      ", body); Text "\n    }"]
+                      | None -> [Text "\n    }"]))
+    | MLIROp.SCFOp(SCFOp.For(induction, lower, upper, step, body)) ->
+        Some [Text(sprintf "scf.for %s = %s to %s step %s {\n      " (ssaToString induction) (ssaToString lower) (ssaToString upper) (ssaToString step))
+              Children("", "\n      ", body); Text "\n    }"]
+    | MLIROp.SCFOp(SCFOp.IndexSwitch(selector, cases, fallback, results)) ->
+        let prefix, resultTypes =
+            match results with
+            | [] -> "", ""
+            | _ ->
+                let names = results |> List.map (fst >> ssaToString) |> String.concat ", "
+                let types = results |> List.map (snd >> typeToString pointer) |> String.concat ", "
+                names + " = ", " -> " + types
+        let regions = (cases |> List.map (fun (label, body) -> sprintf "case %d" label, body)) @ ["default", fallback]
+        let parts = regions |> List.mapi (fun index (label, body) ->
+            [Text((if index = 0 then "" else "\n    ") + label + " {\n      "); Children("", "\n      ", body); Text "\n    }"]) |> List.concat
+        Some(Text(sprintf "%sscf.index_switch %s%s\n    " prefix (ssaToString selector) resultTypes) :: parts)
+    | _ -> None
+
+let moduleFrame moduleName operations =
+    match moduleName with
+    | Some name -> [Text(sprintf "module @%s {\n" name); Children("  ", "\n", operations); Text "\n}"]
+    | None -> [Text "module {\n"; Children("  ", "\n", operations); Text "\n}"]
+
+/// Serialize top-level MLIROp to portable MLIR text.
 let rec opToString (pointer: Result<int, string>) (op: MLIROp) : string =
+    match containerFrame pointer op with
+    | Some parts ->
+        parts |> List.map (function
+            | Text text -> text
+            | Children(prefix, separator, operations) -> operations |> List.map (fun child -> prefix + opToString pointer child) |> String.concat separator
+            | NamedChildren(prefix, separator, arguments, operations) ->
+                operations |> List.map (fun child -> prefix + opToString pointer child) |> String.concat separator |> withArgumentNames arguments)
+        |> String.concat ""
+    | None -> leafToString pointer op
+
+and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
     match op with
-    | MLIROp.MmioLoad (result, address, integerAddress, ptr, bits) ->
-        let width = pointer |> Result.defaultWith failwith
-        sprintf "%s = arith.index_castui %s : index to i%d\n    %s = llvm.inttoptr %s : i%d to !llvm.ptr\n    %s = llvm.load volatile %s {alignment = %d : i64} : !llvm.ptr -> i%d"
-            (ssaToString integerAddress) (ssaToString address) width (ssaToString ptr) (ssaToString integerAddress) width
-            (ssaToString result) (ssaToString ptr) (bits / 8) bits
-    | MLIROp.MmioStore (value, address, integerAddress, ptr, bits) ->
-        let width = pointer |> Result.defaultWith failwith
-        sprintf "%s = arith.index_castui %s : index to i%d\n    %s = llvm.inttoptr %s : i%d to !llvm.ptr\n    llvm.store volatile %s, %s {alignment = %d : i64} : i%d, !llvm.ptr"
-            (ssaToString integerAddress) (ssaToString address) width (ssaToString ptr) (ssaToString integerAddress) width
-            (ssaToString value) (ssaToString ptr) (bits / 8) bits
+    | MLIROp.MmioLoad _ | MLIROp.MmioStore _ ->
+        raise (TargetRealizationRequired "Portable MMIO intent requires realization by the selected backend.")
     | MLIROp.ArithOp aop -> arithOpToString pointer aop
     | MLIROp.MemRefOp mop -> memrefOpToString pointer mop
-    | MLIROp.NoUnwindFunction (FuncDef (name, args, resultTypes, body, _)) ->
-        let argsStr = args |> List.map (fun (ssa, ty) -> sprintf "%s: %s" (ssaToString ssa) (typeToString pointer ty)) |> String.concat ", "
-        let bodyStr = body |> List.map (opToString pointer) |> String.concat "\n    "
-        sprintf "func.func @%s(%s) -> %s attributes {passthrough = [\"nounwind\"]} {\n    %s\n}"
-            (symbolName name) argsStr (resultTypesToString pointer resultTypes) bodyStr
     | MLIROp.NoUnwindFunction _ -> failwith "NoUnwindFunction requires a function definition"
     | MLIROp.FuncOp fop ->
         match fop with
-        | FuncDef (name, args, resultTypes, body, _visibility) ->
-            let argsStr = args |> List.map (fun (ssa, ty) -> sprintf "%s: %s" (ssaToString ssa) (typeToString pointer ty)) |> String.concat ", "
-            let bodyStr = body |> List.map (opToString pointer) |> String.concat "\n    "
-            sprintf "func.func @%s(%s) -> %s {\n    %s\n}" (symbolName name) argsStr (resultTypesToString pointer resultTypes) bodyStr
+        | FuncDef _ -> failwith "Function definition requires its portable container frame"
         | FuncDecl (name, paramTypes, resultTypes, _visibility, byvalParams) ->
             if not byvalParams.IsEmpty then
                 failwithf "Foreign declaration '%s' requires a source-settled aggregate ABI realization; portable func declarations cannot realize byval metadata" name
@@ -682,44 +736,8 @@ let rec opToString (pointer: Result<int, string>) (op: MLIROp) : string =
         sprintf "cf.assert %s, \"%s\"" (ssaToString condition) (stringAttributeValue message)
     | MLIROp.SCFOp scfOp ->
         match scfOp with
-        | SCFOp.While (condOps, bodyOps) ->
-            // scf.while with condition and body regions
-            let condStr = condOps |> List.map (opToString pointer) |> String.concat "\n      "
-            let bodyStr = bodyOps |> List.map (opToString pointer) |> String.concat "\n      "
-            sprintf "scf.while : () -> () {\n      %s\n    } do {\n      %s\n    }" condStr bodyStr
-        | SCFOp.If (cond, thenOps, elseOpsOpt, resultOpt) ->
-            let thenStr = thenOps |> List.map (opToString pointer) |> String.concat "\n      "
-            // Result annotation: %result = scf.if %cond -> (type) { ... }
-            let prefix, suffix =
-                match resultOpt with
-                | Some (resultSSA, resultType) ->
-                    sprintf "%s = " (ssaToString resultSSA), sprintf " -> (%s)" (typeToString pointer resultType)
-                | None -> "", ""
-            match elseOpsOpt with
-            | Some elseOps ->
-                let elseStr = elseOps |> List.map (opToString pointer) |> String.concat "\n      "
-                sprintf "%sscf.if %s%s {\n      %s\n    } else {\n      %s\n    }" prefix (ssaToString cond) suffix thenStr elseStr
-            | None ->
-                sprintf "%sscf.if %s%s {\n      %s\n    }" prefix (ssaToString cond) suffix thenStr
-        | SCFOp.For (induction, lower, upper, step, bodyOps) ->
-            let bodyStr = bodyOps |> List.map (opToString pointer) |> String.concat "\n      "
-            sprintf "scf.for %s = %s to %s step %s {\n      %s\n    }"
-                (ssaToString induction) (ssaToString lower) (ssaToString upper) (ssaToString step) bodyStr
-        | SCFOp.IndexSwitch (selector, cases, defaultBody, results) ->
-            let prefix, resultTypes =
-                match results with
-                | [] -> "", ""
-                | _ ->
-                    let names = results |> List.map (fst >> ssaToString) |> String.concat ", "
-                    let types = results |> List.map (snd >> typeToString pointer) |> String.concat ", "
-                    names + " = ", " -> " + types
-            let region label body =
-                let text = body |> List.map (opToString pointer) |> String.concat "\n      "
-                sprintf "%s {\n      %s\n    }" label text
-            let regions =
-                (cases |> List.map (fun (label, body) -> region (sprintf "case %d" label) body))
-                @ [region "default" defaultBody]
-            sprintf "%sscf.index_switch %s%s\n    %s" prefix (ssaToString selector) resultTypes (String.concat "\n    " regions)
+        | SCFOp.While _ | SCFOp.If _ | SCFOp.For _ | SCFOp.IndexSwitch _ ->
+            failwith "Structured control flow requires its portable container frame"
         | SCFOp.Yield vals ->
             match vals with
             | [] -> "scf.yield"
@@ -731,7 +749,7 @@ let rec opToString (pointer: Result<int, string>) (op: MLIROp) : string =
             let argsStr = args |> List.map ssaToString |> String.concat ", "
             sprintf "scf.condition(%s) %s" (ssaToString cond) argsStr
     | MLIROp.CombOp cop -> combOpToString pointer cop
-    | MLIROp.HWOp hop -> hwOpToString pointer (opToString pointer) hop
+    | MLIROp.HWOp hop -> hwOpToString pointer hop
     | MLIROp.SeqOp sop -> seqOpToString pointer sop
     | MLIROp.SMTOp sop -> smtOpToString pointer (opToString pointer) sop
     | MLIROp.SpatialModule declaration ->
@@ -742,7 +760,7 @@ let rec opToString (pointer: Result<int, string>) (op: MLIROp) : string =
         let (Fidelity.PSG.NodeId sourceId) = site
         sprintf "module @%s attributes {clef.spatial_source = \"%d\", clef.spatial_kind = \"%s\"} {}"
             (symbolName name) sourceId kind
-    | MLIROp.RawMLIR text -> text
+    | MLIROp.RawMLIR text -> portableText text
     | _ ->
         // Block and Region have no text form here: reaching one is a stop, never a comment.
         failwithf "backend (MLIR text) has no serialization for the operation %A; it was emitted without one and is never written as a comment" op
@@ -751,7 +769,7 @@ let rec opToString (pointer: Result<int, string>) (op: MLIROp) : string =
 /// Serialize one op; a width failure inside it is re-raised naming the op, so that the
 /// stop says which value had no width rather than only that one did.
 let private opToStringNamed (pointer: Result<int, string>) (op: MLIROp) : string =
-    try opToString pointer op
+    try opToString pointer op |> portableText
     with ex when ex.Message.StartsWith "Width inference failure" ->
         let rendered = sprintf "%A" op
         let shown = if rendered.Length > 400 then rendered.Substring(0, 400) + " ..." else rendered
@@ -764,6 +782,37 @@ let opsToString (pointer: Result<int, string>) (ops: MLIROp list) (indent: strin
     |> String.concat "\n"
 
 /// Serialize a complete MLIR module
-let moduleToString (pointer: Result<int, string>) (moduleName: string) (ops: MLIROp list) : string =
-    let opsText = opsToString pointer ops "  "
-    sprintf "module @%s {\n%s\n}" moduleName opsText
+let private moduleToStringOption (pointer: Result<int, string>) (moduleName: string option) (ops: MLIROp list) : string =
+    moduleFrame moduleName ops
+    |> List.map (function
+        | Text text -> text
+        | Children(prefix, separator, operations) -> operations |> List.map (fun child -> prefix + opToStringNamed pointer child) |> String.concat separator
+        | NamedChildren(prefix, separator, arguments, operations) ->
+            operations |> List.map (fun child -> prefix + opToStringNamed pointer child) |> String.concat separator |> withArgumentNames arguments)
+    |> String.concat ""
+    |> portableText
+
+let moduleToString pointer moduleName operations = moduleToStringOption pointer (Some moduleName) operations
+
+/// Validate every portable operation before reporting target deferral. A target
+/// operation cannot hide a later serialization or source-width refusal.
+let moduleText (pointer: Result<int, string>) (moduleName: string option) (ops: MLIROp list) : ModuleText =
+    let validateFrame parts =
+        parts |> List.iter (function
+            | Text text -> portableText text |> ignore
+            | Children(prefix, separator, _) | NamedChildren(prefix, separator, _, _) ->
+                portableText prefix |> ignore; portableText separator |> ignore)
+    moduleFrame moduleName ops |> validateFrame
+    let needsTarget =
+        OperationStructure.flatten ops
+        |> List.map (fun operation ->
+            match containerFrame pointer operation with
+            | Some parts -> validateFrame parts; false
+            | None ->
+                try
+                    opToStringNamed pointer operation |> ignore
+                    false
+                with TargetRealizationRequired _ -> true)
+        |> List.contains true
+    if needsTarget then NeedsTargetRealization
+    else moduleToStringOption pointer moduleName ops |> Available
