@@ -63,7 +63,23 @@ let private structuralMembers (position: PSGZipper) =
 /// components. This reads a signature; it neither visits nor emits a body.
 type private ParameterShape = Scalar | Omitted | Callable of CallableOperands.Shape | Sequence of Alex.Traversal.SequenceOperands.Shape | Lazy of Alex.Traversal.LazyOperands.Shape
 
-let private parameterComponents (ctx: WitnessContext) parameters =
+let private nativeDefinition (ctx: WitnessContext) =
+    let boundary = ctx.Graph.Emission.Boundary
+    let entries = boundary.ClosedEntries.Values |> Seq.filter (fun entry -> entry.Implementation = ctx.Zipper.Focus.Id) |> Seq.toList
+    match entries with
+    | [] -> Result.Ok None
+    | first :: _ ->
+        let signatures = entries |> List.map (fun entry -> boundary.CallbackInvocations.TryFind entry.Invocation |> Option.map _.Signature)
+        match signatures with
+        | Some signature :: rest when
+            (rest |> List.forall ((=) (Some signature))) &&
+            (entries |> List.forall (fun entry ->
+                entry.Formals = first.Formals && entry.Body = first.Body &&
+                entry.Lifetime = first.Lifetime && entry.ParameterAdaptations = first.ParameterAdaptations &&
+                entry.ResultAdaptation = first.ResultAdaptation)) -> Result.Ok(Some(first, signature))
+        | _ -> Result.Error "Closed native implementation has absent or incompatible receiving signatures."
+
+let private ordinaryParameterComponents (ctx: WitnessContext) parameters =
     let projection = ctx.Graph.Emission.Ordinary
     let omitted = projection.Parameters.TryFind ctx.Zipper.Focus.Id |> Option.defaultValue Set.empty
     let groups = parameters |> List.map (fun (_, ty, id) ->
@@ -85,6 +101,17 @@ let private parameterComponents (ctx: WitnessContext) parameters =
     match groups |> List.tryPick (function Result.Error reason -> Some reason | _ -> None) with
     | Some reason -> Result.Error reason
     | None -> Result.Ok(groups |> List.choose (function Result.Ok group -> Some group | _ -> None))
+
+let private parameterComponents (ctx: WitnessContext) parameters =
+    nativeDefinition ctx |> Result.bind (function
+        | None -> ordinaryParameterComponents ctx parameters
+        | Some(entry, signature) ->
+            if (parameters |> List.map (fun (_, _, id) -> id)) <> entry.Formals ||
+               signature.Parameters.Length <> parameters.Length || entry.ParameterAdaptations.Length <> parameters.Length then
+                Result.Error "Closed native implementation omitted or reordered an original formal."
+            else
+                try Result.Ok(signature.Parameters |> List.map (fun scalar -> [BoundaryAbi.scalarType scalar], Scalar))
+                with ex -> Result.Error ex.Message)
 
 // ═══════════════════════════════════════════════════════════
 // CATEGORY-SELECTIVE WITNESS (Private)
@@ -176,6 +203,7 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             let mlirParams = parameterValues |> List.concat |> List.map (fun value -> value.SSA, value.Type)
 
             let funcParams = mlirParams
+            let native = nativeDefinition ctx |> Result.toOption |> Option.flatten
 
             // ═══ SSATypes SCOPING ═══
             // SSA values (V n, Arg n) are per-function — different functions reuse the same SSA names.
@@ -188,13 +216,35 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             for (paramSSA, mlirType) in funcParams do
                 MLIRAccumulator.registerSSAType paramSSA mlirType ctx.Accumulator
 
+            let bodyScope = ScopeContext.createChild !ctx.ScopeContext FunctionLevel
+            let bodyScopeRef = ref bodyScope
+
             // Operand recall is scoped independently of pure SSA naming. Bind
             // the actual formals here, shadowing any parent-scope occurrence;
             // The complete operand scope is restored after the body is witnessed.
             for ((_, _, paramId), ((_, shape), values)) in List.zip params' (List.zip parameterTypes parameterValues) do
                 match shape, values with
                 | Omitted, [] -> ()
-                | Scalar, [value] -> MLIRAccumulator.bindNode paramId value.SSA value.Type ctx.Accumulator
+                | Scalar, [value] ->
+                    let adaptation = native |> Option.bind (fun (entry, _) -> List.zip entry.Formals entry.ParameterAdaptations |> List.tryFind (fst >> (=) paramId) |> Option.bind snd)
+                    let adapted =
+                        match native with
+                        | None -> [], value
+                        | Some _ ->
+                            match tryMatchWithDiagnostics (pPublishedAdapt node.Id paramId adaptation value) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                            | Result.Ok((operations, actual), _) -> operations, actual
+                            | Result.Error reason ->
+                                MLIRAccumulator.addError (Diagnostic.error (Some paramId) (Some "Lambda") (Some "Native formal") reason) ctx.Accumulator
+                                [], value
+                    // Exact source adaptations precede every use of the formal.
+                    // Ordinary formals retain their existing SSA unchanged.
+                    let operations, actual = adapted
+                    if native.IsSome then
+                        MLIRAccumulator.bindNode paramId actual.SSA actual.Type ctx.Accumulator
+                    else
+                        MLIRAccumulator.bindNode paramId value.SSA value.Type ctx.Accumulator
+                    for operation in operations do
+                        bodyScopeRef := ScopeContext.addOp operation !bodyScopeRef
                 | Callable shape, code :: environment ->
                     match CallableOperands.create shape code (List.tryHead environment)
                           |> Result.bind (fun value -> MLIRAccumulator.bindCallable paramId value ctx.Accumulator) with
@@ -218,8 +268,6 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                         "Settled formal components do not match their witnessed argument values") ctx.Accumulator
 
             // Create child scope for function body (principled accumulation)
-            let bodyScope = ScopeContext.createChild !ctx.ScopeContext FunctionLevel
-            let bodyScopeRef = ref bodyScope
 
             // Descend from the actual lambda occurrence. Re-rooting at bodyId
             // would discard the enclosing function and its Huet breadcrumbs.
@@ -308,6 +356,13 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                 | None, Some (meet, _), Some _ -> TInt (IntWidth meet.To)
                 | None, _, Some (_, actualTy) -> actualTy
                 | None, _, None -> requireValueType ctx.Graph bodyId rawReturnType
+            match native with
+            | Some(entry, signature) when
+                entry.ResultAdaptation <> (returnMeet |> Option.map fst) ||
+                (signature.Result |> Option.map BoundaryAbi.scalarType |> Option.toList) <> [returnType] ->
+                MLIRAccumulator.addError (Diagnostic.error (Some node.Id) (Some "Lambda") (Some "Native result")
+                    "Closed native result differs from its exact source return meet and receiving ABI.") ctx.Accumulator
+            | _ -> ()
             let returnMeetOps =
                 match returnMeet, bodyResult with
                 | Some (meet, result), Some (ssa, _) -> [ meetOp meet result ssa ]

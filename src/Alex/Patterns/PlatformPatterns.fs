@@ -40,7 +40,7 @@ let boundaryImportsAt (scope: NodeId) (boundary: BoundaryEmissionProjection) : R
             | Some declaration when declaration.Scope <> scope ->
                 Result.Error "Published import has a different source owner scope."
             | Some declaration ->
-                foreign rest |> Result.map (fun following -> publishedFuncDecl declaration :: following)
+                foreign rest |> Result.map (fun following -> publishedFuncDeclIn boundary declaration :: following)
     foreign (boundary.ByScope.TryFind scope |> Option.defaultValue [])
     |> Result.map (fun declarations ->
         declarations @ (boundary.IntrinsicWriteImports.Values
@@ -76,9 +76,9 @@ let private importedEntry (boundary: BoundaryEmissionProjection) formation =
         | _ -> Result.Error "Imported entry no longer has its exact declaration, import and loading contract."
     | _ -> Result.Error "Imported entry has no current source-published loading assumption."
 
-let private importedFunctionType (declaration: BoundaryImport) =
+let private importedFunctionType boundary (declaration: BoundaryImport) =
     TFunc(
-        declaration.Parameters |> List.map (snd >> boundaryScalarType),
+        BoundaryAbi.parametersIn boundary declaration,
         declaration.Result |> Option.map boundaryScalarType |> Option.toList
     )
 
@@ -107,7 +107,7 @@ let pImportedFunctionAddress formation : PSGParser<MLIROp list * TransferResult>
         let value =
             {
                 SSA = ssa
-                Type = importedFunctionType declaration
+                Type = importedFunctionType boundary declaration
             }
 
         let! operation = pFuncConstant ssa declaration.Symbol value.Type
@@ -185,7 +185,7 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                 return [], value
                               }
                             | None -> pBoundaryAdapt node.Id operand.Actual operand.Adaptation raw
-                        do! ensure (value.Type = boundaryScalarType operand.Abi) "Witnessed boundary argument disagrees with its published ABI."
+                        do! ensure (value.Type = BoundaryAbi.scalarTypeIn boundary operand.Abi) "Witnessed boundary argument disagrees with its published ABI."
                         // Repeated positions retain their order and reuse the
                         // one canonical meet definition for this actual.
                         let! remainingOps, values = arguments (witnessed.Add(operand.Actual, (operand.Adaptation, raw, value))) rest
@@ -211,7 +211,7 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                     entry.Transport.Contains call.Callee)
                                 "Imported invocation differs from its source entry and pointer transport."
                         let! pointerSSA, pointerType = pRecallNode call.Callee
-                        do! ensure (pointerType = importedFunctionType declaration &&
+                        do! ensure (pointerType = importedFunctionType boundary declaration &&
                                     pointerType = TFunc(List.map _.Type values, List.map _.Type results))
                                 "Imported invocation pointer and operands disagree with its native ABI."
                         return! pFuncCallIndirectResults results pointerSSA values

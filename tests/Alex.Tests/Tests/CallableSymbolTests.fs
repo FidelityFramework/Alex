@@ -131,6 +131,72 @@ let private context (graph: Revision) site operands =
       Graph = graph; Zipper = Zipper.create graph site |> require "Missing component site"
       GlobalVisited = visited; TraversalVisited = visited }
 
+/// Component readings only: these stored rows select a physical native code
+/// value. Source admission and full revision integrity are checked upstream.
+let private closedReceivingFixture () =
+    let graph, functions = fixture false
+    let fn = functions.Head
+    let symbol = lambda graph graph.Nodes[fn.Lambda] false
+    let scalar = BoundaryScalar.Integer(64, true)
+    let invocation : BoundaryCallbackInvocation =
+        { Identity = NodeId 40; Import = NodeId 41; Parameter = 0; Formal = NodeId 42; Scope = NodeId 43
+          Signature = {Parameters = [scalar]; Result = Some scalar; CallingConvention = "CDecl"}
+          Contract = {Binding = "Foreign.call"; Parameter = 0
+                      Signature = {Parameters = [|{Name = "value"; Type = BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Signed,64); PassBy = BAREWire.Descriptors.PassBy.Value}|]
+                                   ReturnType = BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Signed,64); CallingConvention = BAREWire.Descriptors.CallConv.CDecl}
+                      Hypothesis = {Identity = "callback-demand"; Version = "1"; Source = "explicit-test-assumption"}; Scope = "Foreign.scope"}
+          Participants = Set.ofList [NodeId 40; NodeId 41; NodeId 42; NodeId 43] }
+    let entry : BoundaryClosedEntry =
+        { Formation = fn.Call; Operand = fn.Reference; Declaration = fn.Binding; Implementation = fn.Lambda
+          Formals = [NodeId 0]; Body = NodeId 1
+          Lifetime = {Module = NodeId 7; Binding = fn.Binding; Implementation = fn.Lambda}
+          Invocation = invocation.Identity; ParameterAdaptations = [None]; ResultAdaptation = None
+          Transport = Set.ofList [fn.Call; fn.Reference]; Participants = Set.empty }
+    let graph =
+        {graph with
+            Codata = {graph.Codata with FunctionPointers = Map.ofList [fn.Call, FunctionPointerPlan.Address(symbol,fn.Lambda)]}
+            Emission = {graph.Emission with
+                            Callable = {graph.Emission.Callable with NativeEntries = Map.ofList [fn.Lambda,symbol]}
+                            Boundary = {graph.Emission.Boundary with CallbackInvocations = Map.ofList [invocation.Identity,invocation]; ClosedEntries = Map.ofList [entry.Formation,entry]}}}
+    graph, fn, symbol
+
+[<Fact>]
+let ``closed receiving entry emits its full native function type without index repair`` () =
+    let graph, fn, symbol = closedReceivingFixture ()
+    let ctx = context graph fn.Call (MLIRAccumulator.empty ())
+    let output = Alex.Witnesses.FunctionPointerWitness.nanopass.Witness ctx graph.Nodes[fn.Call]
+    let expected = TFunc([TInt(IntWidth 64)], [TInt(IntWidth 64)])
+    match output.Result, output.InlineOps with
+    | TRValue value, [MLIROp.FuncOp(FuncOp.FuncConstant(ssa,actual,ty))] ->
+        Assert.Equal(expected,value.Type)
+        Assert.Equal(expected,ty)
+        Assert.Equal(value.SSA,ssa)
+        Assert.Equal(symbol,actual)
+    | other -> failwithf "Closed native entry did not retain its exact signature: %A" other
+
+[<Theory>]
+[<InlineData("invocation", "exact invocation signature and complete declaration")>]
+[<InlineData("formal", "exact invocation signature and complete declaration")>]
+[<InlineData("unused", "omitted an original native formal")>]
+[<InlineData("lifetime", "original ProgramImage code lifetime and symbol")>]
+let ``closed receiving entry refuses missing or changed original account`` change reason =
+    let graph, fn, _ = closedReceivingFixture ()
+    let boundary = graph.Emission.Boundary
+    let entry = boundary.ClosedEntries[fn.Call]
+    let boundary =
+        match change with
+        | "invocation" -> {boundary with CallbackInvocations = Map.empty}
+        | "formal" -> {boundary with ClosedEntries = Map.ofList [fn.Call,{entry with Formals = []}]}
+        | "unused" ->
+            let invocation = boundary.CallbackInvocations[entry.Invocation]
+            {boundary with CallbackInvocations = Map.ofList [entry.Invocation,{invocation with Signature = {invocation.Signature with Parameters = []}}]}
+        | _ -> {boundary with ClosedEntries = Map.ofList [fn.Call,{entry with Lifetime = {entry.Lifetime with Implementation = NodeId 999}}]}
+    let graph = {graph with Emission = {graph.Emission with Boundary = boundary}}
+    let ctx = context graph fn.Call (MLIRAccumulator.empty ())
+    match (Alex.Witnesses.FunctionPointerWitness.nanopass.Witness ctx graph.Nodes[fn.Call]).Result with
+    | TRError diagnostic -> Assert.Contains(reason,diagnostic.Message)
+    | other -> failwithf "Malformed closed native entry was emitted: %A" other
+
 [<Theory>]
 [<InlineData(false)>]
 [<InlineData(true)>]

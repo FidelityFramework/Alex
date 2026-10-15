@@ -429,7 +429,7 @@ and FuncOp =
     | FuncDecl of string * MLIRType list * MLIRType list * FuncVisibility * ByvalParam list     // name, paramTypes, resultTypes, visibility, byvalParams (external decl)
     /// Exact source boundary contract accompanies its portable physical spelling.
     /// Signedness and calling convention remain available to target realization.
-    | BoundaryFuncDecl of Fidelity.PSG.BoundaryImport
+    | BoundaryFuncDecl of Fidelity.PSG.BoundaryImport * MLIRType list * MLIRType list
     /// Source-settled intrinsic authority, distinct from a foreign C declaration.
     | IntrinsicWriteDecl of Fidelity.PSG.IntrinsicWriteImport
     // Function calls
@@ -487,6 +487,22 @@ module BoundaryAbi =
     let scalarType = function
         | Fidelity.PSG.BoundaryScalar.Integer(bits, _) -> TInt(IntWidth bits)
         | Fidelity.PSG.BoundaryScalar.Boolean -> TInt(IntWidth 1)
+        | Fidelity.PSG.BoundaryScalar.Entry _ -> invalidArg "scalar" "An entry carrier requires its source-published receiving signature."
+
+    let signatureType (signature: Fidelity.PSG.NativeEntrySignature) =
+        if signature.CallingConvention <> "CDecl" then
+            invalidArg "signature" "A closed native entry requires its source-published CDecl convention."
+        TFunc(List.map scalarType signature.Parameters, signature.Result |> Option.map scalarType |> Option.toList)
+
+    let scalarTypeIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) = function
+        | Fidelity.PSG.BoundaryScalar.Entry invocation ->
+            match boundary.CallbackInvocations.TryFind invocation with
+            | Some row when row.Identity = invocation -> signatureType row.Signature
+            | _ -> invalidArg "boundary" "An entry carrier lacks its exact source-published receiving invocation."
+        | scalar -> scalarType scalar
+
+    let parametersIn boundary (declaration: Fidelity.PSG.BoundaryImport) =
+        declaration.Parameters |> List.map (snd >> scalarTypeIn boundary)
 
     let parameters (declaration: Fidelity.PSG.BoundaryImport) =
         declaration.Parameters |> List.map (snd >> scalarType)

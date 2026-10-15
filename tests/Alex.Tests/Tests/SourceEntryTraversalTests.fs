@@ -119,7 +119,7 @@ let ``body-free boundary entry witnesses its assigned imports without declaratio
     Assert.Empty accumulator.EmittedDefinitions
     Assert.Empty visited
     Assert.Equal<Set<NodeId>>(Set.singleton owner, accumulator.BoundaryScopes)
-    Assert.Equal<MLIROp list>([FuncOp(BoundaryFuncDecl declaration)], ScopeContext.getOps scope)
+    Assert.Equal<MLIROp list>([FuncOp(BoundaryFuncDecl(declaration, BoundaryAbi.parameters declaration, BoundaryAbi.results declaration))], ScopeContext.getOps scope)
     Assert.Empty(validateCoverage graph visited)
     Assert.Empty(validateBoundaryCoverage graph accumulator.BoundaryScopes)
     let missing = Assert.Single(validateBoundaryCoverage graph (accumulator.BoundaryScopes.Remove owner))
@@ -139,7 +139,7 @@ let ``duplicate admitted body-free boundary entries emit and cover their imports
     Assert.Empty accumulator.EmittedDefinitions
     Assert.Empty visited
     Assert.Equal<Set<NodeId>>(Set.singleton owner, accumulator.BoundaryScopes)
-    Assert.Equal<MLIROp list>([FuncOp(BoundaryFuncDecl declaration)], ScopeContext.getOps scope)
+    Assert.Equal<MLIROp list>([FuncOp(BoundaryFuncDecl(declaration, BoundaryAbi.parameters declaration, BoundaryAbi.results declaration))], ScopeContext.getOps scope)
     Assert.Empty(validateCoverage graph visited)
     Assert.Empty(validateBoundaryCoverage graph accumulator.BoundaryScopes)
 

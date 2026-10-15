@@ -21,15 +21,7 @@ let private witness (ctx: WitnessContext) (node: SemanticNode) =
     | Some (FunctionPointerPlan.ExternAddress formation) ->
         observe (pImportedFunctionAddress formation) []
     | Some (FunctionPointerPlan.Address (symbol, lambdaId)) ->
-        let projection = ctx.Graph.Emission.Callable
-        match projection.Declarations.TryFind lambdaId with
-        | Some declaration ->
-            let types = declaration.Parameters |> List.map (fun (_, _, id) -> mapTypeAt id ctx)
-            let resultType =
-                if projection.VoidCallbacks.Contains lambdaId then TVoid
-                else mapTypeAt declaration.Result ctx
-            observe (pFunctionAddress node.Id symbol types resultType) []
-        | None -> unsettled "callback declaration" "The callback entry has no source-published declaration."
+        observe (pClosedFunctionAddress node.Id symbol lambdaId) []
     | Some (FunctionPointerPlan.Invoke _) when ctx.Graph.Emission.Boundary.Calls.ContainsKey node.Id ->
         // The boundary witness consumes the admitted native ABI and the
         // original typed pointer value; the legacy index path grants none.

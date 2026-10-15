@@ -105,7 +105,7 @@ let ``selective common witnesses body-free imports without escaping its exact bo
     Assert.False(graph.Nodes.ContainsKey scope)
     let result = run graph None Set.empty |> accepted
     let common = result.Regions |> List.find (fun output -> output.Region.Flavor = WitnessRegionKind.Common)
-    Assert.Equal<MLIROp list>([FuncOp(BoundaryFuncDecl declaration)], common.Operations)
+    Assert.Equal<MLIROp list>([FuncOp(BoundaryFuncDecl(declaration, BoundaryAbi.parameters declaration, BoundaryAbi.results declaration))], common.Operations)
     Assert.Equal<Set<NodeId>>(Set.ofList [NodeId 2; NodeId 5], common.Region.Members)
     Assert.Equal(2, result.Statistics.WitnessedNodes[common.Region.Identity])
 

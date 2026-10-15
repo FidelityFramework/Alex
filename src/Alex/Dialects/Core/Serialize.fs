@@ -528,10 +528,10 @@ let rec opToString (pointer: Result<int, string>) (op: MLIROp) : string =
                 failwithf "Foreign declaration '%s' requires a source-settled aggregate ABI realization; portable func declarations cannot realize byval metadata" name
             let paramsStr = paramTypes |> List.map (typeToString pointer) |> String.concat ", "
             sprintf "func.func private @%s(%s) -> %s" (symbolName name) paramsStr (resultTypesToString pointer resultTypes)
-        | BoundaryFuncDecl declaration ->
-            let paramsStr = BoundaryAbi.parameters declaration |> List.map (typeToString pointer) |> String.concat ", "
+        | BoundaryFuncDecl (declaration, parameters, results) ->
+            let paramsStr = parameters |> List.map (typeToString pointer) |> String.concat ", "
             sprintf "func.func private @%s(%s) -> %s" (symbolName declaration.Symbol) paramsStr
-                (resultTypesToString pointer (BoundaryAbi.results declaration))
+                (resultTypesToString pointer results)
         | IntrinsicWriteDecl declaration ->
             let paramsStr = IntrinsicWriteAbi.parameters declaration |> List.map (typeToString pointer) |> String.concat ", "
             sprintf "func.func private @%s(%s) -> %s" (symbolName declaration.Symbol) paramsStr
