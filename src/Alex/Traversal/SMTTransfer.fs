@@ -155,6 +155,8 @@ let private scope (ob: ObligationInfo) : MLIROp list =
 
     let ops =
         match ob.Body with
+        | ObligationBody.SnapshotBorrowBound(_, _, _, _, minimum, maximum) ->
+            SnapshotBorrowProof.ofBounds minimum maximum |> resource
         | ObligationBody.ResourceConversion model -> ResourceProof.ofConversion model |> resource
         | ObligationBody.ResourceCleanup model -> ResourceProof.ofCleanup model |> resource
         | ObligationBody.ForeignResultCoverage model ->
