@@ -64,20 +64,7 @@ let private structuralMembers (position: PSGZipper) =
 type private ParameterShape = Scalar | Omitted | Callable of CallableOperands.Shape | Sequence of Alex.Traversal.SequenceOperands.Shape | Lazy of Alex.Traversal.LazyOperands.Shape
 
 let private nativeDefinition (ctx: WitnessContext) =
-    let boundary = ctx.Graph.Emission.Boundary
-    let entries = boundary.ClosedEntries.Values |> Seq.filter (fun entry -> entry.Implementation = ctx.Zipper.Focus.Id) |> Seq.toList
-    match entries with
-    | [] -> Result.Ok None
-    | first :: _ ->
-        let signatures = entries |> List.map (fun entry -> boundary.CallbackInvocations.TryFind entry.Invocation |> Option.map _.Signature)
-        match signatures with
-        | Some signature :: rest when
-            (rest |> List.forall ((=) (Some signature))) &&
-            (entries |> List.forall (fun entry ->
-                entry.Formals = first.Formals && entry.Body = first.Body &&
-                entry.Lifetime = first.Lifetime && entry.ParameterAdaptations = first.ParameterAdaptations &&
-                entry.ResultAdaptation = first.ResultAdaptation)) -> Result.Ok(Some(first, signature))
-        | _ -> Result.Error "Closed native implementation has absent or incompatible receiving signatures."
+    CallableOperands.closedNativeDefinition ctx.Graph ctx.Zipper.Focus.Id
 
 let private ordinaryParameterComponents (ctx: WitnessContext) parameters =
     let projection = ctx.Graph.Emission.Ordinary
@@ -185,12 +172,15 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             // Startup is an ordinary graph body with the same passive function
             // witness. Its settled declaration root supplies export visibility.
             let own = Values.values node.Id
+            let native = nativeDefinition ctx |> Result.toOption |> Option.flatten
+            let nativeUnit = native |> Option.exists (fun (_, signature) -> signature.Result.IsNone)
 
             // Definitions, direct calls and closure code addresses share the same
             // resolved binding identity; equal local source names remain distinct.
             let funcName =
-                match storage.Startup with
-                | Some plan when plan.EntryLambda = node.Id -> plan.Symbol
+                match native, storage.Startup with
+                | Some _, _ -> ctx.Graph.Emission.Callable.NativeEntries[node.Id]
+                | _, Some plan when plan.EntryLambda = node.Id -> plan.Symbol
                 | _ -> Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph node false
 
             // The actual lambda occurrence supplies ordered formals. A callable
@@ -203,7 +193,6 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             let mlirParams = parameterValues |> List.concat |> List.map (fun value -> value.SSA, value.Type)
 
             let funcParams = mlirParams
-            let native = nativeDefinition ctx |> Result.toOption |> Option.flatten
 
             // ═══ SSATypes SCOPING ═══
             // SSA values (V n, Arg n) are per-function — different functions reuse the same SSA names.
@@ -302,7 +291,7 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             let bodyOps = ScopeContext.getOps !bodyScopeRef
 
             // Get body result for return value
-            let actualValueNode = findLastValueNode bodyId ctx.Graph
+            let actualValueNode = if nativeUnit then bodyId else findLastValueNode bodyId ctx.Graph
             let bodyResult = MLIRAccumulator.recallNode bodyId ctx.Accumulator
             let bodyCallable =
                 match MLIRAccumulator.recallCallable actualValueNode ctx.Accumulator with
@@ -345,28 +334,34 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                 WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Lambda") (Some "return type")
                     $"PSG settlement did not keep the body {NodeId.value bodyId} of lambda {NodeId.value node.Id} resident in the graph; its return type has no source"
             | Some _ ->
-            let rawReturnType =
-                match bodyComponents with
-                | Some values -> (List.head values).Type
-                | None -> mapTypeAt bodyId ctx
             let returnMeet = Map.tryFind node.Id ctx.Graph.Codata.ReturnMeets |> Option.map (fun m -> m, Values.returnMeetValue node.Id)
             let returnError =
                 match bodyComponents, bodyResult, returnMeet with
+                | Some _, _, _ when nativeUnit ->
+                    Some "Closed native unit result produced a witnessed value or component."
+                | None, Some value, _ when nativeUnit && not (CallableOperands.isUnitResultToken ctx.Graph bodyId value) ->
+                    Some "Closed native unit result produced a witnessed value or component."
                 | None, None, _ when not (Values.isUnitTyped ctx.Graph bodyId) ->
                     Some "Lambda result lacks a witnessed value at its published body occurrence."
                 | None, Some(_, actualType), Some(meet, _) when actualType <> TInt(IntWidth meet.From) ->
                     Some "Lambda return meet does not start at its witnessed body carrier."
                 | _ -> None
-            let returnType =
-                match bodyComponents, returnMeet, bodyResult with
-                | Some values, _, _ -> (List.head values).Type
-                | None, Some (meet, _), Some _ -> TInt (IntWidth meet.To)
-                | None, _, Some (_, actualTy) -> actualTy
-                | None, _, None -> requireValueType ctx.Graph bodyId rawReturnType
+            let returnTypes =
+                if nativeUnit then []
+                else
+                    let rawReturnType =
+                        match bodyComponents with
+                        | Some values -> (List.head values).Type
+                        | None -> mapTypeAt bodyId ctx
+                    [match bodyComponents, returnMeet, bodyResult with
+                     | Some values, _, _ -> (List.head values).Type
+                     | None, Some (meet, _), Some _ -> TInt (IntWidth meet.To)
+                     | None, _, Some (_, actualTy) -> actualTy
+                     | None, _, None -> requireValueType ctx.Graph bodyId rawReturnType]
             match native with
             | Some(entry, signature) when
                 entry.ResultAdaptation <> (returnMeet |> Option.map fst) ||
-                (signature.Result |> Option.map BoundaryAbi.scalarType |> Option.toList) <> [returnType] ->
+                (signature.Result |> Option.map BoundaryAbi.scalarType |> Option.toList) <> returnTypes ->
                 MLIRAccumulator.addError (Diagnostic.error (Some node.Id) (Some "Lambda") (Some "Native result")
                     "Closed native result differs from its exact source return meet and receiving ABI.") ctx.Accumulator
             | _ -> ()
@@ -412,15 +407,19 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             let resultTypes =
                 match bodyComponents with
                 | Some values -> values |> List.map _.Type
-                | None -> [returnType]
+                | None -> returnTypes
             let definition =
-                match bodyComponents, CallableOperands.valueShape ctx bodyId with
-                | Some values, _ -> pFunctionDefResults visibility funcName funcParams (Some paramNames) resultTypes bodyOps values
-                | None, Result.Error reason -> fail (Message reason)
-                | None, Result.Ok(CallableValueShape.Callable _ | CallableValueShape.Sequence _ | CallableValueShape.Lazy _) -> fail (Message "Body result has no witnessed canonical function/environment operands")
-                | None, _ ->
-                    pFunctionDef visibility funcName funcParams (Some paramNames) returnType bodyOps returnSSA
-                        (match Revision.tryNode bodyId ctx.Graph with Some b when Values.isUnitTyped ctx.Graph b.Id -> Some (Values.unitReturnValue node.Id) | _ -> None)
+                match nativeUnit, bodyComponents, CallableOperands.valueShape ctx bodyId with
+                | true, _, _ -> pFunctionDefResults visibility funcName funcParams (Some paramNames) [] bodyOps []
+                | false, Some values, _ -> pFunctionDefResults visibility funcName funcParams (Some paramNames) resultTypes bodyOps values
+                | false, None, Result.Error reason -> fail (Message reason)
+                | false, None, Result.Ok(CallableValueShape.Callable _ | CallableValueShape.Sequence _ | CallableValueShape.Lazy _) -> fail (Message "Body result has no witnessed canonical function/environment operands")
+                | false, None, _ ->
+                    match returnTypes with
+                    | [returnType] ->
+                        pFunctionDef visibility funcName funcParams (Some paramNames) returnType bodyOps returnSSA
+                            (match Revision.tryNode bodyId ctx.Graph with Some b when Values.isUnitTyped ctx.Graph b.Id -> Some (Values.unitReturnValue node.Id) | _ -> None)
+                    | _ -> fail (Message "Ordinary lambda lacks its exact scalar return type.")
             match returnError with
             | Some reason -> WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Lambda") (Some "return occurrence") reason
             | None ->
@@ -433,12 +432,13 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                 let nativeCallback phase message =
                     MLIRAccumulator.addError (Diagnostic.error (Some node.Id) (Some "Lambda") (Some phase) message) ctx.Accumulator
                 let projection = ctx.Graph.Emission.Callable
-                if projection.VoidCallbacks.Contains node.Id then
+                if projection.VoidCallbacks.Contains node.Id && native.IsNone then
                     match projection.NativeEntries.TryFind node.Id with
                     | None ->
                         nativeCallback "Native callback entry"
                             $"Baker callable projection did not settle the native entry symbol for void callback lambda {NodeId.value node.Id}"
                     | Some entry ->
+                        let returnType = List.head returnTypes
                         let arguments = funcParams |> List.map (fun (ssa, ty) -> { SSA = ssa; Type = ty })
                         let call = MLIROp.FuncOp (FuncOp.FuncCall ([{ SSA = own.[0]; Type = returnType }], funcName, arguments))
                         let body = [call; MLIROp.FuncOp (FuncOp.Return [])]

@@ -60,12 +60,13 @@ let private observe (ctx: WitnessContext) (node: SemanticNode) prefix pattern =
             { InlineOps = prefix @ operations @ meets; TopLevelOps = []; Result = TRValue { SSA = ssa; Type = ty } }
         | _ -> { InlineOps = prefix @ operations; TopLevelOps = []; Result = result }
 
-let private invoke (ctx: WitnessContext) (node: SemanticNode) invocation sources body names environment expected =
+let private invoke (ctx: WitnessContext) (node: SemanticNode) invocation sources body names environment expected (native: (BoundaryClosedEntry * NativeEntrySignature) option) =
     let demand = ctx.Graph.Emission.Ordinary
     let projection = demand.Calls.TryFind node.Id
     let transported =
         match projection with
         | Some proof when proof.Actuals = sources ->
+            if native.IsSome then Result.Ok sources else
             sources |> List.indexed |> List.choose (fun (ordinal, source) -> if proof.Omitted.Contains ordinal then None else Some source) |> Result.Ok
         | Some _ -> Result.Error "Call transport disagrees with its exact source demand projection"
         | None -> Result.Ok sources
@@ -93,6 +94,10 @@ let private invoke (ctx: WitnessContext) (node: SemanticNode) invocation sources
             | Result.Ok shape -> observe ctx node prefix (pLazyApplication node.Id invocation actuals shape)
         | _ ->
             match invocation, body with
+            | Direct _, Some _ when native |> Option.exists (fun (_, signature) -> signature.Result.IsNone) ->
+                if not (Operands.hasUnitResult ctx.Graph node.Id) then
+                    failure node "result boundary" "Closed native unit call lacks its exact source unit result."
+                else observe ctx node prefix (pUnitApplication node.Id invocation actuals)
             | Direct symbol, Some body ->
                 // The call's result is held at its declaration body's settled width.
                 let resultType = mapTypeAt body ctx
@@ -113,12 +118,15 @@ let private direct (ctx: WitnessContext) (node: SemanticNode) binding (sources: 
     let demand = ctx.Graph.Emission.Ordinary
     match declared with
     | Some(symbol, parameters, body, implementation) ->
+        match Operands.closedNativeDefinition ctx.Graph implementation with
+        | Result.Error reason -> failure node "closed native boundary" reason
+        | Result.Ok native ->
         if parameters.Length <> sources.Length then
             failure node "declared boundary" "Settled direct call does not supply its actual declared parameters"
         else
             let names =
                 parameters |> List.collect (fun (name, _, formal) ->
-                    if (demand.Parameters.TryFind implementation |> Option.defaultValue Set.empty).Contains formal then [] else
+                    if native.IsNone && (demand.Parameters.TryFind implementation |> Option.defaultValue Set.empty).Contains formal then [] else
                     match Operands.valueShape ctx formal with
                     | Result.Ok(CallableValueShape.Callable _) ->
                         match Operands.project ctx formal with
@@ -131,7 +139,8 @@ let private direct (ctx: WitnessContext) (node: SemanticNode) binding (sources: 
             | Result.Error reason -> failure node "parameter boundary" reason
             | Result.Ok components ->
                 let expected = List.concat components
-                invoke ctx node (Direct symbol) sources (Some body) (Some names) None (Some expected)
+                let symbol = if native.IsSome then ctx.Graph.Emission.Callable.NativeEntries[implementation] else symbol
+                invoke ctx node (Direct symbol) sources (Some body) (Some names) None (Some expected) native
     | _ -> failure node "declaration identity" "Direct call lacks its settled declaration symbol and actual lambda boundary"
 
 let private witnessApplication (ctx: WitnessContext) (node: SemanticNode) =
@@ -150,7 +159,7 @@ let private witnessApplication (ctx: WitnessContext) (node: SemanticNode) =
         | None ->
             match MLIRAccumulator.recallCallable callee ctx.Accumulator with
             | Some callable ->
-                invoke ctx node (Indirect(Operands.code callable)) supplied None None (Operands.environment callable) None
+                invoke ctx node (Indirect(Operands.code callable)) supplied None None (Operands.environment callable) None None
             | None ->
                 match projection.IntrinsicAliases.Contains callee, projection.DirectCallees.TryFind callee with
                 | true, _ -> WitnessOutput.skip

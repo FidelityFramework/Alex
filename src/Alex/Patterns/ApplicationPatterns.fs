@@ -38,6 +38,14 @@ let private pInvoke invocation arguments results = parser {
         return! pFuncCallIndirectResults results code.SSA arguments
 }
 
+/// The native call has no result; its source expression retains canonical unit.
+let pUnitApplication nodeId invocation arguments =
+    let call = parser {
+        let! operation = pInvoke invocation arguments []
+        return [operation], TRVoid
+    }
+    Alex.Patterns.LiteralPatterns.pWithUnitResult nodeId call
+
 /// A function-valued result keeps both operands through the ordinary func
 /// operation. Its source-owned carrier was projected at the current occurrence.
 let pCallableApplication nodeId invocation arguments shape = parser {

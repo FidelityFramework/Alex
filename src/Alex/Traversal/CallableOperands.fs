@@ -21,6 +21,51 @@ let private collect results =
     | Some reason -> Result.Error reason
     | None -> Result.Ok(results |> List.choose (function Result.Ok value -> Some value | _ -> None))
 
+/// A logical unit token is distinct from an integer sharing its physical carrier.
+let hasUnitResult (graph: Revision) body =
+    (graph.Nodes.TryFind body |> Option.exists (fun node -> TypeIdentity.isUnit node.Type)) &&
+    graph.Emission.Callable.UnitNodes.Contains body &&
+    graph.Emission.Numeric.OccurrenceRepresentations.TryFind body = Some(Result.Ok(ValueRepresentation.Scalar SettledSlot.Unit))
+
+let isUnitResultToken (graph: Revision) body (_, actualType) =
+    hasUnitResult graph body && actualType = Alex.CodeGeneration.TypeMapping.representationType (ValueRepresentation.Scalar SettledSlot.Unit)
+
+/// One source-owned closed implementation boundary shared by definitions and uses.
+let closedNativeDefinition (graph: Revision) implementation =
+    let boundary = graph.Emission.Boundary
+    let entries = boundary.ClosedEntries.Values |> Seq.filter (fun entry -> entry.Implementation = implementation) |> Seq.toList
+    match entries with
+    | [] -> Result.Ok None
+    | first :: _ ->
+        let signatures = entries |> List.map (fun entry -> boundary.CallbackInvocations.TryFind entry.Invocation |> Option.map _.Signature)
+        match signatures with
+        | Some signature :: rest when
+            (rest |> List.forall ((=) (Some signature))) &&
+            (entries |> List.forall (fun entry ->
+                entry.Formals = first.Formals && entry.Body = first.Body &&
+                entry.Lifetime = first.Lifetime && entry.ParameterAdaptations = first.ParameterAdaptations &&
+                entry.ResultAdaptation = first.ResultAdaptation)) ->
+            let unitResult =
+                signature.Result.IsNone &&
+                signature.CallingConvention = "CDecl" &&
+                not signature.Parameters.IsEmpty &&
+                (signature.Parameters |> List.forall (function BoundaryScalar.Integer _ -> true | _ -> false)) &&
+                (entries |> List.forall (fun entry ->
+                    (boundary.CallbackInvocations.TryFind entry.Invocation |> Option.exists (fun invocation ->
+                        invocation.Contract.Signature.ReturnType = BAREWire.Descriptors.TypeRef.Void &&
+                        invocation.Contract.Signature.CallingConvention = BAREWire.Descriptors.CallConv.CDecl)) &&
+                    hasUnitResult graph entry.Body &&
+                    (graph.Emission.Callable.Declarations.TryFind entry.Implementation |> Option.exists (fun declaration -> declaration.Result = entry.Body)) &&
+                    entry.ResultAdaptation.IsNone && not (graph.Codata.ReturnMeets.ContainsKey entry.Implementation) &&
+                    not (graph.Emission.Numeric.Values.ContainsKey entry.Body)))
+            if signature.Result.IsNone && not unitResult then
+                Result.Error "Closed native unit result lacks exact Void, unit-body and absent return-adaptation evidence."
+            else
+                match graph.Emission.Callable.NativeEntries.TryFind implementation with
+                | Some symbol when not (System.String.IsNullOrWhiteSpace symbol) -> Result.Ok(Some(first, signature))
+                | _ -> Result.Error "Closed native implementation lacks its source-published code symbol."
+        | _ -> Result.Error "Closed native implementation has absent or incompatible receiving signatures."
+
 /// Read only source-published signature references. This recursion calculates
 /// no expression, discovers no implementation and emits no operations. The
 /// Huet traversal and E/P/W composition still witness every function body.
@@ -140,10 +185,15 @@ let parametersAtCall (ctx: WitnessContext) site implementation parameters =
     let demand = ctx.Graph.Emission.Ordinary
     match projection.Calls.TryFind site with
     | Some proof when proof.Implementation = implementation && proof.Parameters = parameters ->
-        let omitted = demand.Parameters.TryFind implementation |> Option.defaultValue Set.empty
-        parameters |> List.map (fun (_, _, formal) ->
-            if omitted.Contains formal then Result.Ok [] else
-            valueShape ctx formal |> Result.bind (componentsSeen ctx Set.empty proof.SignatureData.Contains)) |> collect
+        closedNativeDefinition ctx.Graph implementation |> Result.bind (function
+            | Some(entry, signature) when entry.Formals = (parameters |> List.map (fun (_, _, formal) -> formal)) ->
+                Result.Ok(signature.Parameters |> List.map (BoundaryAbi.scalarType >> List.singleton))
+            | Some _ -> Result.Error "Closed native direct call omitted or reordered an original formal."
+            | None ->
+                let omitted = demand.Parameters.TryFind implementation |> Option.defaultValue Set.empty
+                parameters |> List.map (fun (_, _, formal) ->
+                    if omitted.Contains formal then Result.Ok [] else
+                    valueShape ctx formal |> Result.bind (componentsSeen ctx Set.empty proof.SignatureData.Contains)) |> collect)
     | _ -> Result.Error "Direct call lacks its exact source-settled signature and actual environment correspondence."
 let functionType shape = shape.FunctionType
 let environmentType shape = shape.EnvironmentType

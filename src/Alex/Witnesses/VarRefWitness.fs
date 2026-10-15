@@ -58,6 +58,38 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
                 | _ -> false
             | _ -> false
         | None -> false
+    let declaredClosedOperand binding =
+        let graph = ctx.Graph
+        let boundary = graph.Emission.Boundary
+        let missing () = Result.Error "Closed native declaration operand lacks its exact original formation, binding, lifetime or address account."
+        match Alex.Traversal.PSGZipper.up ctx.Zipper with
+        | Some parent ->
+            match parent.Focus.Kind with
+            | SemanticKind.Application(callee, [operand]) when operand = node.Id ->
+                match graph.Nodes.TryFind callee with
+                | Some { Kind = SemanticKind.Intrinsic { Module = IntrinsicModule.FnPtr; Operation = "ofFunction" } } ->
+                    match boundary.ClosedEntries.TryFind parent.Focus.Id with
+                    | Some entry when entry.Formation = parent.Focus.Id && entry.Operand = node.Id &&
+                        parent.Focus.Children = [callee; operand] && entry.Declaration = binding &&
+                        entry.Lifetime.Binding = binding && entry.Lifetime.Implementation = entry.Implementation &&
+                        Set.isSubset (Set.ofList [entry.Formation; operand]) entry.Transport ->
+                        match graph.Codata.FunctionPointers.TryFind entry.Formation,
+                              graph.Emission.Callable.NativeEntries.TryFind entry.Implementation,
+                              graph.SourceReadings.BindingUses.TryFind node.Id,
+                              graph.Emission.Callable.Declarations.TryFind entry.Implementation with
+                        | Some(FunctionPointerPlan.Address(symbol, implementation)), Some published,
+                          Some account, Some declaration when symbol = published && implementation = entry.Implementation &&
+                            account.Binding = binding && declaration.Parent = Some binding &&
+                            declaration.Implementation = implementation && declaration.Result = entry.Body &&
+                            (declaration.Parameters |> List.map (fun (_, _, id) -> id)) = entry.Formals ->
+                            Alex.Traversal.CallableOperands.closedNativeDefinition graph implementation
+                            |> Result.bind (function Some _ -> Result.Ok true | None -> missing ())
+                        | _ -> missing ()
+                    | None -> Result.Ok false
+                    | Some _ -> missing ()
+                | _ -> Result.Ok false
+            | _ -> Result.Ok false
+        | None -> Result.Ok false
     let rec assignmentTarget (position: Alex.Traversal.PSGZipper.PSGZipper) =
         match Alex.Traversal.PSGZipper.up position with
         | Some parent ->
@@ -75,6 +107,13 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
             // or SSA value; ordinary callable references keep their normal checks.
             { InlineOps = []; TopLevelOps = []; Result = TRVoid }
         | Some bindingId ->
+            match declaredClosedOperand bindingId with
+            | Result.Error reason -> WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "VarRef") (Some "native declaration operand") reason
+            | Result.Ok true ->
+                // ofFunction consumes this exact declaration through its source
+                // address account, not an ordinary closure value or code SSA.
+                { InlineOps = []; TopLevelOps = []; Result = TRVoid }
+            | Result.Ok false ->
             let valueShape = Alex.Traversal.CallableOperands.valueShape ctx node.Id
             let shapeError = match valueShape with Result.Error reason -> Some reason | Result.Ok _ -> None
             // Observe the reference's published value shape.

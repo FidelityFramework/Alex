@@ -771,3 +771,341 @@ let ``native scalar lambda refuses missing body or stale return meet`` mode reas
     Assert.Empty operations
     Assert.Empty output.InlineOps
     Assert.Empty output.TopLevelOps
+
+/// Contract-only component rows for an admitted closed unit callback. The body
+/// witness below supplies one ordinary effect operation; no source admission or
+/// foreign activation count is inferred by this fixture.
+let private nativeUnitBlock mode =
+    let first = node 900 (SemanticKind.PatternBinding "first") intType [] (Some 904)
+    let second = node 901 (SemanticKind.PatternBinding "second") intType [] (Some 904)
+    let effect = node 902 (SemanticKind.Sequential []) unitType [] (Some 903)
+    let bodyType = if mode = "nonunit" then intType else unitType
+
+    let body =
+        if mode = "unit-literal" then
+            node 903 (SemanticKind.Literal NativeLiteral.Unit) bodyType [] (Some 904)
+        else
+            node 903 (SemanticKind.Sequential [ effect.Id ]) bodyType [ 902 ] (Some 904)
+
+    let parameters = [ "first", intType, first.Id; "second", intType, second.Id ]
+    let functionType = functionFrom intType (functionFrom intType bodyType)
+
+    let implementation =
+        node
+            904
+            (SemanticKind.Lambda(parameters, body.Id, [], None, LambdaContext.RegularClosure))
+            functionType
+            [ 900; 901; 903 ]
+            (Some 905)
+
+    let binding =
+        node 905 (SemanticKind.Binding("nativeUnit", false, false, None)) functionType [ 904 ] None
+
+    let participants =
+        Set.ofList [ first.Id; second.Id; effect.Id; body.Id; implementation.Id; binding.Id ]
+
+    let name = CallableSymbolName.RootBinding "nativeUnit"
+
+    let declaration: CallableEmissionDeclaration =
+        {
+            Lookup = implementation.Id
+            Implementation = implementation.Id
+            Parameters = parameters
+            Result = body.Id
+            Context = LambdaContext.RegularClosure
+            Captures = []
+            Name = name
+            Parent = Some binding.Id
+            Participants = participants
+        }
+
+    let nativeParameters: BAREWire.Descriptors.ParameterInfo array =
+        [|
+            for name in [ "first"; "second" ] ->
+                {
+                    Name = name
+                    Type = BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Signed, 64)
+                    PassBy = BAREWire.Descriptors.PassBy.Value
+                }
+        |]
+
+    let invocation: BoundaryCallbackInvocation =
+        {
+            Identity = NodeId 907
+            Import = NodeId 908
+            Parameter = 0
+            Formal = NodeId 909
+            Scope = NodeId 910
+            Signature =
+                {
+                    Parameters = [ BoundaryScalar.Integer(64, true); BoundaryScalar.Integer(64, true) ]
+                    Result = None
+                    CallingConvention = "CDecl"
+                }
+            Contract =
+                {
+                    Binding = "Fixture.receive"
+                    Parameter = 0
+                    Signature =
+                        {
+                            Parameters = nativeParameters
+                            ReturnType =
+                                if mode = "raw-nonvoid" then
+                                    BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Signed, 64)
+                                else
+                                    BAREWire.Descriptors.TypeRef.Void
+                            CallingConvention = BAREWire.Descriptors.CallConv.CDecl
+                        }
+                    Hypothesis =
+                        {
+                            Identity = "fixture.unit"
+                            Version = "1"
+                            Source = "component-values"
+                        }
+                    Scope = "Fixture.scope"
+                }
+            Participants = participants
+        }
+
+    let meet =
+        {
+            Consumer = body.Id
+            Operand = body.Id
+            From = 64
+            To = 32
+            Adapt = MeetKind.Truncate
+        }
+
+    let entry: BoundaryClosedEntry =
+        {
+            Formation = NodeId 906
+            Operand = binding.Id
+            Declaration = binding.Id
+            Implementation = implementation.Id
+            Formals = [ first.Id; second.Id ]
+            Body = body.Id
+            Lifetime =
+                {
+                    Module = binding.Id
+                    Binding = binding.Id
+                    Implementation = implementation.Id
+                }
+            Invocation = invocation.Identity
+            ParameterAdaptations = [ None; None ]
+            ResultAdaptation = if mode = "meet" then Some meet else None
+            Transport = participants
+            Participants = participants
+        }
+
+    let data = [ first; second; effect; body ]
+
+    let callable =
+        { Empty.callable with
+            Declarations = Map.ofList [ implementation.Id, declaration ]
+            Symbols = Map.ofList [ implementation.Id, name ]
+            NativeEntries =
+                Map.ofList
+                    [
+                        implementation.Id,
+                        (if mode.StartsWith "unit-" then
+                             "published_native_unit"
+                         else
+                             "nativeUnit")
+                    ]
+            UnitNodes =
+                if mode = "missing-unit-row" then
+                    Set.singleton effect.Id
+                else
+                    Set.ofList [ effect.Id; body.Id ]
+            ValueShapes =
+                data
+                |> List.map (fun node -> node.Id, CallableValueShape.Data node.Id)
+                |> Map.ofList
+            AliasTargets = data |> List.map (fun node -> node.Id, node.Id) |> Map.ofList
+            ClosedData = Set.ofList (idsOf data)
+            Supports = data |> List.map (fun node -> node.Id, Set.singleton node.Id) |> Map.ofList
+        }
+
+    let graph =
+        { revision [ first; second; effect; body; implementation; binding ] with
+            Codata =
+                { Codata.empty with
+                    ReturnMeets =
+                        if mode = "meet" then
+                            Map.ofList [ implementation.Id, meet ]
+                        else
+                            Map.empty
+                }
+            Emission =
+                { Empty.emission with
+                    Callable = callable
+                    Ordinary =
+                        { Empty.ordinary with
+                            Parameters = Map.ofList [ implementation.Id, Set.ofList [ first.Id; second.Id ] ]
+                        }
+                    Boundary =
+                        { Empty.boundary with
+                            ClosedEntries = Map.ofList [ entry.Formation, entry ]
+                            CallbackInvocations = Map.ofList [ invocation.Identity, invocation ]
+                        }
+                    Numeric =
+                        { Empty.numeric with
+                            OccurrenceRepresentations =
+                                Map.ofList
+                                    [
+                                        first.Id, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(64, None)))
+                                        second.Id, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(64, None)))
+                                        (effect.Id, unitForm)
+                                        (body.Id,
+                                         if mode = "wrong-unit-representation" then
+                                             Ok(ValueRepresentation.Scalar(SettledSlot.Integer(32, None)))
+                                         else unitForm)
+                                    ]
+                        }
+                }
+        }
+        |> declareBindingReadings
+
+    let accumulator = MLIRAccumulator.empty ()
+    let scope = ref (ScopeContext.root ())
+    let visited = ref Set.empty
+
+    let ctx =
+        {
+            Coeffects = coeffects 64
+            Accumulator = accumulator
+            RootAccumulator = accumulator
+            ScopeContext = scope
+            RootScopeContext = scope
+            Graph = graph
+            Zipper = focus graph implementation
+            GlobalVisited = visited
+            TraversalVisited = visited
+        }
+
+    let effectOperation = MLIROp.FuncOp(FuncCall([], "fixture_effect", []))
+
+    let combinator (context: WitnessContext) (current: SemanticNode) =
+        if current.Id = effect.Id then
+            { WitnessOutput.empty with
+                InlineOps = [ effectOperation ]
+            }
+        elif current.Id = body.Id && mode = "unit-literal" then
+            Alex.Witnesses.LiteralWitness.nanopass.Witness context current
+        elif current.Id = body.Id && mode = "unit-block" then
+            let pattern =
+                Alex.Patterns.LiteralPatterns.pWithUnitResult body.Id (XParsec.Parsers.preturn ([], TRVoid))
+
+            match
+                Alex.XParsec.PSGCombinators.tryMatchWithDiagnostics
+                    pattern
+                    context.Graph
+                    current
+                    context.Zipper
+                    context.Coeffects
+                    context.Accumulator
+            with
+            | Ok((operations, result), _) ->
+                { WitnessOutput.empty with
+                    InlineOps = operations
+                    Result = result
+                }
+            | Result.Error reason -> WitnessOutput.error reason
+        elif current.Id = body.Id && mode = "result-ssa" then
+            { WitnessOutput.empty with
+                Result =
+                    TRValue
+                        {
+                            SSA = V(903, 0)
+                            Type = TInt(IntWidth 64)
+                        }
+            }
+        else
+            WitnessOutput.empty
+
+    let output =
+        (Alex.Witnesses.LambdaWitness.createNanopass (fun () -> combinator)).Witness ctx implementation
+
+    output, ScopeContext.getOps scope.Value, MLIRAccumulator.recallNode body.Id accumulator, effectOperation
+
+[<Fact>]
+let ``native unit callback retains effects and unused formals with zero physical results`` () =
+    let output, operations, operand, effect = nativeUnitBlock "current"
+
+    match output.Result with
+    | TRError error -> failwith error.Message
+    | _ -> ()
+
+    let parameters, body =
+        operations
+        |> List.choose (function
+            | MLIROp.FuncOp(FuncDef("nativeUnit", parameters, [], body, _)) -> Some(parameters, body)
+            | _ -> None)
+        |> Assert.Single
+
+    Assert.True((parameters = [ Arg 0, TInt(IntWidth 64); Arg 1, TInt(IntWidth 64) ]))
+    Assert.True((body = [ effect; MLIROp.FuncOp(Return []) ]))
+    Assert.True(operand.IsNone)
+
+    Assert.DoesNotContain(
+        body,
+        function
+        | MLIROp.ArithOp(ArithOp.ConstI _) -> true
+        | _ -> false
+    )
+
+[<Theory>]
+[<InlineData("raw-nonvoid",
+             "Callable formal components: Closed native unit result lacks exact Void, unit-body and absent return-adaptation evidence.")>]
+[<InlineData("nonunit",
+             "Callable formal components: Closed native unit result lacks exact Void, unit-body and absent return-adaptation evidence.")>]
+[<InlineData("missing-unit-row",
+             "Callable formal components: Closed native unit result lacks exact Void, unit-body and absent return-adaptation evidence.")>]
+[<InlineData("meet",
+             "Callable formal components: Closed native unit result lacks exact Void, unit-body and absent return-adaptation evidence.")>]
+[<InlineData("result-ssa", "Closed native unit result produced a witnessed value or component.")>]
+[<InlineData("wrong-unit-representation",
+             "Callable formal components: Closed native unit result lacks exact Void, unit-body and absent return-adaptation evidence.")>]
+let ``native unit callback refuses incomplete or value producing result account`` mode reason =
+    let output, operations, operand, _ = nativeUnitBlock mode
+
+    match output.Result with
+    | TRError error -> Assert.Equal(reason, error.Message)
+    | actual -> failwithf "Unsupported unit result admitted: %A" actual
+
+    Assert.Empty operations
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+    Assert.True(operand.IsNone)
+
+[<Theory>]
+[<InlineData("unit-literal", false)>]
+[<InlineData("unit-block", true)>]
+let ``native unit callback consumes canonical literal and block tokens`` mode retainsEffect =
+    let output, operations, _, effect = nativeUnitBlock mode
+
+    match output.Result with
+    | TRError error -> failwith error.Message
+    | _ -> ()
+
+    let parameters, body =
+        operations
+        |> List.choose (function
+            | MLIROp.FuncOp(FuncDef("published_native_unit", parameters, [], body, _)) -> Some(parameters, body)
+            | _ -> None)
+        |> Assert.Single
+
+    Assert.True((parameters = [ Arg 0, TInt(IntWidth 64); Arg 1, TInt(IntWidth 64) ]))
+    Assert.True((List.last body = MLIROp.FuncOp(Return [])))
+    Assert.Equal(retainsEffect, List.contains effect body)
+
+    let units =
+        body
+        |> List.choose (function
+            | MLIROp.ArithOp(ArithOp.ConstI(_, 0L, ty)) -> Some ty
+            | _ -> None)
+
+    Assert.Equal<MLIRType>(
+        Alex.CodeGeneration.TypeMapping.representationType (ValueRepresentation.Scalar SettledSlot.Unit),
+        Assert.Single units
+    )

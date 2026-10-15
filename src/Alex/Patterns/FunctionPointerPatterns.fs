@@ -21,9 +21,11 @@ let closedFunctionAddress (graph: Revision) (site: NodeId) =
                 (declaration.Parameters |> List.map (fun (_, _, id) -> id)) = entry.Formals &&
                 declaration.Result = entry.Body && declaration.Captures.IsEmpty &&
                 entry.ParameterAdaptations.Length = entry.Formals.Length ->
-            if invocation.Signature.Parameters.Length <> entry.Formals.Length then
-                Result.Error "Closed native entry omitted an original native formal."
-            else Result.Ok(entry, symbol, BoundaryAbi.signatureType invocation.Signature)
+            match Alex.Traversal.CallableOperands.closedNativeDefinition graph entry.Implementation with
+            | Result.Error reason -> Result.Error reason
+            | Result.Ok(Some(_, signature)) when signature.Parameters.Length = entry.Formals.Length ->
+                Result.Ok(entry, symbol, BoundaryAbi.signatureType signature)
+            | _ -> Result.Error "Closed native entry omitted an original native formal."
         | _ -> Result.Error "Closed native entry lacks its exact invocation signature and complete declaration."
     | _ -> Result.Error "A native function address lacks its original ProgramImage code lifetime and symbol."
 

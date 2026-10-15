@@ -90,15 +90,25 @@ let private nativeAlternative (graph: Revision) (row: CallableAggregateValue)
             let heldLifetime = carrier.Lifetime |> List.filter (fun part -> part.Role = ParticipantRole.CallableLifetime) |> List.map _.Node |> Set.ofList
             let arguments = contract.ParameterRepresentations |> List.map (snd >> representationType)
             let result = representationType contract.ResultRepresentation
-            let receivingType = TFunc(arguments, if result = TVoid then [] else [result])
-            if entry.Implementation <> carrier.Implementation || entry.Formals <> (carrier.Parameters |> List.map (fun (_, _, id) -> id)) ||
-               entry.Body <> carrier.Result || lifetime <> heldLifetime ||
-               not (Set.isSubset (Set.ofList [row.Occurrence; row.Aggregate; carrier.Occurrence; arm.Formation]) entry.Transport) then
-                error "lost its exact current entry formation, transport, declaration or program-image lifetime."
-            elif List.map fst contract.ParameterRepresentations <> [0 .. entry.Formals.Length - 1] ||
-                 contract.ParameterTypes.Length <> entry.Formals.Length || receivingType <> nativeType then
-                error "receiving contract differs from the complete native invocation ABI."
-            else Result.Ok carrier
+            let receivingResults =
+                match Operands.closedNativeDefinition graph entry.Implementation with
+                | Result.Ok(Some(_, signature)) when signature.Result.IsNone &&
+                    TypeIdentity.isUnit contract.ResultType && contract.ResultRepresentation = ValueRepresentation.Scalar SettledSlot.Unit -> Result.Ok []
+                | Result.Ok(Some _) -> Result.Ok(if result = TVoid then [] else [result])
+                | Result.Ok None -> Result.Error "lacks its source-published closed implementation signature."
+                | Result.Error reason -> Result.Error reason
+            match receivingResults with
+            | Result.Error reason -> error reason
+            | Result.Ok receivingResults ->
+                let receivingType = TFunc(arguments, receivingResults)
+                if entry.Implementation <> carrier.Implementation || entry.Formals <> (carrier.Parameters |> List.map (fun (_, _, id) -> id)) ||
+                   entry.Body <> carrier.Result || lifetime <> heldLifetime ||
+                   not (Set.isSubset (Set.ofList [row.Occurrence; row.Aggregate; carrier.Occurrence; arm.Formation]) entry.Transport) then
+                    error "lost its exact current entry formation, transport, declaration or program-image lifetime."
+                elif List.map fst contract.ParameterRepresentations <> [0 .. entry.Formals.Length - 1] ||
+                     contract.ParameterTypes.Length <> entry.Formals.Length || receivingType <> nativeType then
+                    error "receiving contract differs from the complete native invocation ABI."
+                else Result.Ok carrier
 
 let private alternative (graph: Revision) (row: CallableAggregateValue) (arm: CallableAggregateAlternative) =
     let projection = graph.Emission.Callable
