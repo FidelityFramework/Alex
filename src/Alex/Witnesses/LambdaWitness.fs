@@ -61,7 +61,7 @@ let private structuralMembers (position: PSGZipper) =
 
 /// Each real formal owns one scalar or a settled callable's separate operand
 /// components. This reads a signature; it neither visits nor emits a body.
-type private ParameterShape = Scalar | Omitted | Callable of CallableOperands.Shape | Sequence of Alex.Traversal.SequenceOperands.Shape | Lazy of Alex.Traversal.LazyOperands.Shape
+type private ParameterShape = Scalar | Omitted | NativeUnit | Callable of CallableOperands.Shape | Sequence of Alex.Traversal.SequenceOperands.Shape | Lazy of Alex.Traversal.LazyOperands.Shape
 
 let private nativeDefinition (ctx: WitnessContext) =
     CallableOperands.closedNativeDefinition ctx.Graph ctx.Zipper.Focus.Id
@@ -94,7 +94,10 @@ let private parameterComponents (ctx: WitnessContext) parameters =
         | None -> ordinaryParameterComponents ctx parameters
         | Some(entry, signature) ->
             if (parameters |> List.map (fun (_, _, id) -> id)) <> entry.Formals ||
-               signature.Parameters.Length <> parameters.Length || entry.ParameterAdaptations.Length <> parameters.Length then
+               entry.ParameterAdaptations.Length <> parameters.Length then
+                Result.Error "Closed native implementation omitted or reordered an original formal."
+            elif CallableOperands.hasUnitParameterAdapter ctx.Graph entry signature then Result.Ok [[], NativeUnit]
+            elif signature.Parameters.Length <> parameters.Length then
                 Result.Error "Closed native implementation omitted or reordered an original formal."
             else
                 try Result.Ok(signature.Parameters |> List.map (fun scalar -> [BoundaryAbi.scalarType scalar], Scalar))
@@ -214,6 +217,11 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             for ((_, _, paramId), ((_, shape), values)) in List.zip params' (List.zip parameterTypes parameterValues) do
                 match shape, values with
                 | Omitted, [] -> ()
+                | NativeUnit, [] ->
+                    let ssa = Values.value paramId 0
+                    let ty = representationType (ValueRepresentation.Scalar SettledSlot.Unit)
+                    MLIRAccumulator.bindNode paramId ssa ty ctx.Accumulator
+                    bodyScopeRef := ScopeContext.addOp (MLIROp.ArithOp(ArithOp.ConstI(ssa, 0L, ty))) !bodyScopeRef
                 | Scalar, [value] ->
                     let adaptation = native |> Option.bind (fun (entry, _) -> List.zip entry.Formals entry.ParameterAdaptations |> List.tryFind (fst >> (=) paramId) |> Option.bind snd)
                     let adapted =

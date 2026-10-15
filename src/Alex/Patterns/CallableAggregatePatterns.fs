@@ -76,11 +76,17 @@ let private nativeAlternative (graph: Revision) (row: CallableAggregateValue)
                 source.Operation = CallableAggregateOperation.Construct && source.Slot = row.Slot &&
                 source.Value = Some actual && source.SelectedAlternative = Some 0 && source.Alternatives = [arm])))
         | _ -> false
+    let unitAdapter =
+        graph.Emission.Boundary.ClosedEntries.TryFind arm.Formation
+        |> Option.exists (fun entry ->
+            graph.Emission.Boundary.CallbackInvocations.TryFind entry.Invocation
+            |> Option.exists (fun invocation -> Operands.hasUnitParameterAdapter graph entry invocation.Signature))
     if not recordOperation then
         error "requires an exact record-field Construct or FieldGet Project; union transport is not admitted."
     elif not singleton || not selected || arm.Adapter.IsSome ||
        carrier.Environment.IsSome || carrier.EnvironmentValue.IsSome || arm.EnvironmentPlacement.IsSome ||
-       contract.EnvironmentBytes.IsSome || not carrier.OmittedParameters.IsEmpty || not contract.OmittedParameters.IsEmpty then
+       contract.EnvironmentBytes.IsSome ||
+       (not unitAdapter && (not carrier.OmittedParameters.IsEmpty || not contract.OmittedParameters.IsEmpty)) then
         error "requires one current static Construct/Project selection with no environment, adapter or omitted native formal."
     else
         match FunctionPointerPatterns.closedFunctionAddress graph arm.Formation with
@@ -105,7 +111,7 @@ let private nativeAlternative (graph: Revision) (row: CallableAggregateValue)
                    entry.Body <> carrier.Result || lifetime <> heldLifetime ||
                    not (Set.isSubset (Set.ofList [row.Occurrence; row.Aggregate; carrier.Occurrence; arm.Formation]) entry.Transport) then
                     error "lost its exact current entry formation, transport, declaration or program-image lifetime."
-                elif List.map fst contract.ParameterRepresentations <> [0 .. entry.Formals.Length - 1] ||
+                elif List.map fst contract.ParameterRepresentations <> (if unitAdapter then [] else [0 .. entry.Formals.Length - 1]) ||
                      contract.ParameterTypes.Length <> entry.Formals.Length || receivingType <> nativeType then
                     error "receiving contract differs from the complete native invocation ABI."
                 else Result.Ok carrier

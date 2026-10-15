@@ -64,12 +64,23 @@ let private invoke (ctx: WitnessContext) (node: SemanticNode) invocation sources
     let demand = ctx.Graph.Emission.Ordinary
     let projection = demand.Calls.TryFind node.Id
     let transported =
-        match projection with
-        | Some proof when proof.Actuals = sources ->
+        match native with
+        | Some(entry, signature) when Operands.hasUnitParameterAdapter ctx.Graph entry signature ->
+            match sources, ctx.Graph.Emission.Callable.Calls.TryFind node.Id with
+            | [source], Some proof when proof.Implementation = entry.Implementation && proof.Arguments = sources &&
+                (proof.Parameters |> List.map (fun (_, _, formal) -> formal)) = entry.Formals &&
+                Operands.hasUnitResult ctx.Graph source ->
+                match MLIRAccumulator.recallNode source ctx.Accumulator with
+                | Some value when Operands.isUnitResultToken ctx.Graph source value -> Result.Ok []
+                | _ -> Result.Error "Closed native unit argument lacks its witnessed logical unit value."
+            | _ -> Result.Error "Closed native unit call lacks its exact sole source unit argument account."
+        | _ ->
+          match projection with
+          | Some proof when proof.Actuals = sources ->
             if native.IsSome then Result.Ok sources else
             sources |> List.indexed |> List.choose (fun (ordinal, source) -> if proof.Omitted.Contains ordinal then None else Some source) |> Result.Ok
-        | Some _ -> Result.Error "Call transport disagrees with its exact source demand projection"
-        | None -> Result.Ok sources
+          | Some _ -> Result.Error "Call transport disagrees with its exact source demand projection"
+          | None -> Result.Ok sources
     match transported |> Result.bind (arguments ctx node.Id) with
     | Result.Error reason -> failure node "argument operands" reason
     | Result.Ok (meets, operands) ->
@@ -126,7 +137,8 @@ let private direct (ctx: WitnessContext) (node: SemanticNode) binding (sources: 
         else
             let names =
                 parameters |> List.collect (fun (name, _, formal) ->
-                    if native.IsNone && (demand.Parameters.TryFind implementation |> Option.defaultValue Set.empty).Contains formal then [] else
+                    if (native |> Option.exists (fun (entry, signature) -> Operands.hasUnitParameterAdapter ctx.Graph entry signature)) ||
+                       (native.IsNone && (demand.Parameters.TryFind implementation |> Option.defaultValue Set.empty).Contains formal) then [] else
                     match Operands.valueShape ctx formal with
                     | Result.Ok(CallableValueShape.Callable _) ->
                         match Operands.project ctx formal with

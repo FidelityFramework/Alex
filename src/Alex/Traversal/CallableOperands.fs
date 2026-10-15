@@ -30,6 +30,31 @@ let hasUnitResult (graph: Revision) body =
 let isUnitResultToken (graph: Revision) body (_, actualType) =
     hasUnitResult graph body && actualType = Alex.CodeGeneration.TypeMapping.representationType (ValueRepresentation.Scalar SettledSlot.Unit)
 
+/// The sole logical unit formal is retained by the declaration and omitted only
+/// from its exact source-published native convention.
+let hasUnitParameterAdapter (graph: Revision) (entry: BoundaryClosedEntry) (signature: NativeEntrySignature) =
+    match entry.Formals, graph.Emission.Callable.Carriers.TryFind entry.Formation,
+          graph.Emission.Callable.Declarations.TryFind entry.Implementation with
+    | [formal], Some carrier, Some declaration when signature.Parameters.IsEmpty &&
+        signature.Result.IsNone && entry.ParameterAdaptations = [None] &&
+        carrier.Kind = CallableKind.NativeEntry && carrier.Formation = entry.Formation &&
+        carrier.Implementation = entry.Implementation && carrier.Parameters = declaration.Parameters &&
+        (declaration.Parameters |> List.map (fun (_, _, id) -> id)) = [formal] &&
+        (declaration.Parameters |> List.forall (fun (_, ty, _) -> TypeIdentity.isUnit ty)) &&
+        carrier.OmittedParameters = Set.singleton formal && hasUnitResult graph formal &&
+        not (graph.Emission.Numeric.Values.ContainsKey formal) ->
+        match carrier.Contract |> Result.toOption |> Option.bind graph.Emission.Callable.Contracts.TryFind with
+        | Some contract when contract.Kind = CallableKind.NativeEntry && contract.OmittedParameters = [0] &&
+            contract.ParameterRepresentations.IsEmpty &&
+            contract.ParameterTypes.Length = 1 && (contract.ParameterTypes |> List.forall TypeIdentity.isUnit) &&
+            contract.EnvironmentBytes.IsNone ->
+            match contract.Convention with
+            | CallableConvention.CompilerOwnedPortable convention ->
+                convention.CodeLifetime = entry.Lifetime && convention.ParameterConversions.IsEmpty
+            | _ -> false
+        | _ -> false
+    | _ -> false
+
 /// One source-owned closed implementation boundary shared by definitions and uses.
 let closedNativeDefinition (graph: Revision) implementation =
     let boundary = graph.Emission.Boundary
@@ -48,11 +73,13 @@ let closedNativeDefinition (graph: Revision) implementation =
             let unitResult =
                 signature.Result.IsNone &&
                 signature.CallingConvention = "CDecl" &&
-                not signature.Parameters.IsEmpty &&
+                (not signature.Parameters.IsEmpty ||
+                 (entries |> List.forall (fun entry -> hasUnitParameterAdapter graph entry signature))) &&
                 (signature.Parameters |> List.forall (function BoundaryScalar.Integer _ -> true | _ -> false)) &&
                 (entries |> List.forall (fun entry ->
                     (boundary.CallbackInvocations.TryFind entry.Invocation |> Option.exists (fun invocation ->
                         invocation.Contract.Signature.ReturnType = BAREWire.Descriptors.TypeRef.Void &&
+                        (not signature.Parameters.IsEmpty || invocation.Contract.Signature.Parameters.Length = 0) &&
                         invocation.Contract.Signature.CallingConvention = BAREWire.Descriptors.CallConv.CDecl)) &&
                     hasUnitResult graph entry.Body &&
                     (graph.Emission.Callable.Declarations.TryFind entry.Implementation |> Option.exists (fun declaration -> declaration.Result = entry.Body)) &&
@@ -187,7 +214,8 @@ let parametersAtCall (ctx: WitnessContext) site implementation parameters =
     | Some proof when proof.Implementation = implementation && proof.Parameters = parameters ->
         closedNativeDefinition ctx.Graph implementation |> Result.bind (function
             | Some(entry, signature) when entry.Formals = (parameters |> List.map (fun (_, _, formal) -> formal)) ->
-                Result.Ok(signature.Parameters |> List.map (BoundaryAbi.scalarType >> List.singleton))
+                if hasUnitParameterAdapter ctx.Graph entry signature then Result.Ok [[]]
+                else Result.Ok(signature.Parameters |> List.map (BoundaryAbi.scalarType >> List.singleton))
             | Some _ -> Result.Error "Closed native direct call omitted or reordered an original formal."
             | None ->
                 let omitted = demand.Parameters.TryFind implementation |> Option.defaultValue Set.empty

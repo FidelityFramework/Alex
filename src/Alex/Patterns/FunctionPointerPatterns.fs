@@ -23,7 +23,8 @@ let closedFunctionAddress (graph: Revision) (site: NodeId) =
                 entry.ParameterAdaptations.Length = entry.Formals.Length ->
             match Alex.Traversal.CallableOperands.closedNativeDefinition graph entry.Implementation with
             | Result.Error reason -> Result.Error reason
-            | Result.Ok(Some(_, signature)) when signature.Parameters.Length = entry.Formals.Length ->
+            | Result.Ok(Some(_, signature)) when signature.Parameters.Length = entry.Formals.Length ||
+                Alex.Traversal.CallableOperands.hasUnitParameterAdapter graph entry signature ->
                 Result.Ok(entry, symbol, BoundaryAbi.signatureType signature)
             | _ -> Result.Error "Closed native entry omitted an original native formal."
         | _ -> Result.Error "Closed native entry lacks its exact invocation signature and complete declaration."

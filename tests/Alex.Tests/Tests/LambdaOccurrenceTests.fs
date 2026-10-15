@@ -775,8 +775,10 @@ let ``native scalar lambda refuses missing body or stale return meet`` mode reas
 /// Contract-only component rows for an admitted closed unit callback. The body
 /// witness below supplies one ordinary effect operation; no source admission or
 /// foreign activation count is inferred by this fixture.
-let private nativeUnitBlock mode =
-    let first = node 900 (SemanticKind.PatternBinding "first") intType [] (Some 904)
+let private nativeUnitBlock (mode: string) =
+    let zero = mode.StartsWith "zero"
+    let firstType = if zero && mode <> "zero-type" then unitType else intType
+    let first = node 900 (SemanticKind.PatternBinding "first") firstType [] (Some 904)
     let second = node 901 (SemanticKind.PatternBinding "second") intType [] (Some 904)
     let effect = node 902 (SemanticKind.Sequential []) unitType [] (Some 903)
     let bodyType = if mode = "nonunit" then intType else unitType
@@ -787,15 +789,17 @@ let private nativeUnitBlock mode =
         else
             node 903 (SemanticKind.Sequential [ effect.Id ]) bodyType [ 902 ] (Some 904)
 
-    let parameters = [ "first", intType, first.Id; "second", intType, second.Id ]
-    let functionType = functionFrom intType (functionFrom intType bodyType)
+    let parameters =
+        if zero && mode <> "zero-extra" then [ "first", firstType, first.Id ]
+        else [ "first", firstType, first.Id; "second", intType, second.Id ]
+    let functionType = parameters |> List.foldBack (fun (_, ty, _) result -> functionFrom ty result) <| bodyType
 
     let implementation =
         node
             904
             (SemanticKind.Lambda(parameters, body.Id, [], None, LambdaContext.RegularClosure))
             functionType
-            [ 900; 901; 903 ]
+            ((parameters |> List.map (fun (_, _, id) -> NodeId.value id)) @ [903])
             (Some 905)
 
     let binding =
@@ -828,6 +832,7 @@ let private nativeUnitBlock mode =
                     PassBy = BAREWire.Descriptors.PassBy.Value
                 }
         |]
+    let nativeParameters = if zero && mode <> "zero-signature" then [||] else nativeParameters
 
     let invocation: BoundaryCallbackInvocation =
         {
@@ -838,7 +843,7 @@ let private nativeUnitBlock mode =
             Scope = NodeId 910
             Signature =
                 {
-                    Parameters = [ BoundaryScalar.Integer(64, true); BoundaryScalar.Integer(64, true) ]
+                    Parameters = if zero then [] else [ BoundaryScalar.Integer(64, true); BoundaryScalar.Integer(64, true) ]
                     Result = None
                     CallingConvention = "CDecl"
                 }
@@ -882,7 +887,7 @@ let private nativeUnitBlock mode =
             Operand = binding.Id
             Declaration = binding.Id
             Implementation = implementation.Id
-            Formals = [ first.Id; second.Id ]
+            Formals = parameters |> List.map (fun (_, _, id) -> id)
             Body = body.Id
             Lifetime =
                 {
@@ -891,7 +896,7 @@ let private nativeUnitBlock mode =
                     Implementation = implementation.Id
                 }
             Invocation = invocation.Identity
-            ParameterAdaptations = [ None; None ]
+            ParameterAdaptations = parameters |> List.map (fun _ -> None)
             ResultAdaptation = if mode = "meet" then Some meet else None
             Transport = participants
             Participants = participants
@@ -925,6 +930,27 @@ let private nativeUnitBlock mode =
             ClosedData = Set.ofList (idsOf data)
             Supports = data |> List.map (fun node -> node.Id, Set.singleton node.Id) |> Map.ofList
         }
+    // Contract-only statement of the source-published sole-unit adapter. It
+    // retains the logical formal while its native convention has no parameter.
+    let callable =
+        if not zero then callable else
+        let contract: CallableContract =
+            { Identity = entry.Formation; Kind = CallableKind.NativeEntry
+              Convention = CallableConvention.CompilerOwnedPortable
+                { Target = { Id = "fixture"; Description = None; Loading = None; LibraryPath = None; SourcePaths = Set.empty
+                             Architecture = None; OS = None; RuntimeClaim = None; Substrate = None; Dimensions = Map.empty
+                             Representations = Map.empty; EndpointReturns = Map.empty }
+                  ParameterConversions = []; ResultConversion = CallableConversion.Identity(ValueRepresentation.Scalar SettledSlot.Unit)
+                  CodeLifetime = entry.Lifetime }
+              ParameterTypes = [unitType]; OmittedParameters = [0]; ParameterRepresentations = []
+              ResultType = unitType; ResultRepresentation = ValueRepresentation.Scalar SettledSlot.Unit
+              EnvironmentBytes = None; SourcePremises = Map.empty; Participants = [] }
+        let carrier =
+            { codeCarrier {implementation with Id=entry.Formation} implementation parameters body with
+                Kind = CallableKind.NativeEntry; Formation = entry.Formation; Contract = Ok contract.Identity
+                OmittedParameters = if mode = "zero-omission" then Set.empty else Set.singleton first.Id }
+        {callable with Carriers=Map.ofList[entry.Formation,carrier]; Contracts=Map.ofList[contract.Identity,contract]
+                       UnitNodes=if mode="zero-unit-row" then Set.ofList[effect.Id;body.Id] else Set.ofList[first.Id;effect.Id;body.Id]}
 
     let graph =
         { revision [ first; second; effect; body; implementation; binding ] with
@@ -953,7 +979,7 @@ let private nativeUnitBlock mode =
                             OccurrenceRepresentations =
                                 Map.ofList
                                     [
-                                        first.Id, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(64, None)))
+                                        first.Id, (if zero then unitForm else Ok(ValueRepresentation.Scalar(SettledSlot.Integer(64, None))))
                                         second.Id, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(64, None)))
                                         (effect.Id, unitForm)
                                         (body.Id,
@@ -990,6 +1016,10 @@ let private nativeUnitBlock mode =
             { WitnessOutput.empty with
                 InlineOps = [ effectOperation ]
             }
+        elif current.Id = body.Id && zero then
+            match MLIRAccumulator.recallNode first.Id context.Accumulator with
+            | Some(ssa,ty) -> {WitnessOutput.empty with Result=TRValue{SSA=ssa;Type=ty}}
+            | None -> WitnessOutput.error "Unit formal was not bound"
         elif current.Id = body.Id && mode = "unit-literal" then
             Alex.Witnesses.LiteralWitness.nanopass.Witness context current
         elif current.Id = body.Id && mode = "unit-block" then
@@ -1109,3 +1139,28 @@ let ``native unit callback consumes canonical literal and block tokens`` mode re
         Alex.CodeGeneration.TypeMapping.representationType (ValueRepresentation.Scalar SettledSlot.Unit),
         Assert.Single units
     )
+
+[<Fact>]
+let ``sole unit formal is used logically with zero native parameters`` () =
+    let output,operations,_,effect = nativeUnitBlock "zero"
+    match output.Result with TRError error -> failwith error.Message | _ -> ()
+    let body = operations |> List.choose(function FuncOp(FuncDef("nativeUnit",[],[],body,_))->Some body|_->None) |> Assert.Single
+    Assert.Contains(effect,body)
+    Assert.Contains(MLIROp.ArithOp(ArithOp.ConstI(V(900,0),0L,TInt(IntWidth 32))),body)
+    Assert.Equal(FuncOp(Return []),List.last body)
+
+[<Theory>]
+[<InlineData("zero-omission")>]
+[<InlineData("zero-type")>]
+[<InlineData("zero-unit-row")>]
+[<InlineData("zero-extra")>]
+[<InlineData("zero-signature")>]
+let ``sole unit adapter refuses changed formal account without emission`` mode =
+    let output,operations,operand,_ = nativeUnitBlock mode
+    match output.Result with
+    | TRError error -> Assert.Equal("Callable formal components: Closed native unit result lacks exact Void, unit-body and absent return-adaptation evidence.",error.Message)
+    | actual -> failwithf "Invalid sole unit account admitted: %A" actual
+    Assert.Empty operations
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+    Assert.True(operand.IsNone)
