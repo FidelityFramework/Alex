@@ -589,6 +589,7 @@ let private nativeScalarBlock mode =
                     Scope = "Fixture.scope"
                 }
             Participants = participants
+            Extent = BoundaryCallbackExtent.DuringCall
         }
 
     let returnMeet =
@@ -617,6 +618,7 @@ let private nativeScalarBlock mode =
             Invocation = invocation.Identity
             ParameterAdaptations = []
             ResultAdaptation = (if mode = "stale" then Some returnMeet else None)
+            Registrations = Map.empty
             Transport = participants
             Participants = participants
         }
@@ -870,6 +872,10 @@ let private nativeUnitBlock (mode: string) =
                     Scope = "Fixture.scope"
                 }
             Participants = participants
+            Extent =
+                if mode.StartsWith "zero-exit" then
+                    BoundaryCallbackExtent.ProcessExit((if mode="zero-exit-binding" then Some binding.Id else None),0)
+                else BoundaryCallbackExtent.DuringCall
         }
 
     let meet =
@@ -898,9 +904,29 @@ let private nativeUnitBlock (mode: string) =
             Invocation = invocation.Identity
             ParameterAdaptations = parameters |> List.map (fun _ -> None)
             ResultAdaptation = if mode = "meet" then Some meet else None
+            Registrations = Map.empty
             Transport = participants
             Participants = participants
         }
+
+    let registrationCall: BoundaryCall =
+        { Site=NodeId 911; Import=invocation.Import; Callee=NodeId 912; Entry=None
+          Arguments=[{Actual=(if mode="zero-exit-operand" then NodeId 999 else entry.Formation)
+                      Formal=invocation.Formal; Abi=BoundaryScalar.Entry invocation.Identity; Adaptation=None}]
+          ErasedUnitArguments=[]; Result=Some(BoundaryScalar.Integer(32,true)); ResultAdaptation=None
+          Participants=Set.empty; SourceTypes=Map.empty }
+    let entry =
+        if not (mode.StartsWith "zero-exit") then entry else
+        let context=[NodeId 913]
+        let registration: BoundaryCallbackRegistration =
+            { Call=registrationCall.Site; Parameter=invocation.Parameter
+              Formation=(if mode="zero-exit-formation" then entry.Implementation else entry.Formation)
+              Invocation=invocation.Identity
+              Result=(if mode="zero-exit-result" then entry.Body else registrationCall.Site)
+              Context=context; Participants=Set.empty }
+        let keyContext=if mode="zero-exit-context" then [] else context
+        {entry with Transport=Set.add entry.Formation entry.Transport
+                    Registrations=if mode="zero-exit-missing" then Map.empty else Map.ofList[(registration.Call,registration.Parameter,keyContext),registration]}
 
     let data = [ first; second; effect; body ]
 
@@ -973,6 +999,7 @@ let private nativeUnitBlock (mode: string) =
                         { Empty.boundary with
                             ClosedEntries = Map.ofList [ entry.Formation, entry ]
                             CallbackInvocations = Map.ofList [ invocation.Identity, invocation ]
+                            Calls = if mode.StartsWith "zero-exit" && mode<>"zero-exit-call" then Map.ofList[registrationCall.Site,registrationCall] else Map.empty
                         }
                     Numeric =
                         { Empty.numeric with
@@ -1160,6 +1187,33 @@ let ``sole unit adapter refuses changed formal account without emission`` mode =
     match output.Result with
     | TRError error -> Assert.Equal("Callable formal components: Closed native unit result lacks exact Void, unit-body and absent return-adaptation evidence.",error.Message)
     | actual -> failwithf "Invalid sole unit account admitted: %A" actual
+    Assert.Empty operations
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+    Assert.True(operand.IsNone)
+
+[<Theory>]
+[<InlineData("zero-exit")>]
+[<InlineData("zero-exit-binding")>]
+let ``process exit registration retains original zero argument body without inventing activation`` mode =
+    let output,operations,_,effect=nativeUnitBlock mode
+    match output.Result with TRError error->failwith error.Message|_->()
+    let body=operations |> List.choose(function FuncOp(FuncDef("nativeUnit",[],[],body,_))->Some body|_->None) |> Assert.Single
+    Assert.Contains(effect,body)
+    Assert.Equal(FuncOp(Return []),List.last body)
+
+[<Theory>]
+[<InlineData("zero-exit-missing")>]
+[<InlineData("zero-exit-context")>]
+[<InlineData("zero-exit-formation")>]
+[<InlineData("zero-exit-result")>]
+[<InlineData("zero-exit-operand")>]
+[<InlineData("zero-exit-call")>]
+let ``process exit callback refuses incomplete registration incidence`` mode =
+    let output,operations,operand,_=nativeUnitBlock mode
+    match output.Result with
+    | TRError error->Assert.Equal("Callable formal components: Closed native callback extent lacks its exact finite registration account.",error.Message)
+    | actual->failwithf "Invalid registration admitted: %A" actual
     Assert.Empty operations
     Assert.Empty output.InlineOps
     Assert.Empty output.TopLevelOps

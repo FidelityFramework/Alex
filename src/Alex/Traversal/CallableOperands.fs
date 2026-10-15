@@ -62,6 +62,28 @@ let closedNativeDefinition (graph: Revision) implementation =
     match entries with
     | [] -> Result.Ok None
     | first :: _ ->
+        let registrationAccount (entry: BoundaryClosedEntry) =
+            match boundary.CallbackInvocations.TryFind entry.Invocation with
+            | Some invocation ->
+                match invocation.Extent with
+                | BoundaryCallbackExtent.DuringCall -> entry.Registrations.IsEmpty
+                | BoundaryCallbackExtent.ProcessExit _ ->
+                    hasUnitParameterAdapter graph entry invocation.Signature &&
+                    not entry.Registrations.IsEmpty &&
+                    (entry.Registrations |> Map.forall (fun (site, ordinal, context) registration ->
+                        registration.Call = site && registration.Parameter = ordinal && registration.Context = context &&
+                        registration.Formation = entry.Formation && registration.Invocation = invocation.Identity &&
+                        registration.Result = site && ordinal = invocation.Parameter &&
+                        (boundary.Calls.TryFind site |> Option.exists (fun call ->
+                            call.Site = site && call.Import = invocation.Import &&
+                            (call.Result |> Option.exists (function BoundaryScalar.Integer _ -> true | _ -> false)) &&
+                            (call.Arguments |> List.tryItem ordinal |> Option.exists (fun operand ->
+                                operand.Formal = invocation.Formal && operand.Abi = BoundaryScalar.Entry invocation.Identity &&
+                                entry.Transport.Contains operand.Actual))))))
+            | None -> true // The shared signature reading below owns absence.
+        if not (entries |> List.forall registrationAccount) then
+            Result.Error "Closed native callback extent lacks its exact finite registration account."
+        else
         let signatures = entries |> List.map (fun entry -> boundary.CallbackInvocations.TryFind entry.Invocation |> Option.map _.Signature)
         match signatures with
         | Some signature :: rest when
