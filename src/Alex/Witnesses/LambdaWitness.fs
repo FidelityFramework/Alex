@@ -303,7 +303,7 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
 
             // Get body result for return value
             let actualValueNode = findLastValueNode bodyId ctx.Graph
-            let bodyResult = MLIRAccumulator.recallNode actualValueNode ctx.Accumulator
+            let bodyResult = MLIRAccumulator.recallNode bodyId ctx.Accumulator
             let bodyCallable =
                 match MLIRAccumulator.recallCallable actualValueNode ctx.Accumulator with
                 | Some _ ->
@@ -350,6 +350,13 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                 | Some values -> (List.head values).Type
                 | None -> mapTypeAt bodyId ctx
             let returnMeet = Map.tryFind node.Id ctx.Graph.Codata.ReturnMeets |> Option.map (fun m -> m, Values.returnMeetValue node.Id)
+            let returnError =
+                match bodyComponents, bodyResult, returnMeet with
+                | None, None, _ when not (Values.isUnitTyped ctx.Graph bodyId) ->
+                    Some "Lambda result lacks a witnessed value at its published body occurrence."
+                | None, Some(_, actualType), Some(meet, _) when actualType <> TInt(IntWidth meet.From) ->
+                    Some "Lambda return meet does not start at its witnessed body carrier."
+                | _ -> None
             let returnType =
                 match bodyComponents, returnMeet, bodyResult with
                 | Some values, _, _ -> (List.head values).Type
@@ -364,8 +371,8 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                     "Closed native result differs from its exact source return meet and receiving ABI.") ctx.Accumulator
             | _ -> ()
             let returnMeetOps =
-                match returnMeet, bodyResult with
-                | Some (meet, result), Some (ssa, _) -> [ meetOp meet result ssa ]
+                match returnError, returnMeet, bodyResult with
+                | None, Some (meet, result), Some (ssa, _) -> [ meetOp meet result ssa ]
                 | _ -> []
             let bodyOps = bodyOps @ returnMeetOps
 
@@ -414,6 +421,9 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                 | None, _ ->
                     pFunctionDef visibility funcName funcParams (Some paramNames) returnType bodyOps returnSSA
                         (match Revision.tryNode bodyId ctx.Graph with Some b when Values.isUnitTyped ctx.Graph b.Id -> Some (Values.unitReturnValue node.Id) | _ -> None)
+            match returnError with
+            | Some reason -> WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Lambda") (Some "return occurrence") reason
+            | None ->
             match tryMatchWithDiagnostics definition ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
             | Result.Ok (funcDefOp, _) ->
                 EmissionCorrespondence.record ctx [funcDefOp]

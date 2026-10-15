@@ -521,3 +521,253 @@ let ``occurrence-bound formal read emits its settled refinement before consumpti
         let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "refined_formal" [definition]
         Alex.Tests.Tools.mlirOpt ["--verify-each"] text |> ignore
     | other -> failwithf "No value from refined formal read: %A" other
+
+/// Passive component fixture: the block has already witnessed its exact i32
+/// result while the nested leaf remains i64. No source admission is asserted.
+let private nativeScalarBlock mode =
+    let leaf =
+        node
+            800
+            (SemanticKind.Literal(NativeLiteral.Int(4294967295L, NTUKind.NTUint(NTUWidth.Resolved WidthDimension.Register))))
+            intType
+            []
+            (Some 801)
+
+    let body = node 801 (SemanticKind.Sequential [ leaf.Id ]) intType [ 800 ] (Some 802)
+
+    let implementation =
+        node 802 (SemanticKind.Lambda([], body.Id, [], None, LambdaContext.RegularClosure)) intType [ 801 ] (Some 803)
+
+    let binding =
+        node 803 (SemanticKind.Binding("nativeBlock", false, false, None)) intType [ 802 ] None
+
+    let participants = Set.ofList [ leaf.Id; body.Id; implementation.Id; binding.Id ]
+    let name = CallableSymbolName.RootBinding "nativeBlock"
+
+    let declaration: CallableEmissionDeclaration =
+        {
+            Lookup = implementation.Id
+            Implementation = implementation.Id
+            Parameters = []
+            Result = body.Id
+            Context = LambdaContext.RegularClosure
+            Captures = []
+            Name = name
+            Parent = Some binding.Id
+            Participants = participants
+        }
+
+    let invocation: BoundaryCallbackInvocation =
+        {
+            Identity = NodeId 804
+            Import = NodeId 805
+            Parameter = 0
+            Formal = NodeId 806
+            Scope = NodeId 807
+            Signature =
+                {
+                    Parameters = []
+                    Result = Some(BoundaryScalar.Integer(32, false))
+                    CallingConvention = "CDecl"
+                }
+            Contract =
+                {
+                    Binding = "Fixture.receive"
+                    Parameter = 0
+                    Signature =
+                        {
+                            Parameters = [||]
+                            ReturnType = BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Unsigned, 32)
+                            CallingConvention = BAREWire.Descriptors.CallConv.CDecl
+                        }
+                    Hypothesis =
+                        {
+                            Identity = "fixture"
+                            Version = "1"
+                            Source = "component-values"
+                        }
+                    Scope = "Fixture.scope"
+                }
+            Participants = participants
+        }
+
+    let returnMeet =
+        {
+            Consumer = body.Id
+            Operand = leaf.Id
+            From = 64
+            To = 32
+            Adapt = MeetKind.Truncate
+        }
+
+    let entry: BoundaryClosedEntry =
+        {
+            Formation = NodeId 808
+            Operand = binding.Id
+            Declaration = binding.Id
+            Implementation = implementation.Id
+            Formals = []
+            Body = body.Id
+            Lifetime =
+                {
+                    Module = binding.Id
+                    Binding = binding.Id
+                    Implementation = implementation.Id
+                }
+            Invocation = invocation.Identity
+            ParameterAdaptations = []
+            ResultAdaptation = (if mode = "stale" then Some returnMeet else None)
+            Transport = participants
+            Participants = participants
+        }
+
+    let data = [ leaf.Id; body.Id ]
+
+    let callable =
+        { Empty.callable with
+            Declarations = Map.ofList [ implementation.Id, declaration ]
+            Symbols = Map.ofList [ implementation.Id, name ]
+            NativeEntries = Map.ofList [ implementation.Id, "nativeBlock" ]
+            ValueShapes = data |> List.map (fun id -> id, CallableValueShape.Data id) |> Map.ofList
+            AliasTargets = data |> List.map (fun id -> id, id) |> Map.ofList
+            ClosedData = Set.ofList data
+            Supports = data |> List.map (fun id -> id, Set.singleton id) |> Map.ofList
+        }
+
+    let boundary =
+        { Empty.boundary with
+            ClosedEntries = Map.ofList [ entry.Formation, entry ]
+            CallbackInvocations = Map.ofList [ invocation.Identity, invocation ]
+        }
+
+    let numeric =
+        { Empty.numeric with
+            OccurrenceRepresentations =
+                Map.ofList
+                    [
+                        leaf.Id, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(64, None)))
+                        body.Id, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(32, None)))
+                    ]
+        }
+
+    let stated = revision [ leaf; body; implementation; binding ]
+
+    let graph =
+        { stated with
+            Codata =
+                { Codata.empty with
+                    ReturnMeets =
+                        (if mode = "stale" then
+                             Map.ofList [ implementation.Id, returnMeet ]
+                         else
+                             Map.empty)
+                }
+            Emission =
+                { Empty.emission with
+                    Callable = callable
+                    Boundary = boundary
+                    Numeric = numeric
+                }
+        }
+        |> declareBindingReadings
+
+    let accumulator = MLIRAccumulator.empty ()
+    let scope = ref (ScopeContext.root ())
+    let visited = ref Set.empty
+
+    let ctx =
+        {
+            Coeffects = coeffects 64
+            Accumulator = accumulator
+            RootAccumulator = accumulator
+            ScopeContext = scope
+            RootScopeContext = scope
+            Graph = graph
+            Zipper = focus graph implementation
+            GlobalVisited = visited
+            TraversalVisited = visited
+        }
+
+    let combinator (_: WitnessContext) (current: SemanticNode) =
+        if current.Id = leaf.Id then
+            {
+                InlineOps = [ MLIROp.ArithOp(ArithOp.ConstI(V(800, 0), 4294967295L, TInt(IntWidth 64))) ]
+                TopLevelOps = []
+                Result =
+                    TRValue
+                        {
+                            SSA = V(800, 0)
+                            Type = TInt(IntWidth 64)
+                        }
+            }
+        elif mode = "missing" then
+            WitnessOutput.empty
+        else
+            {
+                InlineOps =
+                    [
+                        MLIROp.ArithOp(ArithOp.TruncI(V(801, 0), V(800, 0), TInt(IntWidth 64), TInt(IntWidth 32)))
+                    ]
+                TopLevelOps = []
+                Result =
+                    TRValue
+                        {
+                            SSA = V(801, 0)
+                            Type = TInt(IntWidth 32)
+                        }
+            }
+
+    let output =
+        (Alex.Witnesses.LambdaWitness.createNanopass (fun () -> combinator)).Witness ctx implementation
+
+    output, ScopeContext.getOps scope.Value
+
+[<Fact>]
+let ``native scalar lambda returns the published block carrier without a duplicate conversion`` () =
+    let output, operations = nativeScalarBlock "current"
+
+    match output.Result with
+    | TRError error -> failwith error.Message
+    | _ -> ()
+
+    let body =
+        operations
+        |> List.choose (function
+            | MLIROp.FuncOp(FuncDef("nativeBlock", [], [ TInt(IntWidth 32) ], body, _)) -> Some body
+            | _ -> None)
+        |> Assert.Single
+
+    Assert.Equal(
+        1,
+        body
+        |> List.filter (function
+            | MLIROp.ArithOp(ArithOp.TruncI _) -> true
+            | _ -> false)
+        |> List.length
+    )
+
+    Assert.Equal(
+        MLIROp.FuncOp(
+            Return[{
+                       SSA = V(801, 0)
+                       Type = TInt(IntWidth 32)
+                   }]
+        ),
+        List.last body
+    )
+
+[<Theory>]
+[<InlineData("missing", "Lambda result lacks a witnessed value at its published body occurrence.")>]
+[<InlineData("stale", "Lambda return meet does not start at its witnessed body carrier.")>]
+let ``native scalar lambda refuses missing body or stale return meet`` mode reason =
+    let output, operations = nativeScalarBlock mode
+
+    match output.Result with
+    | TRError error ->
+        Assert.Equal(Some AX4001, error.Code)
+        Assert.Equal(reason, error.Message)
+    | actual -> failwithf "Invalid native scalar return was admitted: %A" actual
+
+    Assert.Empty operations
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
