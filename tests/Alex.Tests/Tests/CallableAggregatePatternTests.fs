@@ -70,7 +70,7 @@ let private withAccounts (graph: Revision) =
           Participants = participants; Sources = sources
           Claims = ids |> List.choose (fun id -> graph.CurrentClaims.TryFind id |> Option.map (fun row -> id, row))
           Symbols = implementationIds |> List.choose (fun id -> c.Symbols.TryFind id |> Option.map (fun name -> id, name))
-          Inactivity = [] }
+          Inactivity = []; MemoryPolicy = None }
     let callable = { c with AggregateDependencies = c.AggregateValues |> Map.map (fun occurrence _ -> account occurrence) }
     let codata =
         { graph.Codata with CallableContracts = callable.Contracts; CallableCarriers = callable.Carriers
@@ -198,13 +198,13 @@ let private fixture union =
           FormationInputs = if operation = CallableAggregateOperation.Construct then [code.Id] else [aggregate.Id; code.Id]
           Value = value; SelectedAlternative = selected
           Operation = operation; Frontier = if operation = CallableAggregateOperation.Project then Some occurrence else None
-          Tag = tag; Bytes = 0; Alignment = 1; Participants = [] }
+          Tag = tag; Bytes = 0; Alignment = 1; Participants = []; ResultRetirement = None }
         |> fun row -> { row with Participants = valueParticipants row }
     let construction = row aggregate.Id CallableAggregateOperation.Construct (Some code.Id) (Some 0)
     let projection = row read.Id CallableAggregateOperation.Project None None
     let account (value: CallableAggregateValue) : CallableAggregateDependencyAccount =
         { Occurrence = value.Occurrence; Slots = [slot]; Values = [value]; Carriers = List.ofSeq carriers.Values
-          Contracts = [contract]; Flows = []; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = []; Inactivity = [] }
+          Contracts = [contract]; Flows = []; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = []; Inactivity = []; MemoryPolicy = None }
     let declaration : CallableEmissionDeclaration =
         { Lookup = implementation.Id; Implementation = implementation.Id
           Parameters = ["value", boolType, formal.Id]; Result = body.Id; Context = LambdaContext.RegularClosure
@@ -444,7 +444,7 @@ let private capturedFixture union selected =
           Dependencies = Map.empty; Calls = [] }
     let account (value: CallableAggregateValue) : CallableAggregateDependencyAccount =
         { Occurrence = value.Occurrence; Slots = [slot]; Values = [value]; Carriers = [firstCarrier; secondCarrier]
-          Contracts = [contract]; Flows = [flow]; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = []; Inactivity = [] }
+          Contracts = [contract]; Flows = [flow]; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = []; Inactivity = []; MemoryPolicy = None }
     let capture : ContinuationSlot =
         { Source = NodeId 6; ValueType = boolType; IsCapture = true; Holds = CaptureSlotKind.Scalar SettledSlot.Bool
           Field = { Name = "flag"; Slot = SettledSlot.Bool; Offset = Some 0; Size = Some 1; Align = Some 1 } }
@@ -997,11 +997,11 @@ let ``absent callable Result case retains the selected scalar payload without in
                        PayloadOrdinal = Some 0; Payload = Some payload.Id
                        Participants = [p ParticipantRole.AggregateConstructor 0 initialization.Id initialization.Id
                                        p ParticipantRole.AggregatePayload 0 initialization.Id payload.Id] }
-          Bytes = 0; Alignment = 1; Participants = [] }
+          Bytes = 0; Alignment = 1; Participants = []; ResultRetirement = None }
     let row = { row with Participants = valueParticipants row }
     let account : CallableAggregateDependencyAccount =
         { Occurrence = initialization.Id; Slots = [slot]; Values = [row]; Carriers = []; Contracts = []
-          Flows = []; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = []; Inactivity = [] }
+          Flows = []; Joins = []; Participants = []; Sources = []; Claims = []; Symbols = []; Inactivity = []; MemoryPolicy = None }
     let held = [payload; initialization]
     let raw = revision held
     let absentComponent = ValueRepresentation.CallableComponent(slot.Identity, ValueRepresentation.Record([], Some([], 0, 1)))

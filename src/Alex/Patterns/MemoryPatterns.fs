@@ -286,6 +286,34 @@ let pAllocValue (nodeId: NodeId) (ssa: SSA) (ty: MLIRType) : PSGParser<MLIROp> =
             return! pAllocStatic ssa count elemType None
     }
 
+/// Retirement is source-owned. The caller's returned instance is released at
+/// the published receiver exit; the callee construction is never recalled here.
+let pRetireResultAt receiver actual (value: Val) : PSGParser<MLIROp list> = parser {
+    let! state = getUserState
+    let results =
+        state.Graph.Codata.CallableAggregateDependencies.TryFind actual
+        |> Option.map (fun account -> account.Values |> List.filter (fun row -> row.Operation = CallableAggregateOperation.Result))
+        |> Option.defaultValue []
+    match results with
+    | [] -> return []
+    | [result] ->
+        do! ensure ((Integrity.check state.Graph).IsEmpty)
+                "Result retirement requires a complete current source account."
+        let! retirement =
+            match result.ResultRetirement with
+            | Some(Result.Ok retirement) -> preturn retirement
+            | Some(Result.Error reason) -> fail (Message ("Result retirement remains source-pending: " + reason))
+            | None -> fail (Message "Result retirement lacks its source-owned allocation and retirement relation.")
+        do! ensure (retirement.Application = result.Occurrence && retirement.Actual = actual
+                    && retirement.Receiver = receiver
+                    && (result.Tag |> Option.exists (fun tag -> tag.Constructor = retirement.Construction))
+                    && value.Type = valueTypeAt state.Graph actual)
+                "Result retirement changed its exact returned instance or receiving exit."
+        let! operation = pDealloc value.SSA value.Type
+        return [operation]
+    | _ -> return! fail (Message "Result retirement lacks its unique source Result account.")
+}
+
 // ═══════════════════════════════════════════════════════════
 // DU CONSTRUCTION
 // ═══════════════════════════════════════════════════════════

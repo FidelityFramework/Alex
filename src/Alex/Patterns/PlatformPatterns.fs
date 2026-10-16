@@ -510,10 +510,15 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                 "Imported invocation pointer and operands disagree with its native ABI."
                         return! pFuncCallIndirectResults results pointerSSA values
                       }
+                let! retirements =
+                    List.zip call.Arguments values |> List.map (fun (operand, value) ->
+                        if operand.OptionalEntry.IsSome then MemoryPatterns.pRetireResultAt call.Site operand.Actual value
+                        else preturn []) |> Alex.XParsec.Extensions.sequence
+                let operations = argumentOps @ [operation] @ List.concat retirements
                 match results with
-                | [] -> return argumentOps @ [operation], TRVoid
+                | [] -> return operations, TRVoid
                 | [value] ->
                     let! resultOps, result = pBoundaryAdapt node.Id node.Id call.ResultAdaptation value
-                    return argumentOps @ [operation] @ resultOps, TRValue result
+                    return operations @ resultOps, TRValue result
                 | _ -> return! fail (Message "Scalar boundary publication has an invalid result list.")
     }
