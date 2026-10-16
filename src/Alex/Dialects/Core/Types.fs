@@ -384,6 +384,9 @@ type MLIROp =
     | ResourceOptionTag of site: Fidelity.PSG.NodeId * source: Val * result: Val option
     | ResourceOptionPayload of site: Fidelity.PSG.NodeId * source: Val * result: Val
     | ResourceAlias of site: Fidelity.PSG.NodeId * source: Val
+    /// Direct writable borrowing retains the exact source call occurrence and
+    /// complete native argument order. Target address realization is deferred.
+    | WritableBufferCall of site: Fidelity.PSG.NodeId * arguments: Val list
     /// Published MMIO intent retains its exact source account; target expansion
     /// and any temporary values belong to the selected backend.
     | MmioLoad of site: Fidelity.PSG.NodeId * result: SSA * address: SSA * bits: int
@@ -532,6 +535,8 @@ module BoundaryAbi =
         | Fidelity.PSG.BoundaryScalar.Entry _ -> invalidArg "scalar" "An entry carrier requires its source-published receiving signature."
         | Fidelity.PSG.BoundaryScalar.ResourceHandle _ ->
             invalidArg "scalar" "A resource carrier requires its exact direct-call conversion and cleanup accounts."
+        | Fidelity.PSG.BoundaryScalar.WritableBytes _ ->
+            invalidArg "scalar" "A writable byte carrier requires its exact source-published declaration."
 
     let signatureType (signature: Fidelity.PSG.NativeEntrySignature) =
         if signature.CallingConvention <> "CDecl" then
@@ -543,6 +548,10 @@ module BoundaryAbi =
             match boundary.CallbackInvocations.TryFind invocation with
             | Some row when row.Identity = invocation -> signatureType row.Signature
             | _ -> invalidArg "boundary" "An entry carrier lacks its exact source-published receiving invocation."
+        | Fidelity.PSG.BoundaryScalar.WritableBytes identity ->
+            match boundary.WritableBufferDeclarations.TryFind identity with
+            | Some row when row.Identity = identity -> TMemRef(TInt(IntWidth 8))
+            | _ -> invalidArg "boundary" "A writable byte carrier lacks its exact source-published declaration."
         | scalar -> scalarType scalar
 
     let parametersIn boundary (declaration: Fidelity.PSG.BoundaryImport) =

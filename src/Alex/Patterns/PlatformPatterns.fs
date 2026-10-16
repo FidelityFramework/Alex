@@ -69,6 +69,50 @@ let pBoundaryImports : PSGParser<MLIROp list> =
 let private pBoundaryAdapt (consumer: NodeId) (operand: NodeId) (adaptation: Meet option) (value: Val) : PSGParser<MLIROp list * Val> =
     pPublishedAdapt consumer operand adaptation value
 
+/// Consume the current per-use account. Bounds and foreign effects were settled
+/// by Baker; this reader only retains their exact operand and claim incidence.
+let private pWritableOperand (call: BoundaryCall) (imported: BoundaryImport) ordinal (operand: BoundaryOperand) identity : PSGParser<unit> = parser {
+    let! state = getUserState
+    let graph = state.Graph
+    let boundary = graph.Emission.Boundary
+    let! declaration, useRow =
+        match boundary.WritableBufferDeclarations.TryFind identity, boundary.WritableBufferUses.TryFind(call.Site, ordinal) with
+        | Some declaration, Some row when declaration.Identity = identity && row.Declaration = identity -> preturn(declaration, row)
+        | _ -> fail (Message "Writable boundary operand lacks its exact current declaration and per-use account.")
+    do! ensure
+            (call.Entry.IsNone && call.Resource.IsNone && call.Result.IsNone && call.ResultAdaptation.IsNone && imported.Result.IsNone
+             && call.Site = useRow.Call && useRow.Parameter = ordinal && declaration.Parameter = ordinal
+             && useRow.CountParameter = declaration.CountParameter && imported.Identity = declaration.Descriptor
+             && imported.Binding = declaration.Declaration && operand.Formal = declaration.BufferFormal
+             && operand.Actual = useRow.Buffer && operand.Adaptation.IsNone
+             && imported.Parameters = (call.Arguments |> List.map (fun actual -> actual.Formal, actual.Abi))
+             && (call.Arguments |> List.tryItem useRow.CountParameter |> Option.exists (fun count ->
+                 count.Actual = useRow.Count && count.Formal = declaration.CountFormal)))
+            "Writable boundary operand differs from its exact direct void call, native ordinal or ordered actuals."
+    do! ensure
+            ((graph.Emission.Memory.Operations.TryFind useRow.Allocation |> Option.exists (function
+                | MemoryWitnessOperation.ArrayAllocation allocation -> allocation.Site = useRow.Allocation
+                | _ -> false))
+             && (graph.Emission.Numeric.Elements.TryFind useRow.Buffer |> Option.exists (function
+                 | SettledSlot.Integer(8, Some _) -> true
+                 | _ -> false)))
+            "Writable boundary operand lacks its current allocation and exact byte-format account."
+    let currentClaim citizen kind =
+        match graph.CurrentClaims.TryFind citizen, graph.ObligationSources.TryFind citizen with
+        | Some claim, Some [sources] ->
+            claim.Kind = kind && List.contains claim graph.Obligations && List.tryHead sources = Some call.Site
+            && ([identity;useRow.Buffer;useRow.Count;useRow.Allocation;useRow.Capacity;useRow.ByteFormat]
+                |> List.forall (fun id -> List.contains id sources))
+        | _ -> false
+    do! ensure
+            (currentClaim useRow.CountCoverage "foreign-writable-buffer-count"
+             && currentClaim useRow.StorageCoverage "foreign-writable-buffer-storage"
+             && ([call.Site;identity;useRow.Buffer;useRow.Count;useRow.Allocation;useRow.Capacity;useRow.ByteFormat;useRow.CountCoverage;useRow.StorageCoverage]
+                 |> List.forall useRow.Participants.Contains))
+            "Writable boundary operand lacks its current required count/storage claim citizens and support."
+    return ()
+}
+
 /// Read the source-owned lineage; neither a matching type nor participant
 /// membership can create a resource access. Selection semantics remain with
 /// the published account and its current conversion/cleanup proof premises.
@@ -202,6 +246,10 @@ let pImportedFunctionAddress formation : PSGParser<MLIROp list * TransferResult>
             | Result.Ok value -> preturn value
             | Result.Error reason -> fail (Message reason)
 
+        do! ensure
+                (declaration.Parameters |> List.forall (fun (_, scalar) -> match scalar with BoundaryScalar.WritableBytes _ -> false | _ -> true))
+                "Writable byte declarations require a direct source call, not a function address."
+
         do!
             ensure
                 (match node.Kind with
@@ -284,10 +332,20 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                 |> List.exists (function BoundaryScalar.ResourceHandle _ -> true | _ -> false) ->
                 return! fail (Message "Resource call lacks its source conversion and cleanup account.")
             | Some declaration ->
-                let rec arguments (witnessed: Map<NodeId, Meet option * Val * Val>) (operands: BoundaryOperand list) : PSGParser<MLIROp list * Val list> = parser {
+                let writable = declaration.Parameters |> List.exists (fun (_, scalar) -> match scalar with BoundaryScalar.WritableBytes _ -> true | _ -> false)
+                if writable then
+                    do! ensure
+                            (call.Entry.IsNone && call.Result.IsNone && call.ResultAdaptation.IsNone && declaration.Result.IsNone
+                             && declaration.Parameters = (call.Arguments |> List.map (fun actual -> actual.Formal, actual.Abi)))
+                            "Writable byte calls require their exact direct void signature and complete ordered actuals."
+                let rec arguments ordinal (witnessed: Map<NodeId, Meet option * Val * Val>) (operands: BoundaryOperand list) : PSGParser<MLIROp list * Val list> = parser {
                     match operands with
                     | [] -> return [], []
                     | operand :: rest ->
+                        do!
+                            match operand.Abi with
+                            | BoundaryScalar.WritableBytes identity -> pWritableOperand call declaration ordinal operand identity
+                            | _ -> preturn ()
                         let! ssa, ty = pRecallNode operand.Actual
                         let raw = { SSA = ssa; Type = ty }
                         let! operations, value =
@@ -300,10 +358,10 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                         do! ensure (value.Type = BoundaryAbi.scalarTypeIn boundary operand.Abi) "Witnessed boundary argument disagrees with its published ABI."
                         // Repeated positions retain their order and reuse the
                         // one canonical meet definition for this actual.
-                        let! remainingOps, values = arguments (witnessed.Add(operand.Actual, (operand.Adaptation, raw, value))) rest
+                        let! remainingOps, values = arguments (ordinal + 1) (witnessed.Add(operand.Actual, (operand.Adaptation, raw, value))) rest
                         return operations @ remainingOps, value :: values
                 }
-                let! argumentOps, values = arguments Map.empty call.Arguments
+                let! argumentOps, values = arguments 0 Map.empty call.Arguments
                 let! results =
                     match call.Result with
                     | None -> preturn []
@@ -312,9 +370,11 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                         return [{ SSA = resultSSA; Type = boundaryScalarType ty }]
                       }
                 let! operation =
-                    match call.Entry with
-                    | None -> pFuncCallResults results declaration.Symbol values
-                    | Some formation -> parser {
+                    match call.Arguments |> List.exists (fun operand -> match operand.Abi with BoundaryScalar.WritableBytes _ -> true | _ -> false), call.Entry with
+                    | true, None -> preturn (WritableBufferCall(call.Site, values))
+                    | true, Some _ -> fail (Message "Writable byte calls require their exact direct source invocation.")
+                    | false, None -> pFuncCallResults results declaration.Symbol values
+                    | false, Some formation -> parser {
                         let! entry, imported =
                             match importedEntry boundary formation with
                             | Result.Ok value -> preturn value

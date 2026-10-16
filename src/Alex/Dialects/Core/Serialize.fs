@@ -588,6 +588,9 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
             let paramsStr = paramTypes |> List.map (typeToString pointer) |> String.concat ", "
             sprintf "func.func private @%s(%s) -> %s" (symbolName name) paramsStr (resultTypesToString pointer resultTypes)
         | BoundaryFuncDecl (declaration, parameters, results) ->
+            if declaration.Parameters |> List.exists (fun (_, scalar) ->
+                match scalar with Fidelity.PSG.BoundaryScalar.WritableBytes _ -> true | _ -> false) then
+                raise (TargetRealizationRequired "Writable byte declarations require the selected backend and their exact source accounts.")
             let paramsStr = parameters |> List.map (typeToString pointer) |> String.concat ", "
             sprintf "func.func private @%s(%s) -> %s" (symbolName declaration.Symbol) paramsStr
                 (resultTypesToString pointer results)
@@ -765,6 +768,8 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
         let (Fidelity.PSG.NodeId sourceId) = site
         sprintf "module @%s attributes {clef.spatial_source = \"%d\", clef.spatial_kind = \"%s\"} {}"
             (symbolName name) sourceId kind
+    | MLIROp.WritableBufferCall _ ->
+        raise (TargetRealizationRequired "Writable byte calls require the selected backend and their exact source accounts.")
     | MLIROp.ResourceImport _ | MLIROp.ResourceCall _
     | MLIROp.ResourceOptionTag _ | MLIROp.ResourceOptionPayload _ | MLIROp.ResourceAlias _ ->
         raise (TargetRealizationRequired "Resource operations require the selected backend and their exact source accounts.")
