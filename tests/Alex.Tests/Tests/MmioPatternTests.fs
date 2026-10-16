@@ -16,33 +16,46 @@ module WritableBuffer =
     let private carrier site range : ScalarCarrier =
         { Site = id site; Slot = integer; Range = range; Representation = None; Declaration = None
           SourceType = intType; Obligations = []; Participants = support }
-    let private fixture () =
+    let private fixture posix =
+        let support = if posix then support |> Set.add (id 5) |> Set.add (id 19) else support
+        let bufferParameter, countParameter = if posix then 1, 2 else 0, 1
+        let formals = if posix then [id 19;id 14;id 15] else [id 14;id 15]
+        let fdMeet site = {Consumer=id site;Operand=id 5;From=64;To=32;Adapt=MeetKind.Truncate}
         let declaration : BoundaryWritableBufferDeclaration =
-            { Identity=id 10; Declaration=id 11; Body=id 12; Formals=[id 14;id 15]; Descriptor=id 13
-              Parameter=0; CountParameter=1; BufferFormal=id 14; CountFormal=id 15
-              Contract={Binding="Fixture.fill";Parameter=0;CountParameter=1
+            { Identity=id 10; Declaration=id 11; Body=id 12; Formals=formals; Descriptor=id 13
+              Parameter=bufferParameter; CountParameter=countParameter; BufferFormal=id 14; CountFormal=id 15
+              Contract={Binding="Fixture.fill";Parameter=bufferParameter;CountParameter=countParameter
                         Hypothesis={Identity="fixture.fill";Version="1";Source="component contract"}}
               DeclarationFacts=Map.empty;Participants=support }
         let imported : BoundaryImport =
             { Identity=id 13;Binding=id 11;Scope=id 11;Library="fixture";Symbol="fill";CallingConvention="CDecl"
               DeclarationPath=[id 11];Parameters=[id 14,BoundaryScalar.WritableBytes(id 10);id 15,BoundaryScalar.Integer(64,false)]
               Result=None;Participants=support;SourceTypes=Map.empty;DeclarationFacts=Map.empty }
+        let imported =
+            if posix then {imported with Parameters=(id 19,BoundaryScalar.Integer(32,true))::imported.Parameters}
+            else imported
         let call site : BoundaryCall =
             { Site=id site;Import=id 13;Callee=id 2;Entry=None
               Arguments=[{Actual=id 0;Formal=id 14;Abi=BoundaryScalar.WritableBytes(id 10);Adaptation=None}
                          {Actual=id 1;Formal=id 15;Abi=BoundaryScalar.Integer(64,false);Adaptation=None}]
               ErasedUnitArguments=[];Result=None;ResultAdaptation=None;Resource=None;Participants=support;SourceTypes=Map.empty }
+        let call site =
+            let original = call site
+            if posix then
+                {original with Arguments={Actual=id 5;Formal=id 19;Abi=BoundaryScalar.Integer(32,true);Adaptation=Some(fdMeet site)}::original.Arguments}
+            else original
         let useRow site count storage : BoundaryWritableBufferUse =
-            { Call=id site;Declaration=id 10;Parameter=0;CountParameter=1;Buffer=id 0;Count=id 1;Allocation=id 16
+            { Call=id site;Declaration=id 10;Parameter=bufferParameter;CountParameter=countParameter;Buffer=id 0;Count=id 1;Allocation=id 16
               Capacity=id 17;ByteFormat=id 18;CountCoverage=id count;StorageCoverage=id storage;Participants=support }
         let claim citizen kind body : ObligationInfo =
             {Id=sprintf "fixture-%d" citizen;Kind="foreign-writable-buffer-"+kind;Logic="QF_LIA"
              Statement="Source-issued component coverage";Source="component contract"
              Refs=["fixture.fill";"1";"component contract"];Body=body}
+        let countValue = if posix then 3I else 2I
         let claims =
-            [30,claim 30 "count" (ObligationBody.IntegerRepresentationCoverage(2I,2I,0I,4I))
+            [30,claim 30 "count" (ObligationBody.IntegerRepresentationCoverage(countValue,countValue,0I,4I))
              31,claim 31 "storage" (ObligationBody.IntegerRepresentationCoverage(0I,255I,0I,255I))
-             32,claim 32 "count" (ObligationBody.IntegerRepresentationCoverage(2I,2I,0I,4I))
+             32,claim 32 "count" (ObligationBody.IntegerRepresentationCoverage(countValue,countValue,0I,4I))
              33,claim 33 "storage" (ObligationBody.IntegerRepresentationCoverage(0I,255I,0I,255I))]
         let requirement : RequirementWitness =
             {Site=id 40;Condition=id 41;Diagnostic="capacity";Frontier=id 42;Continuation=id 43;PatternTest=None;Participants=[]}
@@ -58,20 +71,24 @@ module WritableBuffer =
              MinimumCount=4I;MaximumCount=4I;Requirement=requirement;Construction=construction;Participants=support}
         let buffer = node 0 (SemanticKind.PatternBinding "buffer") (arrayOf uint8Type) [] None
         let count = node 1 (SemanticKind.PatternBinding "count") intType [] None
-        let callee = node 2 (SemanticKind.PatternBinding "fill") (functionFrom (arrayOf uint8Type) (functionFrom intType unitType)) [] None
-        let sites = [3;4] |> List.map(fun site->node site (SemanticKind.Application(id 2,[id 0;id 1])) unitType [2;0;1] None)
+        let calleeType = functionFrom (arrayOf uint8Type) (functionFrom intType unitType)
+        let callee = node 2 (SemanticKind.PatternBinding "fill") (if posix then functionFrom intType calleeType else calleeType) [] None
+        let actuals = if posix then [5;0;1] else [0;1]
+        let sites = [3;4] |> List.map(fun site->node site (SemanticKind.Application(id 2,List.map id actuals)) unitType (2::actuals) None)
         let proofs = claims |> List.map(fun (citizen,claim)->node citizen (SemanticKind.Obligation claim) unitType [] None)
-        let raw=revision (buffer::count::callee::sites@proofs)
+        let nodes = buffer::count::callee::sites@proofs
+        let raw=revision (if posix then node 5 (SemanticKind.PatternBinding "fd") intType [] None::nodes else nodes)
         let boundary =
             { raw.Emission.Boundary with
                 Imports=Map.ofList[id 13,imported]
                 Calls=Map.ofList[id 3,call 3;id 4,call 4]
                 WritableBufferDeclarations=Map.ofList[id 10,declaration]
-                WritableBufferUses=Map.ofList[(id 3,0),useRow 3 30 31;(id 4,0),useRow 4 32 33] }
+                WritableBufferUses=Map.ofList[(id 3,bufferParameter),useRow 3 30 31;(id 4,bufferParameter),useRow 4 32 33] }
         let sources site = [id site;id 10;id 0;id 1;id 16;id 17;id 18]
         let graph =
             { raw with
                 Obligations=List.map snd claims
+                Codata={raw.Codata with Meets=if posix then Map.ofList [id 3,[fdMeet 3];id 4,[fdMeet 4]] else Map.empty}
                 ObligationSources=Map.ofList[id 30,[sources 3];id 31,[sources 3];id 32,[sources 4];id 33,[sources 4]]
                 Emission=
                     { raw.Emission with
@@ -85,6 +102,8 @@ module WritableBuffer =
         let operands=MLIRAccumulator.empty ()
         MLIRAccumulator.bindNode (id 0) (Arg 0) (TMemRef(TInt(IntWidth 8))) operands
         MLIRAccumulator.bindNode (id 1) (Arg 1) (TInt(IntWidth 64)) operands
+        if graph.Nodes.ContainsKey(id 5) then
+            MLIRAccumulator.bindNode (id 5) (Arg 2) (TInt(IntWidth 64)) operands
         let position=focus graph graph.Nodes[id site]
         let result=matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall position 64 operands
         Assert.Empty operands.AllOps
@@ -93,28 +112,28 @@ module WritableBuffer =
 
     /// Two source applications deliberately share actuals, but never a result
     /// citizen, context, adaptation or native SSA definition.
-    let private signedFixture () =
-        let graph, imported = fixture ()
-        let support = Set.union support (Set.ofList ([50;51;52;53;54;55;56;60;61] |> List.map id))
+    let private signedFixture posix =
+        let graph, imported = fixture posix
+        let support = Set.union imported.Participants (Set.ofList ([50;51;52;53;54;55;56;60;61] |> List.map id))
         let participant group role ordinal value : Participant =
             {Node=id value;Role=role;Ordinal=ordinal;Group=id group}
         let application site context : ForeignResultApplication =
             {Declaration=imported.Binding;Call=id site;Context=[id context]
              Hypothesis=Some {Quote=id 54;Declaration=imported.Binding;Identity="fixture.result";Version="1"
-                              Source="component result contract";Lower=ForeignResultBound.Constant -1I;Upper=ForeignResultBound.Argument 1}
-             Arguments=[{Index=0;Node=id 0;Enclosure=ValueRange.Unbounded}
-                        {Index=1;Node=id 1;Enclosure=ValueRange.Bounded(3I,3I)}]}
+                              Source="component result contract";Lower=ForeignResultBound.Constant -1I;Upper=ForeignResultBound.Argument(if posix then 2 else 1)}
+             Arguments=graph.Emission.Boundary.Calls[id site].Arguments |> List.mapi(fun index operand ->
+                 {Index=index;Node=operand.Actual;Enclosure=if operand.Actual=id 1 then ValueRange.Bounded(3I,3I) else ValueRange.Unbounded})}
         let account site context logical abi : ForeignResultUse =
             {Application=application site context
-             Participants=ParticipantEvidence.Established
+             Participants=ParticipantEvidence.Established(
                 [participant site ParticipantRole.ForeignResultDeclaration 0 11
                  participant site ParticipantRole.ForeignResultCall 0 site
                  participant site ParticipantRole.ForeignResultContext 0 context
-                 participant site ParticipantRole.ForeignResultHypothesis 0 54
-                 participant site ParticipantRole.ForeignResultActual 0 0
-                 participant site ParticipantRole.ForeignResultActual 1 1
-                 participant site ParticipantRole.ForeignResultAbi 0 55
-                 participant site ParticipantRole.ForeignResultDestination 0 56]
+                 participant site ParticipantRole.ForeignResultHypothesis 0 54]
+                @ (graph.Emission.Boundary.Calls[id site].Arguments |> List.mapi(fun ordinal operand ->
+                    participant site ParticipantRole.ForeignResultActual ordinal (NodeId.value operand.Actual)))
+                @ [participant site ParticipantRole.ForeignResultAbi 0 55
+                   participant site ParticipantRole.ForeignResultDestination 0 56])
              Claims=[ForeignResultProofRole.LogicalCoverage,id logical;ForeignResultProofRole.AbiNarrowing,id abi]}
         let accounts=[account 3 60 50 51;account 4 61 52 53]
         let claims = accounts |> List.collect (fun account ->
@@ -142,7 +161,7 @@ module WritableBuffer =
             {graph with Nodes=nodes;Obligations=graph.Obligations @ List.map snd claims
                         CurrentClaims=List.fold (fun current (citizen,claim)->Map.add citizen claim current) graph.CurrentClaims claims
                         ObligationSources=List.fold (fun current (citizen,rows)->Map.add citizen rows current) graph.ObligationSources sources
-                        Codata={graph.Codata with Meets=meets |> Map.map (fun _ meet -> [meet])}
+                        Codata={graph.Codata with Meets=meets |> Map.map (fun site meet -> (graph.Codata.Meets.TryFind site |> Option.defaultValue []) @ [meet])}
                         Emission=
                             { graph.Emission with
                                 Callable={graph.Emission.Callable with AliasTargets=Map.ofList [id 3,id 3;id 4,id 4]}
@@ -156,7 +175,7 @@ module WritableBuffer =
 
     [<Fact>]
     let ``writable signed result retains two source occurrences and adapts native width`` () =
-        let graph=signedFixture ()
+        let graph=signedFixture false
         let rawResults = [3;4] |> List.map (fun site ->
             match observe site graph with
             | Result.Ok(([WritableBufferCall(actual,values,Some raw);ArithOp(ArithOp.TruncI(adapted,source,fromType,toType))],TRValue result),_) ->
@@ -172,6 +191,69 @@ module WritableBuffer =
             | other -> failwithf "Writable signed result lost its original raw SSA/adaptation: %A" other)
         Assert.NotEqual(rawResults[0],rawResults[1])
 
+    /// These component rows exercise exact published adaptation replay. The
+    /// source-to-native test owns how a source fd obtains its native carrier.
+    [<Fact>]
+    let ``POSIX writable buffer retains scalar buffer count order and exact fd adaptation`` () =
+        let graph=signedFixture true
+        let imported=graph.Emission.Boundary.Imports[id 13]
+        Assert.Equal<MLIRType list>(
+            [TInt(IntWidth 32);TMemRef(TInt(IntWidth 8));TInt(IntWidth 64)],
+            BoundaryAbi.parametersIn graph.Emission.Boundary imported)
+        let rawResults = [3;4] |> List.map(fun site ->
+            match observe site graph with
+            | Result.Ok(([ArithOp(ArithOp.TruncI(fd,fdSource,fdFrom,fdTo));
+                          WritableBufferCall(actual,values,Some raw);
+                          ArithOp(ArithOp.TruncI(adapted,source,fromType,toType))],TRValue result),_) ->
+                Assert.Equal(id site,actual)
+                Assert.Equal(Arg 2,fdSource)
+                Assert.Equal(TInt(IntWidth 64),fdFrom)
+                Assert.Equal(TInt(IntWidth 32),fdTo)
+                Assert.Equal<Val list>(
+                    [{SSA=fd;Type=fdTo};{SSA=Arg 0;Type=TMemRef(TInt(IntWidth 8))};{SSA=Arg 1;Type=TInt(IntWidth 64)}],values)
+                Assert.Equal(TInt(IntWidth 64),raw.Type)
+                Assert.Equal(raw.SSA,source)
+                Assert.Equal(TInt(IntWidth 64),fromType)
+                Assert.Equal(TInt(IntWidth 32),toType)
+                Assert.Equal({SSA=adapted;Type=toType},result)
+                Assert.Equal(NeedsTargetRealization,moduleText (Ok 64) None [WritableBufferCall(actual,values,Some raw)])
+                raw.SSA
+            | other -> failwithf "POSIX writable call lost its ordered native vector or published adaptation: %A" other)
+        Assert.NotEqual(rawResults[0],rawResults[1])
+
+    [<Theory>]
+    [<InlineData("actual-order","exact direct signature and complete ordered actuals")>]
+    [<InlineData("count-ordinal","native ordinal or ordered actuals")>]
+    [<InlineData("fd-meet-missing","exact source numeric meet")>]
+    [<InlineData("fd-meet-changed","exact source numeric meet")>]
+    [<InlineData("fd-adaptation-missing","exact source numeric meet")>]
+    let ``POSIX writable buffer refuses changed actual order or current fd adaptation`` defect reason =
+        let graph=signedFixture true
+        let boundary=graph.Emission.Boundary
+        let original=boundary.Calls[id 3]
+        let call =
+            if defect="actual-order" then {original with Arguments=List.rev original.Arguments}
+            elif defect="fd-adaptation-missing" then
+                let arguments = original.Arguments |> List.map(fun operand ->
+                    if operand.Actual=id 5 then {operand with Adaptation=None} else operand)
+                {original with Arguments=arguments}
+            else original
+        let uses =
+            if defect="count-ordinal" then
+                boundary.WritableBufferUses.Add((id 3,1),{boundary.WritableBufferUses[id 3,1] with CountParameter=1})
+            else boundary.WritableBufferUses
+        let meets = graph.Codata.Meets[id 3] |> List.choose(fun meet ->
+            if meet.Operand<>id 5 then Some meet
+            elif defect="fd-meet-missing" then None
+            elif defect="fd-meet-changed" then Some {meet with From=32}
+            else Some meet)
+        let graph={graph with
+                    Codata={graph.Codata with Meets=graph.Codata.Meets.Add(id 3,meets)}
+                    Emission={graph.Emission with Boundary={boundary with Calls=boundary.Calls.Add(id 3,call);WritableBufferUses=uses}}}
+        match observe 3 graph with
+        | Result.Error message -> Assert.Contains(reason,message)
+        | other -> failwithf "Invalid POSIX writable %s evidence admitted: %A" defect other
+
     [<Theory>]
     [<InlineData("missing","unique current same-call")>]
     [<InlineData("duplicate","unique current same-call")>]
@@ -185,7 +267,7 @@ module WritableBuffer =
     [<InlineData("support-order","current required logical/ABI claims")>]
     [<InlineData("unsupported","only void or the declared signed64")>]
     let ``writable signed result refuses withdrawn or mismatched source result evidence`` defect reason =
-        let graph=signedFixture ()
+        let graph=signedFixture false
         let first=graph.Emission.Numeric.ForeignResultUses.Head
         let changed =
             match defect with
@@ -216,7 +298,7 @@ module WritableBuffer =
 
     [<Fact>]
     let ``writable buffer retains neutral carrier ordered arguments and distinct call sites`` () =
-        let graph,imported=fixture ()
+        let graph,imported=fixture false
         Assert.Equal<MLIRType list>([TMemRef(TInt(IntWidth 8));TInt(IntWidth 64)],BoundaryAbi.parametersIn graph.Emission.Boundary imported)
         for site in [3;4] do
             match observe site graph with
@@ -234,7 +316,7 @@ module WritableBuffer =
     [<InlineData("indirect","exact direct signature")>]
     [<InlineData("result","exact direct signature")>]
     let ``writable buffer refuses withdrawn or mismatched current evidence`` defect reason =
-        let graph,_=fixture ()
+        let graph,_=fixture false
         let boundary=graph.Emission.Boundary
         let original=boundary.WritableBufferUses[id 3,0]
         let uses =
@@ -259,7 +341,7 @@ module WritableBuffer =
     [<InlineData(false)>]
     [<InlineData(true)>]
     let ``writable buffer declaration and call explicitly defer portable target text`` declaration =
-        let graph,imported=fixture ()
+        let graph,imported=fixture false
         let operation=
             if declaration then FuncOp(BoundaryFuncDecl(imported,BoundaryAbi.parametersIn graph.Emission.Boundary imported,[]))
             else WritableBufferCall(id 3,[{SSA=Arg 0;Type=TMemRef(TInt(IntWidth 8))};{SSA=Arg 1;Type=TInt(IntWidth 64)}],None)
