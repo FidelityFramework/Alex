@@ -434,16 +434,34 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                     match BoundaryAbi.optionalEntryConversionAt state.Graph call ordinal operand with
                                     | Result.Ok row -> preturn row
                                     | Result.Error reason -> fail (Message reason)
-                                let! _, _, signature =
+                                let! _, symbol, signature =
                                     match FunctionPointerPatterns.closedFunctionAddress state.Graph model.Formation with
                                     | Result.Ok row -> preturn row
                                     | Result.Error reason -> fail (Message reason)
-                                let! code, codeType = pRecallNode model.Formation
+                                let resultRows =
+                                    state.Graph.Codata.CallableAggregateDependencies.TryFind operand.Actual
+                                    |> Option.map (fun account -> account.Values |> List.filter (fun row -> row.Operation = CallableAggregateOperation.Result))
+                                    |> Option.defaultValue []
+                                let! codeOps, code, codeType =
+                                    match resultRows with
+                                    | [] -> parser {
+                                        let! code, codeType = pRecallNode model.Formation
+                                        return [], code, codeType
+                                      }
+                                    | [result] -> parser {
+                                        do! ensure (result.Tag |> Option.exists (fun tag -> tag.Constructor = model.Construction))
+                                                "Optional entry Result differs from its source construction."
+                                        let code = Alex.Traversal.Values.aggregateComponent node.Id result.Slot ordinal 14
+                                        let! operation = pFuncConstant code symbol signature
+                                        return [operation], code, signature
+                                      }
+                                    | _ -> fail (Message "Optional entry Result lacks its unique source account.")
                                 do! ensure (operand.Adaptation.IsNone && codeType = signature
                                             && raw.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual)
                                         "Optional entry intent differs from its original Option operand or retained closed code."
-                                return [], raw, Some { Ordinal = ordinal; CaseOrdinal = selected.CaseOrdinal
-                                                       Claim = selected.Obligation; Code = Some {SSA = code; Type = codeType} }
+                                return codeOps, raw,
+                                       Some { Ordinal = ordinal; CaseOrdinal = selected.CaseOrdinal
+                                              Claim = selected.Obligation; Code = Some {SSA = code; Type = codeType} }
                             | None ->
                                 let! operations, value =
                                     match witnessed.TryFind operand.Actual with
