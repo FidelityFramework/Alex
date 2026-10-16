@@ -379,7 +379,7 @@ type OptionalEntrySlot = {
     Ordinal: int
     CaseOrdinal: int
     Claim: Fidelity.PSG.NodeId
-    Code: Val
+    Code: Val option
 }
 
 /// Top-level portable operation. Target dialects belong to backend realization.
@@ -546,6 +546,38 @@ module BoundaryAbi =
                 | _ -> missing ()
             | _ -> missing ()
         | None -> missing ()
+
+    /// Absence has its own current per-use account. It supplies no callable
+    /// formation, payload or native null value to the portable witness.
+    let optionalEntryAbsenceConversionAt (revision: Fidelity.PSG.Revision)
+                                         (call: Fidelity.PSG.BoundaryCall) ordinal
+                                         (operand: Fidelity.PSG.BoundaryOperand) =
+        let missing () = Error "Optional native-entry absence conversion lacks its exact current source account."
+        match operand.OptionalEntry with
+        | Some selected when selected.CaseOrdinal = 0 && selected.Payload.IsNone && selected.Formation.IsNone ->
+            match operand.Abi, revision.CurrentClaims.TryFind selected.Obligation with
+            | Fidelity.PSG.BoundaryScalar.Entry invocation, Some claim when List.contains claim revision.Obligations ->
+                match claim.Body with
+                | Fidelity.PSG.ObligationBody.OptionalEntryAbsenceArgumentConversion model when
+                    revision.Emission.Boundary.Calls.TryFind call.Site = Some call
+                    && List.tryItem ordinal call.Arguments = Some operand
+                    && claim.Kind = sprintf "foreign-optional-entry-conversion-%d" ordinal
+                    && model.SourceCase = 0 && model.Call = call.Site && model.Parameter = ordinal
+                    && model.Actual = operand.Actual && model.Construction = selected.Construction ->
+                    match revision.Emission.Boundary.CallbackAbsences.TryFind model.Absence with
+                    | Some absence when absence.Quote = model.Absence && absence.Import = call.Import
+                                        && absence.Parameter = ordinal && absence.Formal = operand.Formal
+                                        && absence.Invocation = invocation ->
+                        match Fidelity.PSG.Integrity.check revision with
+                        | [] ->
+                            Fidelity.PSG.OptionalEntryArgumentProof.projectAbsence model
+                            |> Result.map (fun _ -> selected, claim, model, absence)
+                        | violations -> Error ("Optional native-entry absence conversion has stale published source facts: "
+                                               + Fidelity.PSG.Integrity.describe violations)
+                    | _ -> missing ()
+                | _ -> missing ()
+            | _ -> missing ()
+        | _ -> missing ()
 
     /// Read existing published lineage without classifying branch semantics or
     /// granting proof authority. Both the witness and target use these same rows.

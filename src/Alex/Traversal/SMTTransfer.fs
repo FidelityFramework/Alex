@@ -162,6 +162,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
         | ObligationBody.ResourceConversion model -> ResourceProof.ofConversion model |> resource
         | ObligationBody.ResourceCleanup model -> ResourceProof.ofCleanup model |> resource
         | ObligationBody.OptionalEntryArgumentConversion model -> OptionalEntryArgumentProof.project model |> resource
+        | ObligationBody.OptionalEntryAbsenceArgumentConversion model -> OptionalEntryArgumentProof.projectAbsence model |> resource
         | ObligationBody.ForeignResultCoverage model ->
             let projection =
                 ForeignResultCoverage.ofModel model

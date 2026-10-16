@@ -30,7 +30,7 @@ let ``Pending obligation emits no solver operation or placeholder and retains re
 let ``optional Some call intent requires selected target realization and retains explicit slots`` () =
   let original = { SSA = Arg 0; Type = TMemRefStatic(1, TInt(IntWidth 8)) }
   let code = { SSA = Arg 1; Type = TFunc([], []) }
-  let slot = { Ordinal = 0; CaseOrdinal = 1; Claim = NodeId 3; Code = code }
+  let slot = { Ordinal = 0; CaseOrdinal = 1; Claim = NodeId 3; Code = Some code }
   let operation = OptionalEntryCall(NodeId 2, [original], [slot], [])
   Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
   let error = Assert.ThrowsAny<System.Exception>(fun () ->
@@ -43,9 +43,22 @@ let ``optional Some call intent requires selected target realization and retains
     Assert.Equal(0, actual.Ordinal)
     Assert.Equal(1, actual.CaseOrdinal)
     Assert.Equal(NodeId 3, actual.Claim)
-    Assert.Equal(code, actual.Code)
+    Assert.Equal(Some code, actual.Code)
     Assert.Empty results
   | other -> failwithf "Optional conversion lost its explicit source incidence: %A" other
+
+[<Fact>]
+let ``optional None call intent retains the original Option without a code value`` () =
+  let original = { SSA = Arg 0; Type = TMemRefStatic(1, TInt(IntWidth 8)) }
+  let slot = { Ordinal = 0; CaseOrdinal = 0; Claim = NodeId 3; Code = None }
+  let operation = OptionalEntryCall(NodeId 2, [original], [slot], [])
+  Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
+  match OperationStructure.flatten [operation] with
+  | [OptionalEntryCall(_, [actual], [slot], [])] ->
+    Assert.Equal(original, actual)
+    Assert.Equal(0, slot.CaseOrdinal)
+    Assert.True(slot.Code.IsNone)
+  | other -> failwithf "None lost its original optional intent: %A" other
 
 type private Callable = { Binding: NodeId; Lambda: NodeId; Argument: NodeId; Reference: NodeId; Call: NodeId }
 
@@ -776,7 +789,8 @@ let ``optional native entry boundary refuses Some and None before operand loweri
           Alex.Patterns.PlatformPatterns.pBoundaryCall graph graph.Nodes[call.Site]
           ctx.Zipper ctx.Coeffects accumulator with
   | Result.Error reason ->
-    Assert.Equal("Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it.", reason)
+    Assert.Equal((if present then "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it."
+                  else "Optional native-entry absence conversion lacks its exact current source account."), reason)
   | Result.Ok result -> failwithf "Optional native entry was lowered as a plain entry: %A" result
   Assert.Empty accumulator.AllOps
   Assert.Null(MLIRAccumulator.recallNode operand.Actual accumulator)
