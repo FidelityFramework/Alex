@@ -69,6 +69,53 @@ let pBoundaryImports : PSGParser<MLIROp list> =
 let private pBoundaryAdapt (consumer: NodeId) (operand: NodeId) (adaptation: Meet option) (value: Val) : PSGParser<MLIROp list * Val> =
     pPublishedAdapt consumer operand adaptation value
 
+/// The source owns the conditional result relation. Retain its exact current
+/// application and citizens without evaluating the relation or choosing a width.
+let private pWritableResult (call: BoundaryCall) (imported: BoundaryImport) : PSGParser<unit> = parser {
+    match call.Result with
+    | None ->
+        do! ensure call.ResultAdaptation.IsNone "Void writable call has a scalar result adaptation."
+    | Some(BoundaryScalar.Integer(64, true)) ->
+        let! state = getUserState
+        let graph = state.Graph
+        let! account =
+            match graph.Emission.Numeric.ForeignResultUses |> List.filter (fun useRow ->
+                useRow.Application.Call = call.Site && useRow.Application.Declaration = imported.Binding) with
+            | [account] -> preturn account
+            | _ -> fail (Message "Writable signed result lacks its unique current same-call foreign-result account.")
+        do! ensure
+                ((account.Application.Hypothesis |> Option.exists (fun hypothesis -> hypothesis.Declaration = imported.Binding))
+                 && (account.Application.Arguments |> List.map (fun argument -> argument.Index, argument.Node))
+                    = (call.Arguments |> List.mapi (fun index argument -> index, argument.Actual)))
+                "Writable signed result differs from its declared hypothesis or ordered actuals."
+        let! participants =
+            match account.Participants with
+            | ParticipantEvidence.Established participants -> preturn participants
+            | ParticipantEvidence.Pending _ -> fail (Message "Writable signed result has pending source participants.")
+        let! claims =
+            match account.Claims with
+            | [(ForeignResultProofRole.LogicalCoverage, logical); (ForeignResultProofRole.AbiNarrowing, abi)] when logical <> abi ->
+                preturn [ForeignResultProofRole.LogicalCoverage, logical; ForeignResultProofRole.AbiNarrowing, abi]
+            | _ -> fail (Message "Writable signed result lacks its distinct logical/ABI claim citizens.")
+        let currentClaim (role, citizen) =
+            match graph.CurrentClaims.TryFind citizen, graph.ObligationSources.TryFind citizen with
+            | Some claim, Some [sources] ->
+                List.contains claim graph.Obligations && sources = (participants |> List.map _.Node)
+                && (match claim.Body with
+                    | ObligationBody.ForeignResultCoverage model -> model.Application = account.Application && model.Role = role
+                    | _ -> false)
+                && (graph.Emission.Boundary.WritableBufferUses.Values
+                    |> Seq.filter (fun useRow -> useRow.Call = call.Site)
+                    |> Seq.forall (fun useRow ->
+                        useRow.Participants.Contains citizen
+                        && (sources |> List.forall useRow.Participants.Contains)
+                        && (participants |> List.forall (fun participant -> useRow.Participants.Contains participant.Node))))
+            | _ -> false
+        do! ensure (claims |> List.forall currentClaim)
+                "Writable signed result lacks its current required logical/ABI claims and source support."
+    | Some _ -> return! fail (Message "Writable byte calls support only void or the declared signed64 result.")
+}
+
 /// Consume the current per-use account. Bounds and foreign effects were settled
 /// by Baker; this reader only retains their exact operand and claim incidence.
 let private pWritableOperand (call: BoundaryCall) (imported: BoundaryImport) ordinal (operand: BoundaryOperand) identity : PSGParser<unit> = parser {
@@ -80,7 +127,7 @@ let private pWritableOperand (call: BoundaryCall) (imported: BoundaryImport) ord
         | Some declaration, Some row when declaration.Identity = identity && row.Declaration = identity -> preturn(declaration, row)
         | _ -> fail (Message "Writable boundary operand lacks its exact current declaration and per-use account.")
     do! ensure
-            (call.Entry.IsNone && call.Resource.IsNone && call.Result.IsNone && call.ResultAdaptation.IsNone && imported.Result.IsNone
+            (call.Entry.IsNone && call.Resource.IsNone && call.Result = imported.Result
              && call.Site = useRow.Call && useRow.Parameter = ordinal && declaration.Parameter = ordinal
              && useRow.CountParameter = declaration.CountParameter && imported.Identity = declaration.Descriptor
              && imported.Binding = declaration.Declaration && operand.Formal = declaration.BufferFormal
@@ -88,7 +135,7 @@ let private pWritableOperand (call: BoundaryCall) (imported: BoundaryImport) ord
              && imported.Parameters = (call.Arguments |> List.map (fun actual -> actual.Formal, actual.Abi))
              && (call.Arguments |> List.tryItem useRow.CountParameter |> Option.exists (fun count ->
                  count.Actual = useRow.Count && count.Formal = declaration.CountFormal)))
-            "Writable boundary operand differs from its exact direct void call, native ordinal or ordered actuals."
+            "Writable boundary operand differs from its exact direct call, native ordinal or ordered actuals."
     do! ensure
             ((graph.Emission.Memory.Operations.TryFind useRow.Allocation |> Option.exists (function
                 | MemoryWitnessOperation.ArrayAllocation allocation -> allocation.Site = useRow.Allocation
@@ -335,9 +382,10 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                 let writable = declaration.Parameters |> List.exists (fun (_, scalar) -> match scalar with BoundaryScalar.WritableBytes _ -> true | _ -> false)
                 if writable then
                     do! ensure
-                            (call.Entry.IsNone && call.Result.IsNone && call.ResultAdaptation.IsNone && declaration.Result.IsNone
+                            (call.Entry.IsNone && call.Result = declaration.Result
                              && declaration.Parameters = (call.Arguments |> List.map (fun actual -> actual.Formal, actual.Abi)))
-                            "Writable byte calls require their exact direct void signature and complete ordered actuals."
+                            "Writable byte calls require their exact direct signature and complete ordered actuals."
+                    do! pWritableResult call declaration
                 let rec arguments ordinal (witnessed: Map<NodeId, Meet option * Val * Val>) (operands: BoundaryOperand list) : PSGParser<MLIROp list * Val list> = parser {
                     match operands with
                     | [] -> return [], []
@@ -371,7 +419,7 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                       }
                 let! operation =
                     match call.Arguments |> List.exists (fun operand -> match operand.Abi with BoundaryScalar.WritableBytes _ -> true | _ -> false), call.Entry with
-                    | true, None -> preturn (WritableBufferCall(call.Site, values))
+                    | true, None -> preturn (WritableBufferCall(call.Site, values, List.tryHead results))
                     | true, Some _ -> fail (Message "Writable byte calls require their exact direct source invocation.")
                     | false, None -> pFuncCallResults results declaration.Symbol values
                     | false, Some formation -> parser {

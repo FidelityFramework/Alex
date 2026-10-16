@@ -386,7 +386,7 @@ type MLIROp =
     | ResourceAlias of site: Fidelity.PSG.NodeId * source: Val
     /// Direct writable borrowing retains the exact source call occurrence and
     /// complete native argument order. Target address realization is deferred.
-    | WritableBufferCall of site: Fidelity.PSG.NodeId * arguments: Val list
+    | WritableBufferCall of site: Fidelity.PSG.NodeId * arguments: Val list * result: Val option
     /// Published MMIO intent retains its exact source account; target expansion
     /// and any temporary values belong to the selected backend.
     | MmioLoad of site: Fidelity.PSG.NodeId * result: SSA * address: SSA * bits: int

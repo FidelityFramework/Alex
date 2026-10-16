@@ -91,13 +91,136 @@ module WritableBuffer =
         Assert.True((MLIRAccumulator.recallNode (id site) operands).IsNone)
         result
 
+    /// Two source applications deliberately share actuals, but never a result
+    /// citizen, context, adaptation or native SSA definition.
+    let private signedFixture () =
+        let graph, imported = fixture ()
+        let support = Set.union support (Set.ofList ([50;51;52;53;54;55;56;60;61] |> List.map id))
+        let participant group role ordinal value : Participant =
+            {Node=id value;Role=role;Ordinal=ordinal;Group=id group}
+        let application site context : ForeignResultApplication =
+            {Declaration=imported.Binding;Call=id site;Context=[id context]
+             Hypothesis=Some {Quote=id 54;Declaration=imported.Binding;Identity="fixture.result";Version="1"
+                              Source="component result contract";Lower=ForeignResultBound.Constant -1I;Upper=ForeignResultBound.Argument 1}
+             Arguments=[{Index=0;Node=id 0;Enclosure=ValueRange.Unbounded}
+                        {Index=1;Node=id 1;Enclosure=ValueRange.Bounded(3I,3I)}]}
+        let account site context logical abi : ForeignResultUse =
+            {Application=application site context
+             Participants=ParticipantEvidence.Established
+                [participant site ParticipantRole.ForeignResultDeclaration 0 11
+                 participant site ParticipantRole.ForeignResultCall 0 site
+                 participant site ParticipantRole.ForeignResultContext 0 context
+                 participant site ParticipantRole.ForeignResultHypothesis 0 54
+                 participant site ParticipantRole.ForeignResultActual 0 0
+                 participant site ParticipantRole.ForeignResultActual 1 1
+                 participant site ParticipantRole.ForeignResultAbi 0 55
+                 participant site ParticipantRole.ForeignResultDestination 0 56]
+             Claims=[ForeignResultProofRole.LogicalCoverage,id logical;ForeignResultProofRole.AbiNarrowing,id abi]}
+        let accounts=[account 3 60 50 51;account 4 61 52 53]
+        let claims = accounts |> List.collect (fun account ->
+            account.Claims |> List.map (fun (role,citizen) ->
+                let model : ForeignResultCoverageModel =
+                    {Application=account.Application;Role=role;ResultRange=ValueRange.Bounded(-1I,3I)
+                     Destination=ValueRange.Bounded(-2147483648I,2147483647I);DestinationDeclaration=Some(id 56)
+                     Abi=Some(id 55);AbiRange=ValueRange.Bounded(-(1I <<< 63),(1I <<< 63)-1I)
+                     AbiIdentity=None;DestinationIdentity=None}
+                citizen, {Id=sprintf "fixture-result-%d" (NodeId.value citizen);Kind="foreign-result-coverage";Logic="QF_LIA"
+                          Statement="Source-issued conditional result coverage";Source="component result contract"
+                          Refs=["fixture.result";"1";"component result contract"];Body=ObligationBody.ForeignResultCoverage model}))
+        let meets = [3;4] |> List.map (fun site ->
+            id site, {Consumer=id site;Operand=id site;From=64;To=32;Adapt=MeetKind.Truncate}) |> Map.ofList
+        let boundary = graph.Emission.Boundary
+        let calls = boundary.Calls |> Map.map (fun site call ->
+            {call with Result=Some(BoundaryScalar.Integer(64,true));ResultAdaptation=Some meets[site];Participants=support})
+        let sources = accounts |> List.collect (fun account ->
+            match account.Participants with
+            | ParticipantEvidence.Established rows -> account.Claims |> List.map (fun (_,citizen)->citizen,[rows |> List.map (fun (row: Participant) -> row.Node)])
+            | _ -> failwith "Fixture requires settled source incidence")
+        let nodes = claims |> List.fold (fun nodes (citizen,claim) ->
+            nodes |> Map.add citizen (node (NodeId.value citizen) (SemanticKind.Obligation claim) unitType [] None)) graph.Nodes
+        let graph =
+            {graph with Nodes=nodes;Obligations=graph.Obligations @ List.map snd claims
+                        CurrentClaims=List.fold (fun current (citizen,claim)->Map.add citizen claim current) graph.CurrentClaims claims
+                        ObligationSources=List.fold (fun current (citizen,rows)->Map.add citizen rows current) graph.ObligationSources sources
+                        Codata={graph.Codata with Meets=meets |> Map.map (fun _ meet -> [meet])}
+                        Emission=
+                            { graph.Emission with
+                                Callable={graph.Emission.Callable with AliasTargets=Map.ofList [id 3,id 3;id 4,id 4]}
+                                Boundary=
+                                    { boundary with
+                                        Calls=calls
+                                        Imports=boundary.Imports.Add(imported.Identity,{imported with Result=Some(BoundaryScalar.Integer(64,true))})
+                                        WritableBufferUses=boundary.WritableBufferUses |> Map.map (fun _ row->{row with Participants=support}) }
+                                Numeric={graph.Emission.Numeric with ForeignResultUses=accounts} } }
+        graph
+
+    [<Fact>]
+    let ``writable signed result retains two source occurrences and adapts native width`` () =
+        let graph=signedFixture ()
+        let rawResults = [3;4] |> List.map (fun site ->
+            match observe site graph with
+            | Result.Ok(([WritableBufferCall(actual,values,Some raw);ArithOp(ArithOp.TruncI(adapted,source,fromType,toType))],TRValue result),_) ->
+                Assert.Equal(id site,actual)
+                Assert.Equal(2,values.Length)
+                Assert.Equal(TInt(IntWidth 64),raw.Type)
+                Assert.Equal(raw.SSA,source)
+                Assert.Equal(TInt(IntWidth 64),fromType)
+                Assert.Equal(TInt(IntWidth 32),toType)
+                Assert.Equal({SSA=adapted;Type=toType},result)
+                Assert.Equal(NeedsTargetRealization,moduleText (Ok 64) None [WritableBufferCall(actual,values,Some raw)])
+                raw.SSA
+            | other -> failwithf "Writable signed result lost its original raw SSA/adaptation: %A" other)
+        Assert.NotEqual(rawResults[0],rawResults[1])
+
+    [<Theory>]
+    [<InlineData("missing","unique current same-call")>]
+    [<InlineData("duplicate","unique current same-call")>]
+    [<InlineData("declaration","unique current same-call")>]
+    [<InlineData("actual","ordered actuals")>]
+    [<InlineData("hypothesis","declared hypothesis")>]
+    [<InlineData("pending","pending source participants")>]
+    [<InlineData("roles","distinct logical/ABI claim citizens")>]
+    [<InlineData("citizen","current required logical/ABI claims")>]
+    [<InlineData("context","current required logical/ABI claims")>]
+    [<InlineData("support-order","current required logical/ABI claims")>]
+    [<InlineData("unsupported","only void or the declared signed64")>]
+    let ``writable signed result refuses withdrawn or mismatched source result evidence`` defect reason =
+        let graph=signedFixture ()
+        let first=graph.Emission.Numeric.ForeignResultUses.Head
+        let changed =
+            match defect with
+            | "declaration" -> {first with Application={first.Application with Declaration=id 99}}
+            | "actual" -> {first with Application={first.Application with Arguments=List.rev first.Application.Arguments}}
+            | "hypothesis" -> {first with Application={first.Application with Hypothesis=None}}
+            | "pending" -> {first with Participants=ParticipantEvidence.Pending {Derived=[]}}
+            | "roles" -> {first with Claims=List.rev first.Claims}
+            | "context" -> {first with Application={first.Application with Context=[id 61]}}
+            | _ -> first
+        let accounts =
+            if defect="missing" then graph.Emission.Numeric.ForeignResultUses.Tail
+            elif defect="duplicate" then first::graph.Emission.Numeric.ForeignResultUses
+            else changed::graph.Emission.Numeric.ForeignResultUses.Tail
+        let boundary=graph.Emission.Boundary
+        let boundary =
+            if defect="unsupported" then
+                {boundary with Calls=boundary.Calls.Add(id 3,{boundary.Calls[id 3] with Result=Some(BoundaryScalar.Integer(64,false))})
+                               Imports=boundary.Imports.Add(id 13,{boundary.Imports[id 13] with Result=Some(BoundaryScalar.Integer(64,false))})}
+            else boundary
+        let graph={graph with
+                    CurrentClaims=if defect="citizen" then graph.CurrentClaims.Remove(id 51) else graph.CurrentClaims
+                    ObligationSources=if defect="support-order" then graph.ObligationSources.Add(id 51,[List.rev graph.ObligationSources[id 51].Head]) else graph.ObligationSources
+                    Emission={graph.Emission with Boundary=boundary;Numeric={graph.Emission.Numeric with ForeignResultUses=accounts}}}
+        match observe 3 graph with
+        | Result.Error message -> Assert.Contains(reason,message)
+        | other -> failwithf "Invalid writable signed-result %s admitted: %A" defect other
+
     [<Fact>]
     let ``writable buffer retains neutral carrier ordered arguments and distinct call sites`` () =
         let graph,imported=fixture ()
         Assert.Equal<MLIRType list>([TMemRef(TInt(IntWidth 8));TInt(IntWidth 64)],BoundaryAbi.parametersIn graph.Emission.Boundary imported)
         for site in [3;4] do
             match observe site graph with
-            | Result.Ok(([WritableBufferCall(actual,values)],TRVoid),_) ->
+            | Result.Ok(([WritableBufferCall(actual,values,None)],TRVoid),_) ->
                 Assert.Equal(id site,actual)
                 Assert.Equal<Val list>([{SSA=Arg 0;Type=TMemRef(TInt(IntWidth 8))};{SSA=Arg 1;Type=TInt(IntWidth 64)}],values)
             | other -> failwithf "Writable call lost its exact account: %A" other
@@ -108,8 +231,8 @@ module WritableBuffer =
     [<InlineData("ordinal","native ordinal or ordered actuals")>]
     [<InlineData("byte-format","required count/storage claim citizens")>]
     [<InlineData("claim","required count/storage claim citizens")>]
-    [<InlineData("indirect","exact direct void signature")>]
-    [<InlineData("result","exact direct void signature")>]
+    [<InlineData("indirect","exact direct signature")>]
+    [<InlineData("result","exact direct signature")>]
     let ``writable buffer refuses withdrawn or mismatched current evidence`` defect reason =
         let graph,_=fixture ()
         let boundary=graph.Emission.Boundary
@@ -139,7 +262,7 @@ module WritableBuffer =
         let graph,imported=fixture ()
         let operation=
             if declaration then FuncOp(BoundaryFuncDecl(imported,BoundaryAbi.parametersIn graph.Emission.Boundary imported,[]))
-            else WritableBufferCall(id 3,[{SSA=Arg 0;Type=TMemRef(TInt(IntWidth 8))};{SSA=Arg 1;Type=TInt(IntWidth 64)}])
+            else WritableBufferCall(id 3,[{SSA=Arg 0;Type=TMemRef(TInt(IntWidth 8))};{SSA=Arg 1;Type=TInt(IntWidth 64)}],None)
         Assert.Equal(NeedsTargetRealization,moduleText (Ok 64) (Some "writable_component") [operation])
 
 /// The opaque handle type of a register of the width given, as the contract states it.
