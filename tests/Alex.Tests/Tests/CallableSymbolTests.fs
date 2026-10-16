@@ -842,6 +842,79 @@ let private importedDeclarationOperandFixture () =
     }
     |> declareBindingReadings
 
+/// Direct scalar invocation reuses the imported declaration's native signature.
+/// These contract rows state both adaptations; they perform no source inference.
+let private scalarBoundaryFixture () =
+  let graph = importedDeclarationOperandFixture ()
+  let site, actual = NodeId 929, NodeId 927
+  let argumentMeet = {Consumer=site;Operand=actual;From=8;To=64;Adapt=MeetKind.ExtendUnsigned}
+  let resultMeet = {Consumer=site;Operand=site;From=64;To=8;Adapt=MeetKind.Truncate}
+  let imported = graph.Emission.Boundary.Imports[NodeId 44]
+  let call : BoundaryCall =
+    {Site=site;Import=imported.Identity;Callee=NodeId 928;Entry=None;Resource=None
+     Arguments=[{Actual=actual;Formal=NodeId 882;Abi=BoundaryScalar.Integer(64,true);Adaptation=Some argumentMeet}]
+     ErasedUnitArguments=[];Result=imported.Result;ResultAdaptation=Some resultMeet
+     Participants=Set.empty;SourceTypes=Map.empty}
+  let nodes =
+    [node 927 (SemanticKind.PatternBinding "argument") intType [] (Some 929)
+     node 928 (SemanticKind.VarRef("fixture_extern",Some(NodeId 30))) (functionFrom intType intType) [] (Some 929)
+     node 929 (SemanticKind.Application(NodeId 928,[actual])) intType [928;927] (Some 35)]
+  let owner = graph.Nodes[NodeId 35]
+  let nodes =
+    nodes |> List.fold(fun held value -> Map.add value.Id value held)
+      (graph.Nodes.Add(owner.Id,{owner with Kind=SemanticKind.Sequential[NodeId 32;site];Children=[NodeId 32;site];Type=intType}))
+  let boundary = {graph.Emission.Boundary with Calls=Map.ofList[site,call]}
+  let aliases = [NodeId 927;NodeId 928;site] |> List.fold(fun held id -> Map.add id id held) graph.Emission.Callable.AliasTargets
+  let callable = {graph.Emission.Callable with AliasTargets=aliases}
+  {graph with
+    Nodes=nodes
+    Codata={graph.Codata with Meets=graph.Codata.Meets.Add(site,[argumentMeet;resultMeet])}
+    Emission={graph.Emission with Boundary=boundary;Callable=callable}}
+  |> declareBindingReadings
+
+[<Fact>]
+let ``direct scalar boundary preserves native call between published argument and result adaptations`` () =
+  let graph = scalarBoundaryFixture ()
+  let operands = MLIRAccumulator.empty ()
+  MLIRAccumulator.bindNode (NodeId 927) (Arg 0) (TInt(IntWidth 8)) operands
+  match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus graph graph.Nodes[NodeId 929]) 64 operands with
+  | Result.Ok((operations,TRValue result),_) ->
+    match operations with
+    | [ArithOp(ArithOp.ExtUI(argument,Arg 0,argumentFrom,argumentTo));
+       FuncOp(FuncCall([native],"fixture_extern",[actual]));
+       ArithOp(ArithOp.TruncI(adapted,source,resultFrom,resultTo))] ->
+      Assert.Equal(TInt(IntWidth 8),argumentFrom)
+      Assert.Equal(TInt(IntWidth 64),argumentTo)
+      Assert.Equal({SSA=argument;Type=argumentTo},actual)
+      Assert.Equal(TInt(IntWidth 64),native.Type)
+      Assert.Equal(native.SSA,source)
+      Assert.Equal(TInt(IntWidth 64),resultFrom)
+      Assert.Equal(TInt(IntWidth 8),resultTo)
+      Assert.Equal({SSA=adapted;Type=resultTo},result)
+    | other -> failwithf "Direct scalar boundary lost its ordered native invocation or source adaptations: %A" other
+  | other -> failwithf "Direct scalar boundary did not produce its narrowed source result: %A" other
+  Assert.Empty operands.AllOps
+  Assert.Null(MLIRAccumulator.recallNode (NodeId 929) operands)
+  Assert.Equal(Some(Arg 0,TInt(IntWidth 8)),MLIRAccumulator.recallNode (NodeId 927) operands)
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``direct scalar boundary refuses withdrawn current argument or result adaptation`` resultMeet =
+  let graph = scalarBoundaryFixture ()
+  let withdrawn = if resultMeet then NodeId 929 else NodeId 927
+  let meets = graph.Codata.Meets[NodeId 929] |> List.filter(fun meet -> meet.Operand<>withdrawn)
+  let graph =
+    {graph with Codata={graph.Codata with Meets=graph.Codata.Meets.Add(NodeId 929,meets)}}
+  let operands = MLIRAccumulator.empty ()
+  MLIRAccumulator.bindNode (NodeId 927) (Arg 0) (TInt(IntWidth 8)) operands
+  match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus graph graph.Nodes[NodeId 929]) 64 operands with
+  | Result.Error reason -> Assert.Equal("Published adaptation disagrees with its exact source numeric meet.",reason)
+  | other -> failwithf "Direct scalar boundary admitted a withdrawn current adaptation: %A" other
+  Assert.Empty operands.AllOps
+  Assert.Null(MLIRAccumulator.recallNode (NodeId 929) operands)
+  Assert.Equal(Some(Arg 0,TInt(IntWidth 8)),MLIRAccumulator.recallNode (NodeId 927) operands)
+
 [<Fact>]
 let ``imported declaration operand needs no ordinary formal representation or runtime SSA`` () =
     let graph = importedDeclarationOperandFixture ()

@@ -380,12 +380,16 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                 return! fail (Message "Resource call lacks its source conversion and cleanup account.")
             | Some declaration ->
                 let writable = declaration.Parameters |> List.exists (fun (_, scalar) -> match scalar with BoundaryScalar.WritableBytes _ -> true | _ -> false)
-                if writable then
-                    do! ensure
-                            (call.Entry.IsNone && call.Result = declaration.Result
-                             && declaration.Parameters = (call.Arguments |> List.map (fun actual -> actual.Formal, actual.Abi)))
-                            "Writable byte calls require their exact direct signature and complete ordered actuals."
-                    do! pWritableResult call declaration
+                do!
+                    if writable then
+                        parser {
+                            do! ensure
+                                    (call.Entry.IsNone && call.Result = declaration.Result
+                                     && declaration.Parameters = (call.Arguments |> List.map (fun actual -> actual.Formal, actual.Abi)))
+                                    "Writable byte calls require their exact direct signature and complete ordered actuals."
+                            return! pWritableResult call declaration
+                        }
+                    else preturn ()
                 let rec arguments ordinal (witnessed: Map<NodeId, Meet option * Val * Val>) (operands: BoundaryOperand list) : PSGParser<MLIROp list * Val list> = parser {
                     match operands with
                     | [] -> return [], []
