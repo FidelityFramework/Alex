@@ -370,6 +370,8 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
         let! boundary = pBoundary
         match boundary.Calls.TryFind node.Id with
         | None -> return! fail (Message $"Boundary call {NodeId.value node.Id} has no source-published contract.")
+        | Some call when call.Arguments |> List.exists (fun operand -> operand.OptionalEntry.IsSome) ->
+            return! fail (Message "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it.")
         | Some call ->
             match boundary.Imports.TryFind call.Import with
             | None -> return! fail (Message "Published boundary call names an absent import.")

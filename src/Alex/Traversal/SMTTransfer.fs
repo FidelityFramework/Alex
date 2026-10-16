@@ -18,9 +18,9 @@
 /// --export-smtlib carries the `smt.declare_fun` names through verbatim, so the
 /// two dispatches pair one for one (HelloProof proof-trace 03).
 ///
-/// Output: a standalone verification module beside the program (one
-/// smt.solver scope per obligation, refutation style: `unsat` on every check
-/// means every obligation holds).
+/// Output: a standalone verification module beside the program, with one
+/// smt.solver scope per solver-ready obligation. Pending retains its ledger
+/// citizen and has no solver operation or discharge.
 module Alex.Traversal.SMTTransfer
 
 open Alex.Dialects.Core.Types
@@ -155,6 +155,8 @@ let private scope (ob: ObligationInfo) : MLIROp list =
 
     let ops =
         match ob.Body with
+        | ObligationBody.Pending _ ->
+            invalidArg "ob" "A Pending obligation has no solver scope."
         | ObligationBody.SnapshotBorrowBound(_, _, _, _, minimum, maximum) ->
             SnapshotBorrowProof.ofBounds minimum maximum |> resource
         | ObligationBody.ResourceConversion model -> ResourceProof.ofConversion model |> resource
@@ -1022,9 +1024,12 @@ let private scope (ob: ObligationInfo) : MLIROp list =
 
 /// The verification module from the graph's obligations.
 /// Pure function: ObligationInfo list -> MLIR text. The list is
-/// ObligationDischarge.ofGraph, the same list the design-time dispatch rendered.
+/// the complete ledger; only its non-Pending partition has solver scopes.
 let operations (obs: ObligationInfo list) : MLIROp list =
-    obs |> List.collect scope
+    obs |> List.collect (fun ob ->
+        match ob.Body with
+        | ObligationBody.Pending _ -> []
+        | _ -> scope ob)
 
 let transfer (obs: ObligationInfo list) : string =
     operations obs

@@ -36,13 +36,13 @@ module WritableBuffer =
             else imported
         let call site : BoundaryCall =
             { Site=id site;Import=id 13;Callee=id 2;Entry=None
-              Arguments=[{Actual=id 0;Formal=id 14;Abi=BoundaryScalar.WritableBytes(id 10);Adaptation=None}
-                         {Actual=id 1;Formal=id 15;Abi=BoundaryScalar.Integer(64,false);Adaptation=None}]
+              Arguments=[{Actual=id 0;Formal=id 14;Abi=BoundaryScalar.WritableBytes(id 10);Adaptation=None;OptionalEntry=None}
+                         {Actual=id 1;Formal=id 15;Abi=BoundaryScalar.Integer(64,false);Adaptation=None;OptionalEntry=None}]
               ErasedUnitArguments=[];Result=None;ResultAdaptation=None;Resource=None;Participants=support;SourceTypes=Map.empty }
         let call site =
             let original = call site
             if posix then
-                {original with Arguments={Actual=id 5;Formal=id 19;Abi=BoundaryScalar.Integer(32,true);Adaptation=Some(fdMeet site)}::original.Arguments}
+                {original with Arguments={Actual=id 5;Formal=id 19;Abi=BoundaryScalar.Integer(32,true);Adaptation=Some(fdMeet site);OptionalEntry=None}::original.Arguments}
             else original
         let useRow site count storage : BoundaryWritableBufferUse =
             { Call=id site;Declaration=id 10;Parameter=bufferParameter;CountParameter=countParameter;Buffer=id 0;Count=id 1;Allocation=id 16

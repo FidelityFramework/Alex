@@ -10,6 +10,22 @@ open Alex.Traversal.ScopeContext
 open Alex.Tests.Build
 module Zipper = Alex.Traversal.PSGZipper
 
+[<Fact>]
+let ``Pending obligation emits no solver operation or placeholder and retains ready text`` () =
+  let ready: ObligationInfo =
+    { Id = "ready_transfer"; Kind = "component-transfer"; Logic = "QF_LIA"
+      Statement = "Ready component"; Source = "pending-transfer:1"; Refs = []
+      Body = ObligationBody.IntegerRepresentationCoverage(0I, 0I, -128I, 127I) }
+  let pending =
+    { ready with Id = "pending_transfer"; Logic = ""
+                 Body = ObligationBody.Pending ["Selected target conversion remains Pending."] }
+  Assert.Empty(Alex.Traversal.SMTTransfer.operations [pending])
+  let ordinary = Alex.Traversal.SMTTransfer.transfer [ready]
+  let mixed = Alex.Traversal.SMTTransfer.transfer [pending; ready; pending]
+  Assert.Equal(ordinary, mixed)
+  Assert.Contains("ready_transfer", mixed)
+  Assert.DoesNotContain("pending_transfer", mixed)
+
 type private Callable = { Binding: NodeId; Lambda: NodeId; Argument: NodeId; Reference: NodeId; Call: NodeId }
 
 let private signature = functionFrom boolType boolType
@@ -695,7 +711,9 @@ let ``native entry module slot serializes stock typed placeholders`` () =
 
 [<Fact>]
 let ``imported pointer initialization and immutable read precede the indirect call`` () =
-    let ctx = importedFixture () |> importedTraversal
+    let graph = importedFixture ()
+    Assert.Equal(Some(NodeId 31), graph.Emission.Boundary.Calls[NodeId 34].Entry)
+    let ctx = graph |> importedTraversal
     Assert.Empty ctx.Accumulator.Errors
     let formed = MLIRAccumulator.recallNode (NodeId 31) ctx.Accumulator
     Assert.Equal(formed, MLIRAccumulator.recallNode (NodeId 32) ctx.Accumulator)
@@ -706,6 +724,42 @@ let ``imported pointer initialization and immutable read precede the indirect ca
     | [ FuncOp(FuncConstant(_, "fixture_extern", _)); FuncOp(FuncCallIndirect(_, pointer, [])) ] ->
         Assert.Equal((Option.get formed |> fst), pointer)
     | other -> failwithf "Expected one formation and its actual indirect call: %A" other
+
+/// Current-data consumer controls only: target conversion is intentionally
+/// pending, so neither selected case may borrow plain native-entry lowering.
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``optional native entry boundary refuses Some and None before operand lowering`` present =
+  let graph = importedFixture ()
+  let boundary = graph.Emission.Boundary
+  let call = boundary.Calls[NodeId 34]
+  let account: BoundaryOptionalEntry =
+    { Construction = NodeId 33; CaseOrdinal = if present then 1 else 0
+      Payload = if present then Some(NodeId 31) else None
+      Formation = if present then Some(NodeId 31) else None
+      Transport = Set.singleton (NodeId 33)
+      Obligation = NodeId 70 }
+  let operand: BoundaryOperand =
+    { Actual = NodeId 33; Formal = NodeId 71; Abi = BoundaryScalar.Entry(NodeId 72)
+      Adaptation = None; OptionalEntry = Some account }
+  let changed =
+    { boundary with
+        Calls =
+          boundary.Calls.Add(call.Site,
+            {call with Arguments = [operand]; Participants = Set.ofList [NodeId 31; NodeId 33; call.Site]}) }
+  let graph = { graph with Emission = {graph.Emission with Boundary = changed} }
+  let accumulator = MLIRAccumulator.empty ()
+  let ctx = context graph call.Site accumulator
+  match Alex.XParsec.PSGCombinators.tryMatchWithDiagnostics
+          Alex.Patterns.PlatformPatterns.pBoundaryCall graph graph.Nodes[call.Site]
+          ctx.Zipper ctx.Coeffects accumulator with
+  | Result.Error reason ->
+    Assert.Equal("Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it.", reason)
+  | Result.Ok result -> failwithf "Optional native entry was lowered as a plain entry: %A" result
+  Assert.Empty accumulator.AllOps
+  Assert.Null(MLIRAccumulator.recallNode operand.Actual accumulator)
+  Assert.Null(MLIRAccumulator.recallNode call.Site accumulator)
 
 /// The imported operand is the declaration reference from the real source
 /// shape, including its uncommitted integer formal. Only the native descriptor
@@ -852,7 +906,7 @@ let private scalarBoundaryFixture () =
   let imported = graph.Emission.Boundary.Imports[NodeId 44]
   let call : BoundaryCall =
     {Site=site;Import=imported.Identity;Callee=NodeId 928;Entry=None;Resource=None
-     Arguments=[{Actual=actual;Formal=NodeId 882;Abi=BoundaryScalar.Integer(64,true);Adaptation=Some argumentMeet}]
+     Arguments=[{Actual=actual;Formal=NodeId 882;Abi=BoundaryScalar.Integer(64,true);Adaptation=Some argumentMeet;OptionalEntry=None}]
      ErasedUnitArguments=[];Result=imported.Result;ResultAdaptation=Some resultMeet
      Participants=Set.empty;SourceTypes=Map.empty}
   let nodes =
