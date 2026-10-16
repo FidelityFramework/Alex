@@ -373,6 +373,15 @@ type ModuleText =
     | Available of string
     | NeedsTargetRealization
 
+/// One source-selected optional entry position. The original Option operand
+/// stays in the call vector; this code value is its retained closed formation.
+type OptionalEntrySlot = {
+    Ordinal: int
+    CaseOrdinal: int
+    Claim: Fidelity.PSG.NodeId
+    Code: Val
+}
+
 /// Top-level portable operation. Target dialects belong to backend realization.
 /// Single-phase execution with nested accumulators - no scope markers needed
 type MLIROp =
@@ -387,6 +396,9 @@ type MLIROp =
     /// Direct writable borrowing retains the exact source call occurrence and
     /// complete native argument order. Target address realization is deferred.
     | WritableBufferCall of site: Fidelity.PSG.NodeId * arguments: Val list * result: Val option
+    /// Source-selected Some conversion, deferred to the selected backend.
+    /// Slots retain their original ordinal, case and per-use proof citizen.
+    | OptionalEntryCall of site: Fidelity.PSG.NodeId * arguments: Val list * slots: OptionalEntrySlot list * results: Val list
     /// Published MMIO intent retains its exact source account; target expansion
     /// and any temporary values belong to the selected backend.
     | MmioLoad of site: Fidelity.PSG.NodeId * result: SSA * address: SSA * bits: int
@@ -509,6 +521,32 @@ and SMTOp =
     | SMTCheck                                      // smt.check sat {} unknown {} unsat {}
 
 module BoundaryAbi =
+    /// Read the current per-use source plan. This does not realize a native
+    /// address or treat the source solver receipt as target discharge.
+    let optionalEntryConversionAt (revision: Fidelity.PSG.Revision)
+                                  (call: Fidelity.PSG.BoundaryCall) ordinal
+                                  (operand: Fidelity.PSG.BoundaryOperand) =
+        let missing () = Error "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it."
+        match operand.OptionalEntry with
+        | Some selected ->
+            match selected.Payload, selected.Formation, operand.Abi,
+                  revision.CurrentClaims.TryFind selected.Obligation with
+            | Some payload, Some formation, Fidelity.PSG.BoundaryScalar.Entry invocation, Some claim
+                when List.contains claim revision.Obligations ->
+                match claim.Body with
+                | Fidelity.PSG.ObligationBody.OptionalEntryArgumentConversion model when
+                    revision.Emission.Boundary.Calls.TryFind call.Site = Some call
+                    && List.tryItem ordinal call.Arguments = Some operand
+                    && claim.Kind = sprintf "foreign-optional-entry-conversion-%d" ordinal
+                    && selected.CaseOrdinal = 1 && model.SourceCase = selected.CaseOrdinal
+                    && model.Call = call.Site && model.Parameter = ordinal
+                    && model.Actual = operand.Actual && model.Construction = selected.Construction
+                    && model.Payload = payload && model.Formation = formation && model.Invocation = invocation ->
+                    Ok(selected, claim, model)
+                | _ -> missing ()
+            | _ -> missing ()
+        | None -> missing ()
+
     /// Read existing published lineage without classifying branch semantics or
     /// granting proof authority. Both the witness and target use these same rows.
     let resourceAccessAt (boundary: Fidelity.PSG.BoundaryEmissionProjection) site source kind =

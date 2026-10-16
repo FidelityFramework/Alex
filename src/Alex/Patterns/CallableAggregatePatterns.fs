@@ -61,6 +61,20 @@ let private nativeAlternative (graph: Revision) (row: CallableAggregateValue)
         | [CallableAggregatePathStep.RecordField _], CallableAggregateOperation.Construct, Some { Kind = SemanticKind.RecordExpr _ }
         | [CallableAggregatePathStep.RecordField _], CallableAggregateOperation.Project, Some { Kind = SemanticKind.FieldGet _ } -> true
         | _ -> false
+    let optionalConstruction =
+        match slot.Path, row.Operation with
+        | [CallableAggregatePathStep.UnionPayload(1, 0)], CallableAggregateOperation.Construct ->
+            graph.Emission.Boundary.Calls.Values
+            |> Seq.exists (fun call ->
+                call.Arguments |> List.mapi (fun ordinal operand -> ordinal, operand)
+                |> List.exists (fun (ordinal, operand) ->
+                    match BoundaryAbi.optionalEntryConversionAt graph call ordinal operand with
+                    | Result.Ok(selected, _, model) ->
+                        model.Construction = row.Occurrence && row.Aggregate = row.Occurrence &&
+                        model.Payload = carrier.Occurrence && model.Formation = arm.Formation &&
+                        selected.Transport.Contains row.Occurrence && selected.Transport.Contains model.Actual
+                    | Result.Error _ -> false))
+        | _ -> false
     let singleton =
         row.Alternatives = [arm] && arm.Ordinal = 0 && row.Bytes = 0 &&
         (row.Selector |> Option.exists (fun selector ->
@@ -81,8 +95,8 @@ let private nativeAlternative (graph: Revision) (row: CallableAggregateValue)
         |> Option.exists (fun entry ->
             graph.Emission.Boundary.CallbackInvocations.TryFind entry.Invocation
             |> Option.exists (fun invocation -> Operands.hasUnitParameterAdapter graph entry invocation.Signature))
-    if not recordOperation then
-        error "requires an exact record-field Construct or FieldGet Project; union transport is not admitted."
+    if not recordOperation && not optionalConstruction then
+        error "requires an exact record-field Construct or FieldGet Project, or a current source-selected optional Some Construct; other union transport is not admitted."
     elif not singleton || not selected || arm.Adapter.IsSome ||
        carrier.Environment.IsSome || carrier.EnvironmentValue.IsSome || arm.EnvironmentPlacement.IsSome ||
        contract.EnvironmentBytes.IsSome ||

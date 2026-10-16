@@ -370,9 +370,20 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
         let! boundary = pBoundary
         match boundary.Calls.TryFind node.Id with
         | None -> return! fail (Message $"Boundary call {NodeId.value node.Id} has no source-published contract.")
-        | Some call when call.Arguments |> List.exists (fun operand -> operand.OptionalEntry.IsSome) ->
-            return! fail (Message "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it.")
         | Some call ->
+            let! state = getUserState
+            do! parser {
+                let! _ =
+                    call.Arguments |> List.mapi (fun ordinal operand -> parser {
+                        match operand.OptionalEntry with
+                        | None -> return ()
+                        | Some _ ->
+                            match BoundaryAbi.optionalEntryConversionAt state.Graph call ordinal operand with
+                            | Result.Ok _ -> return ()
+                            | Result.Error reason -> return! fail (Message reason)
+                    }) |> Alex.XParsec.Extensions.sequence
+                return ()
+            }
             match boundary.Imports.TryFind call.Import with
             | None -> return! fail (Message "Published boundary call names an absent import.")
             | Some declaration when call.Resource.IsSome -> return! pResourceCall call declaration
@@ -392,9 +403,9 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                             return! pWritableResult call declaration
                         }
                     else preturn ()
-                let rec arguments ordinal (witnessed: Map<NodeId, Meet option * Val * Val>) (operands: BoundaryOperand list) : PSGParser<MLIROp list * Val list> = parser {
+                let rec arguments ordinal (witnessed: Map<NodeId, Meet option * Val * Val>) (operands: BoundaryOperand list) : PSGParser<MLIROp list * Val list * OptionalEntrySlot list> = parser {
                     match operands with
-                    | [] -> return [], []
+                    | [] -> return [], [], []
                     | operand :: rest ->
                         do!
                             match operand.Abi with
@@ -402,20 +413,40 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                             | _ -> preturn ()
                         let! ssa, ty = pRecallNode operand.Actual
                         let raw = { SSA = ssa; Type = ty }
-                        let! operations, value =
-                            match witnessed.TryFind operand.Actual with
-                            | Some (adaptation, previous, value) -> parser {
-                                do! ensure (adaptation = operand.Adaptation && previous = raw) "Repeated boundary actual disagrees with its witnessed source meet or value."
-                                return [], value
-                              }
-                            | None -> pBoundaryAdapt node.Id operand.Actual operand.Adaptation raw
-                        do! ensure (value.Type = BoundaryAbi.scalarTypeIn boundary operand.Abi) "Witnessed boundary argument disagrees with its published ABI."
+                        let! operations, value, slot = parser {
+                            match operand.OptionalEntry with
+                            | Some _ ->
+                                let! selected, _, model =
+                                    match BoundaryAbi.optionalEntryConversionAt state.Graph call ordinal operand with
+                                    | Result.Ok row -> preturn row
+                                    | Result.Error reason -> fail (Message reason)
+                                let! _, _, signature =
+                                    match FunctionPointerPatterns.closedFunctionAddress state.Graph model.Formation with
+                                    | Result.Ok row -> preturn row
+                                    | Result.Error reason -> fail (Message reason)
+                                let! code, codeType = pRecallNode model.Formation
+                                do! ensure (operand.Adaptation.IsNone && codeType = signature
+                                            && raw.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual)
+                                        "Optional entry intent differs from its original Option operand or retained closed code."
+                                return [], raw, Some { Ordinal = ordinal; CaseOrdinal = selected.CaseOrdinal
+                                                       Claim = selected.Obligation; Code = {SSA = code; Type = codeType} }
+                            | None ->
+                                let! operations, value =
+                                    match witnessed.TryFind operand.Actual with
+                                    | Some (adaptation, previous, value) -> parser {
+                                        do! ensure (adaptation = operand.Adaptation && previous = raw) "Repeated boundary actual disagrees with its witnessed source meet or value."
+                                        return [], value
+                                      }
+                                    | None -> pBoundaryAdapt node.Id operand.Actual operand.Adaptation raw
+                                do! ensure (value.Type = BoundaryAbi.scalarTypeIn boundary operand.Abi) "Witnessed boundary argument disagrees with its published ABI."
+                                return operations, value, None
+                          }
                         // Repeated positions retain their order and reuse the
                         // one canonical meet definition for this actual.
-                        let! remainingOps, values = arguments (ordinal + 1) (witnessed.Add(operand.Actual, (operand.Adaptation, raw, value))) rest
-                        return operations @ remainingOps, value :: values
+                        let! remainingOps, values, slots = arguments (ordinal + 1) (witnessed.Add(operand.Actual, (operand.Adaptation, raw, value))) rest
+                        return operations @ remainingOps, value :: values, Option.toList slot @ slots
                 }
-                let! argumentOps, values = arguments 0 Map.empty call.Arguments
+                let! argumentOps, values, slots = arguments 0 Map.empty call.Arguments
                 let! results =
                     match call.Result with
                     | None -> preturn []
@@ -424,6 +455,11 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                         return [{ SSA = resultSSA; Type = boundaryScalarType ty }]
                       }
                 let! operation =
+                    if not slots.IsEmpty then parser {
+                        do! ensure (call.Entry.IsNone && not writable && call.Resource.IsNone)
+                                "Optional entry calls require their exact direct source invocation."
+                        return OptionalEntryCall(call.Site, values, slots, results)
+                    } else
                     match call.Arguments |> List.exists (fun operand -> match operand.Abi with BoundaryScalar.WritableBytes _ -> true | _ -> false), call.Entry with
                     | true, None -> preturn (WritableBufferCall(call.Site, values, List.tryHead results))
                     | true, Some _ -> fail (Message "Writable byte calls require their exact direct source invocation.")

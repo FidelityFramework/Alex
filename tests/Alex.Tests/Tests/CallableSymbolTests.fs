@@ -26,6 +26,27 @@ let ``Pending obligation emits no solver operation or placeholder and retains re
   Assert.Contains("ready_transfer", mixed)
   Assert.DoesNotContain("pending_transfer", mixed)
 
+[<Fact>]
+let ``optional Some call intent requires selected target realization and retains explicit slots`` () =
+  let original = { SSA = Arg 0; Type = TMemRefStatic(1, TInt(IntWidth 8)) }
+  let code = { SSA = Arg 1; Type = TFunc([], []) }
+  let slot = { Ordinal = 0; CaseOrdinal = 1; Claim = NodeId 3; Code = code }
+  let operation = OptionalEntryCall(NodeId 2, [original], [slot], [])
+  Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
+  let error = Assert.ThrowsAny<System.Exception>(fun () ->
+    Alex.Dialects.Core.Serialize.opToString (Ok 64) operation |> ignore)
+  Assert.Contains("exact source conversion accounts", error.Message)
+  match OperationStructure.flatten [operation] with
+  | [OptionalEntryCall(site, arguments, [actual], results)] ->
+    Assert.Equal(NodeId 2, site)
+    Assert.Equal<Val list>([original], arguments)
+    Assert.Equal(0, actual.Ordinal)
+    Assert.Equal(1, actual.CaseOrdinal)
+    Assert.Equal(NodeId 3, actual.Claim)
+    Assert.Equal(code, actual.Code)
+    Assert.Empty results
+  | other -> failwithf "Optional conversion lost its explicit source incidence: %A" other
+
 type private Callable = { Binding: NodeId; Lambda: NodeId; Argument: NodeId; Reference: NodeId; Call: NodeId }
 
 let private signature = functionFrom boolType boolType
