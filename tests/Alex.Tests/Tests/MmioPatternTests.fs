@@ -387,7 +387,7 @@ module ReturnedCheckedText =
              Count=id 2;CountCarrier=allocation.CountCarrier;CountOperand=allocation.Construction.Count
              Allocation=Some(id 1);Loop=None;Read=None;Write=None;Requirements=[];Participants=support}
         let validation : MemoryUtf8ValidationWitness =
-            {Site=id 4;Construction=construction;Copy=copy;Allocation=allocation;SourceCarrier=bytes}
+            {Site=id 4;Construction=construction;Copy=copy;Storage=MemoryCheckedSnapshotStorage.Allocated allocation;SourceCarrier=bytes}
         let extent : MemoryExtentWitness =
             {Site=id 11;Source=id 10;Element={Name="octet";Capability="native";Family="uint";Bits=8;MinMagnitude="0";MaxMagnitude="255";Boundary="exact"}
              ElementDeclaration=id 42;Result=carrier 11 (ValueRange.Bounded(3I,3I));IndexUnsigned=true
@@ -403,7 +403,7 @@ module ReturnedCheckedText =
              id 4,MemoryWitnessOperation.Utf8Validation validation
              id 6,MemoryWitnessOperation.ConstructedValue(constructed 6)
              id 7,MemoryWitnessOperation.ConstructedValue(constructed 7)
-             id 8,MemoryWitnessOperation.SnapshotRetirement {Site=id 8;Construction=construction;Allocation=allocation}
+             id 8,MemoryWitnessOperation.SnapshotRetirement {Site=id 8;Construction=construction;Storage=MemoryCheckedSnapshotStorage.Allocated allocation}
              id 11,MemoryWitnessOperation.BufferExtent extent
              id 13,retirement 13 10 MemoryCheckedRetirementTarget.Backing
              id 14,retirement 14 20 MemoryCheckedRetirementTarget.Carrier
@@ -449,6 +449,26 @@ module ReturnedCheckedText =
         let result=matchAt Alex.Patterns.MemoryPatterns.pPublishedMemoryOperation (focus graph graph.Nodes[id site]) 64 operands
         Assert.Empty operands.AllOps
         result
+
+    [<Fact>]
+    let ``allocated checked snapshot validation preserves parser success`` () =
+        let graph=fixture ()
+        let memory=graph.Emission.Memory
+        let validation=match memory.Operations[id 4] with MemoryWitnessOperation.Utf8Validation row->row | _->failwith "fixture"
+        let representation=match memory.Operations[id 11] with MemoryWitnessOperation.BufferExtent row->row.Element | _->failwith "fixture"
+        let view : MemoryStringViewWitness =
+            {Site=id 5;Source=validation.Construction.Snapshot;Owner=validation.Construction.Owner
+             Snapshot=validation.Construction.Snapshot;Direction=MemoryStringViewDirection.FromBytes
+             Checked=Some validation.Construction;SourceCarrier=bytes;ResultCarrier=bytes;Element=byte
+             Representation=representation;Declaration=id 42;Extent=validation.Copy.CountCarrier;Participants=support}
+        let graph={graph with Emission={graph.Emission with Memory={memory with Operations=memory.Operations.Add(id 5,MemoryWitnessOperation.StringView view)}}}
+        match observe 4 graph (fun accumulator->accumulator) with
+        | Ok(([Utf8Validate(site,snapshot,result)],[],TRValue actual),_) ->
+            Assert.Equal(id 4,site)
+            Assert.Equal(Arg 4,snapshot.SSA)
+            Assert.Equal(TInt(IntWidth 1),result.Type)
+            Assert.Equal(result,actual)
+        | other -> failwithf "Allocated validation lost its successful parser continuation: %A" other
 
     [<Theory>]
     [<InlineData(6)>]
@@ -530,11 +550,12 @@ module ReturnedCheckedText =
         let memory=graph.Emission.Memory
         let retired=match memory.Operations[id 8] with MemoryWitnessOperation.SnapshotRetirement row->row | _->failwith "fixture"
         let construction={retired.Construction with Returned=None}
-        let allocation={retired.Allocation with MinimumCount=0I;MaximumCount=0I;Residence=MemoryResidence.Stack(id 17,id 34)}
+        let allocated=match retired.Storage with MemoryCheckedSnapshotStorage.Allocated allocation->allocation | _->failwith "fixture"
+        let allocation={allocated with MinimumCount=0I;MaximumCount=0I;Residence=MemoryResidence.Stack(id 17,id 34)}
         let operations=memory.Operations
                         |> Map.add (id 1) (MemoryWitnessOperation.ArrayAllocation allocation)
-                        |> Map.add (id 4) (MemoryWitnessOperation.Utf8Validation {Site=id 4;Construction=construction;Allocation=allocation;Copy=memory.ArrayCopies[id 40];SourceCarrier=bytes})
-                        |> Map.add (id 8) (MemoryWitnessOperation.SnapshotRetirement {Site=id 8;Construction=construction;Allocation=allocation})
+                        |> Map.add (id 4) (MemoryWitnessOperation.Utf8Validation {Site=id 4;Construction=construction;Storage=MemoryCheckedSnapshotStorage.Allocated allocation;Copy=memory.ArrayCopies[id 40];SourceCarrier=bytes})
+                        |> Map.add (id 8) (MemoryWitnessOperation.SnapshotRetirement {Site=id 8;Construction=construction;Storage=MemoryCheckedSnapshotStorage.Allocated allocation})
         let graph={graph with Emission={graph.Emission with Memory={memory with Operations=operations}}}
         match observe 8 graph (fun value->value) with
         | Ok(([Utf8SnapshotRetire(_,value)],[],TRVoid),_) -> Assert.Equal(Arg 4,value.SSA)
@@ -569,7 +590,10 @@ module ReturnedCheckedText =
                 operations |> Map.map(fun _ operation ->
                     match operation with
                     | MemoryWitnessOperation.ArrayAllocation row -> MemoryWitnessOperation.ArrayAllocation {row with MinimumCount=0I}
-                    | MemoryWitnessOperation.Utf8Validation row -> MemoryWitnessOperation.Utf8Validation {row with Allocation={row.Allocation with MinimumCount=0I}}
+                    | MemoryWitnessOperation.Utf8Validation row ->
+                        match row.Storage with
+                        | MemoryCheckedSnapshotStorage.Allocated allocation -> MemoryWitnessOperation.Utf8Validation {row with Storage=MemoryCheckedSnapshotStorage.Allocated {allocation with MinimumCount=0I}}
+                        | _ -> operation
                     | _ -> operation)
             else operations
         let graph={graph with Emission={graph.Emission with Memory={graph.Emission.Memory with Operations=operations}}}
@@ -593,6 +617,121 @@ module ReturnedCheckedText =
         match observe site graph (fun value -> value) with
         | Result.Error reason -> Assert.Contains("exact caller value or cleanup occurrence",reason)
         | Ok _ -> failwith "A foreign same-typed value was retired"
+
+    /// The existing checked-memory test owner keeps empty and allocated rows
+    /// distinct. No literal/global or source compiler is manufactured here.
+    module EmptySnapshots =
+        let private emptyFixture () =
+            let graph=fixtureWithSnapshot 43 43
+            let memory=graph.Emission.Memory
+            let original=match memory.Operations[id 4] with MemoryWitnessOperation.Utf8Validation row->row | _->failwith "fixture"
+            let life={original.Construction.Returned.Value with MaximumLiveBytes=32L}
+            let construction={original.Construction with Returned=Some life}
+            let empty : MemoryEmptySnapshotWitness =
+                {Site=id 1;Snapshot=id 43;Owner=id 3;Count=id 2;SourceType=arrayOf uint8Type;Declaration=id 42}
+            let count={original.Copy.CountCarrier with Range=ValueRange.Bounded(0I,0I)}
+            let copy={original.Copy with CountCarrier=count}
+            let representation=match memory.Operations[id 11] with MemoryWitnessOperation.BufferExtent row->row.Element | _->failwith "fixture"
+            let view : MemoryStringViewWitness =
+                {Site=id 5;Source=id 43;Owner=id 3;Snapshot=id 43;Direction=MemoryStringViewDirection.FromBytes
+                 Checked=Some construction;SourceCarrier=bytes;ResultCarrier=bytes;Element=byte;Representation=representation
+                 Declaration=id 42;Extent=count;Participants=support}
+            let operations=memory.Operations |> Map.map(fun _ operation ->
+                match operation with
+                | MemoryWitnessOperation.ArrayAllocation _ -> MemoryWitnessOperation.EmptySnapshot empty
+                | MemoryWitnessOperation.Utf8Validation row -> MemoryWitnessOperation.Utf8Validation {row with Construction=construction;Storage=MemoryCheckedSnapshotStorage.Empty empty;Copy=copy}
+                | MemoryWitnessOperation.ConstructedValue row -> MemoryWitnessOperation.ConstructedValue {row with Construction=construction}
+                | MemoryWitnessOperation.SnapshotRetirement row -> MemoryWitnessOperation.SnapshotRetirement {row with Construction=construction;Storage=MemoryCheckedSnapshotStorage.Empty empty}
+                | MemoryWitnessOperation.CheckedResultRetirement row -> MemoryWitnessOperation.CheckedResultRetirement {row with Construction=construction;Target=if row.Target=MemoryCheckedRetirementTarget.Backing then MemoryCheckedRetirementTarget.EmptyBacking else row.Target}
+                | MemoryWitnessOperation.BufferExtent row -> MemoryWitnessOperation.BufferExtent {row with Result={row.Result with Range=ValueRange.Bounded(0I,0I)}}
+                | _ -> operation) |> Map.add (id 5) (MemoryWitnessOperation.StringView view)
+            let capacity={graph.CurrentClaims[id 32] with Body=ObligationBody.CapacityFits(32L,4096L)}
+            {graph with
+                Nodes=graph.Nodes.Add(id 43,node 43 (SemanticKind.PatternBinding "snapshot") (arrayOf uint8Type) [] None)
+                                  .Add(id 32,node 32 (SemanticKind.Obligation capacity) unitType [] None)
+                CurrentClaims=graph.CurrentClaims.Add(id 32,capacity)
+                Obligations=graph.Obligations |> List.map(fun info->if info.Id=capacity.Id then capacity else info)
+                Emission={graph.Emission with
+                            Callable={graph.Emission.Callable with AliasTargets=graph.Emission.Callable.AliasTargets.Add(id 43,id 1)}
+                            Numeric=
+                                {graph.Emission.Numeric with
+                                    Values=graph.Emission.Numeric.Values.Add(id 2,count)
+                                    Elements=graph.Emission.Numeric.Elements.Add(id 1,byte)
+                                    SourceTypes=graph.Emission.Numeric.SourceTypes.Add(id 43,arrayOf uint8Type)
+                                    OccurrenceRepresentations=graph.Emission.Numeric.OccurrenceRepresentations.Add(id 43,Ok bytes)}
+                            Memory={memory with Operations=operations;ArrayCopies=memory.ArrayCopies.Add(id 40,copy);Required=memory.Required.Add(id 1)}}}
+
+        let private observeEmpty site graph =
+            observe site graph (fun accumulator ->
+                MLIRAccumulator.bindNode (id 43) (Arg 4) (TMemRef(TInt(IntWidth 8))) accumulator
+                accumulator)
+
+        let private changeEmpty change graph =
+            let operations=graph.Emission.Memory.Operations |> Map.map(fun _ operation ->
+                match operation with
+                | MemoryWitnessOperation.EmptySnapshot row -> MemoryWitnessOperation.EmptySnapshot(change row)
+                | MemoryWitnessOperation.Utf8Validation row ->
+                    match row.Storage with
+                    | MemoryCheckedSnapshotStorage.Empty empty -> MemoryWitnessOperation.Utf8Validation {row with Storage=MemoryCheckedSnapshotStorage.Empty(change empty)}
+                    | _ -> operation
+                | MemoryWitnessOperation.SnapshotRetirement row ->
+                    match row.Storage with
+                    | MemoryCheckedSnapshotStorage.Empty empty -> MemoryWitnessOperation.SnapshotRetirement {row with Storage=MemoryCheckedSnapshotStorage.Empty(change empty)}
+                    | _ -> operation
+                | _ -> operation)
+            {graph with Emission={graph.Emission with Memory={graph.Emission.Memory with Operations=operations}}}
+
+        [<Fact>]
+        let ``empty returned snapshot emits one neutral actual producer value`` () =
+            match observeEmpty 1 (emptyFixture ()) with
+            | Ok(([EmptyBuffer(site,value) as operation],[],TRValue result),_) ->
+                Assert.Equal(id 1,site)
+                Assert.Equal(TMemRef(TInt(IntWidth 8)),value.Type)
+                Assert.Equal(value,result)
+                Assert.Equal(NeedsTargetRealization,moduleText (Ok 64) None [operation])
+            | other -> failwithf "Empty producer lost its explicit neutral value: %A" other
+
+        [<Theory>]
+        [<InlineData(8)>]
+        [<InlineData(13)>]
+        let ``empty returned backing retirement discards without a free`` site =
+            match observeEmpty site (emptyFixture ()) with
+            | Ok(([],[],TRVoid),_) -> ()
+            | other -> failwithf "Empty backing was allocated or freed: %A" other
+
+        [<Theory>]
+        [<InlineData("missing")>]
+        [<InlineData("required")>]
+        [<InlineData("owner")>]
+        [<InlineData("type")>]
+        [<InlineData("count")>]
+        [<InlineData("declaration")>]
+        let ``empty returned snapshot refuses missing or changed current evidence`` defect =
+            let graph=emptyFixture ()
+            let memory=graph.Emission.Memory
+            let graph,reason =
+                match defect with
+                | "missing" -> {graph with Emission={graph.Emission with Memory={memory with Operations=memory.Operations.Remove(id 1)}}},"source-published contract"
+                | "required" -> {graph with Emission={graph.Emission with Memory={memory with Required=memory.Required.Remove(id 1)}}},"source producer"
+                | "owner" -> changeEmpty (fun row->{row with Owner=id 99}) graph,"source producer"
+                | "type" -> changeEmpty (fun row->{row with SourceType=intType}) graph,"source producer"
+                | "declaration" -> changeEmpty (fun row->{row with Declaration=id 99}) graph,"octet declaration"
+                | _ ->
+                    let values=graph.Emission.Numeric.Values
+                    {graph with Emission={graph.Emission with Numeric={graph.Emission.Numeric with Values=values.Add(id 2,{values[id 2] with Range=ValueRange.Bounded(0I,1I)})}}},"zero-count copy"
+            match observeEmpty 1 graph with
+            | Result.Error actual -> Assert.Contains(reason,actual)
+            | Ok _ -> failwithf "Empty snapshot %s evidence admitted" defect
+
+        [<Fact>]
+        let ``empty returned backing refuses an allocated retirement target`` () =
+            let graph=emptyFixture ()
+            let memory=graph.Emission.Memory
+            let row=match memory.Operations[id 13] with MemoryWitnessOperation.CheckedResultRetirement row->row | _->failwith "fixture"
+            let graph={graph with Emission={graph.Emission with Memory={memory with Operations=memory.Operations.Add(id 13,MemoryWitnessOperation.CheckedResultRetirement {row with Target=MemoryCheckedRetirementTarget.Backing})}}}
+            match observeEmpty 13 graph with
+            | Result.Error reason -> Assert.Contains("exact caller value or cleanup occurrence",reason)
+            | Ok _ -> failwith "Empty backing acquired an allocated retirement"
 
 /// The opaque handle type of a register of the width given, as the contract states it.
 let private handleType (bits: int) : TypeIdentity =

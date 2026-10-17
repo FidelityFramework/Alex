@@ -771,7 +771,7 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
             (symbolName name) sourceId kind
     | MLIROp.WritableBufferCall _ ->
         raise (TargetRealizationRequired "Writable byte calls require the selected backend and their exact source accounts.")
-    | MLIROp.Utf8Validate _ | MLIROp.Utf8SnapshotRetire _ ->
+    | MLIROp.EmptyBuffer _ | MLIROp.Utf8Validate _ | MLIROp.Utf8SnapshotRetire _ ->
         raise (TargetRealizationRequired "Checked text requires the selected backend and its exact snapshot, validator and retirement accounts.")
     | MLIROp.OptionalEntryCall _ ->
         raise (TargetRealizationRequired "Optional entry calls require the selected backend and their exact source conversion accounts.")

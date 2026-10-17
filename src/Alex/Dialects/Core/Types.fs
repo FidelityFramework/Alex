@@ -385,6 +385,9 @@ type OptionalEntrySlot = {
 /// Top-level portable operation. Target dialects belong to backend realization.
 /// Single-phase execution with nested accumulators - no scope markers needed
 type MLIROp =
+    /// The source proves this exact byte snapshot has zero extent and no
+    /// backing instance. Descriptor realization belongs to the selected target.
+    | EmptyBuffer of site: Fidelity.PSG.NodeId * result: Val
     /// Validation observes only the source-issued independent byte snapshot.
     /// The selected backend supplies the named validator's operational semantics.
     | Utf8Validate of site: Fidelity.PSG.NodeId * snapshot: Val * result: Val
