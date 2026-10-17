@@ -164,6 +164,7 @@ let ``shared body reads each lambda occurrence's block argument and restores out
             Obligations = [obligation] }
     let graph = declareBindingReadings graph
     let operands = MLIRAccumulator.empty ()
+    operands.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let carrier = TMemRefStatic(1, TInt(IntWidth 8))
     MLIRAccumulator.bindNode formal.Id (V(-20, 0)) carrier operands
     MLIRAccumulator.bindNode externalBinding.Id (V(-21, 0)) (TInt(IntWidth 1)) operands
@@ -379,6 +380,7 @@ let ``library retention cannot authorize lambda emission`` (libraryExport: bool)
     let scope = ref (ScopeContext.root ())
     let visited = ref Set.empty
     let position = Zipper.create graph owner.Lambda.Id |> require "Missing retained lambda"
+    operands.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let context =
         { Coeffects = coeffects 64; Accumulator = operands; RootAccumulator = operands
           ScopeContext = scope; RootScopeContext = scope; Graph = graph; Zipper = position
@@ -445,6 +447,7 @@ let ``definition discovered inside a dependency is reused by later reference and
     let rootScope = ref (ScopeContext.root ())
     let visited = ref Set.empty
     let position = Zipper.create graph caller.Id |> require "Missing dependency caller"
+    operands.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let context =
         { Coeffects = coeffects 64; Accumulator = operands; RootAccumulator = operands
           ScopeContext = rootScope; RootScopeContext = rootScope; Graph = graph; Zipper = position
@@ -676,6 +679,8 @@ let private nativeScalarBlock mode =
     let accumulator = MLIRAccumulator.empty ()
     let scope = ref (ScopeContext.root ())
     let visited = ref Set.empty
+
+    accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
 
     let ctx =
         {
@@ -1022,6 +1027,8 @@ let private nativeUnitBlock (mode: string) =
     let accumulator = MLIRAccumulator.empty ()
     let scope = ref (ScopeContext.root ())
     let visited = ref Set.empty
+
+    accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
 
     let ctx =
         {

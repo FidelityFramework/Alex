@@ -9,7 +9,8 @@ open Alex.Traversal.ScopeContext
 open Alex.Tests.Build
 module Zipper = Alex.Traversal.PSGZipper
 
-let private context graph position accumulator =
+let private context graph position (accumulator: MLIRAccumulator) =
+    accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let scope = ref (ScopeContext.root ())
     let visited = ref Set.empty
     { Coeffects = coeffects 64; Accumulator = accumulator; RootAccumulator = accumulator

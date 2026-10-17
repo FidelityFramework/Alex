@@ -84,6 +84,7 @@ let private fixture () =
         |> declareTraversalReadings
     let position = Zipper.create graph root.Id |> require "Missing fixture root" |> Zipper.down 0 |> require "Missing child"
     let accumulator = MLIRAccumulator.empty ()
+    accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let rootScope = ref (ScopeContext.root ())
     let visited = ref Set.empty
     let context: WitnessContext =

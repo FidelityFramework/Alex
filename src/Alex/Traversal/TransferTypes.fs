@@ -289,6 +289,18 @@ type LazyOperand = internal {
     Environment: Val
 }
 
+/// Result of witnessing a PSG node. Kept before the accumulator so its actual
+/// occurrence result can be retained without projecting an operand map later.
+type TransferResult =
+    | TRValue of Val
+    | TRCallable of CallableOperand
+    | TRCallableCell of CallableCellOperand
+    | TRSequence of SequenceOperand
+    | TRLazy of LazyOperand
+    | TRVoid
+    | TRError of Diagnostic
+    | TRSkip
+
 /// A successfully witnessed void result at one graph occurrence and operation
 /// scope. This is emission completion, not source demand or global visitation.
 type VoidCompletion = internal {
@@ -317,6 +329,7 @@ type OperandSnapshot = {
 type MLIRAccumulator() =
     member val WitnessScope: Alex.Correspondence.SemanticScope option = None with get, set
     member val EmittedDefinitions: Alex.Correspondence.EmittedDefinition list = [] with get, set
+    member val WitnessEmissions: Alex.Correspondence.WitnessEmission<TransferResult> list = [] with get, set
     member val AllOps: MLIROp list = [] with get, set                      // Flat operation stream with markers
     member val Errors: Diagnostic list = [] with get, set
     // Successful body-free declaration witnessing has its own receipt. These
@@ -621,17 +634,6 @@ module MLIRAccumulator =
 // TRANSFER RESULT (Result of witnessing a node)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Result of witnessing a PSG node
-type TransferResult =
-    | TRValue of Val                    // Produces a value (SSA + type)
-    | TRCallable of CallableOperand    // Code and actual environment remain separate operands
-    | TRCallableCell of CallableCellOperand // Shared data storage, never a packed function value
-    | TRSequence of SequenceOperand    // Pull function and actual continuation environment
-    | TRLazy of LazyOperand            // Thunk function and actual memoization environment
-    | TRVoid                             // Produces no value (effect only)
-    | TRError of Diagnostic              // Error with structured context
-    | TRSkip                             // Node not handled (try next witness)
-
 // ═══════════════════════════════════════════════════════════════════════════
 // WITNESS OUTPUT (What witnesses return)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -689,31 +691,43 @@ type WitnessContext = {
 /// Capture already emitted declarations at the actual witness occurrence.
 /// This bookkeeping never reconstructs or emits source computation.
 module EmissionCorrespondence =
+    let private occurrence (ctx: WitnessContext) =
+        match ctx.RootAccumulator.WitnessScope with
+        | None -> Result.Error "Witness result capture requires the existing witness run scope"
+        | Some scope ->
+            let at: Alex.Correspondence.Occurrence =
+                { Scope = scope; Focus = ctx.Zipper.Focus
+                  Anchor = ctx.Zipper.Path |> List.tryLast |> Option.map _.Parent |> Option.defaultValue ctx.Zipper.Focus.Id
+                  Path = ctx.Zipper.Path }
+            if not (System.Object.ReferenceEquals(ctx.Graph, Alex.Correspondence.graph scope)) then
+                Result.Error "Witness result capture scope belongs to a different checked graph"
+            elif not (System.Object.ReferenceEquals(ctx.Graph, ctx.Zipper.Graph)) then
+                Result.Error "Witness zipper and context refer to different checked graphs"
+            else Alex.Correspondence.validateOccurrence scope at |> Result.map (fun () -> at)
+
+    let recordWitness (ctx: WitnessContext) (output: WitnessOutput) pendingGlobals =
+        match output.Result with
+        | TRError _ | TRSkip -> ()
+        | _ ->
+            match occurrence ctx with
+            | Result.Error message ->
+                MLIRAccumulator.addError (Diagnostic.error (Some ctx.Zipper.Focus.Id) (Some "EmissionCorrespondence") (Some "witness result") message) ctx.RootAccumulator
+            | Result.Ok at ->
+                ctx.RootAccumulator.WitnessEmissions <-
+                    { Occurrence = at; Result = output.Result
+                      InlineOps = output.InlineOps; TopLevelOps = output.TopLevelOps @ pendingGlobals }
+                    :: ctx.RootAccumulator.WitnessEmissions
+
     let record (ctx: WitnessContext) operations =
         let owned = operations |> List.filter Alex.Correspondence.isOwnedOperation
         if not owned.IsEmpty then
             let acc = ctx.RootAccumulator
-            let scope =
-                match acc.WitnessScope with
-                | Some scope -> scope
-                | None ->
-                    let scope = Alex.Correspondence.beginWholeGraphWitness ctx.Graph
-                    acc.WitnessScope <- Some scope
-                    scope
-            let occurrence: Alex.Correspondence.Occurrence =
-                { Scope = scope; Focus = ctx.Zipper.Focus
-                  Anchor = ctx.Zipper.Path |> List.tryLast |> Option.map _.Parent |> Option.defaultValue ctx.Zipper.Focus.Id
-                  Path = ctx.Zipper.Path }
-            let validation =
-                if not (System.Object.ReferenceEquals(ctx.Graph, ctx.Zipper.Graph)) then
-                    Result.Error "Witness zipper and context refer to different checked graphs"
-                else Alex.Correspondence.validateOccurrence scope occurrence
-            match validation with
+            match occurrence ctx with
             | Result.Error message ->
                 MLIRAccumulator.addError (Diagnostic.error (Some ctx.Zipper.Focus.Id) (Some "EmissionCorrespondence") (Some "witness occurrence") message) acc
-            | Result.Ok () ->
+            | Result.Ok at ->
                 acc.EmittedDefinitions <-
-                    (owned |> List.map (fun operation -> { Alex.Correspondence.EmittedDefinition.Operation = operation; Occurrence = occurrence }))
+                    (owned |> List.map (fun operation -> { Alex.Correspondence.EmittedDefinition.Operation = operation; Occurrence = at }))
                     @ acc.EmittedDefinitions
 
 // ═══════════════════════════════════════════════════════════════════════════

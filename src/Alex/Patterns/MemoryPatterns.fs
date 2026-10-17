@@ -266,24 +266,47 @@ let pNativeEntrySlot (storage: ProgramStorageEntry) : PSGParser<NodeId * MLIRTyp
 let pAllocValue (nodeId: NodeId) (ssa: SSA) (ty: MLIRType) : PSGParser<MLIROp> =
     parser {
         let! state = getUserState
-        // Every allocating site carries its settled class; absence is never read as stack scope.
-        let! escapeKind =
-            match Map.tryFind nodeId state.Graph.Codata.Escapes with
-            | Some kind -> preturn kind
-            | None -> fail (Message $"PSG settlement (Escape) did not settle an escape/lifetime class for the allocation at node {NodeId.value nodeId}")
-        match escapeKind with
-        | EscapeKind.StackScoped ->
-            return! pUndef ssa ty
-        | EscapeKind.StaticLifetime ->
-            let! count, elemType = pMemRefShape nodeId state.Platform.TargetArch ty
-            let storageTy = TMemRefStatic (count, elemType)
-            let globalName = staticValueName nodeId
-            let! authority = pProgramStorageDeclaration (ProgramStorageIdentity.Allocation nodeId) storageTy
-            MLIRAccumulator.tryEmitGlobalMemref globalName storageTy (Some authority) state.Accumulator
-            return! pMemRefGetGlobal ssa globalName storageTy
-        | EscapeKind.EscapesViaReturn | EscapeKind.EscapesViaClosure _ | EscapeKind.EscapesViaByRef ->
-            let! count, elemType = pMemRefShape nodeId state.Platform.TargetArch ty
-            return! pAllocStatic ssa count elemType None
+        let memory = state.Graph.Emission.Memory
+        match memory.Operations.TryFind nodeId with
+        | Some(MemoryWitnessOperation.ConstructedValue allocation) ->
+            do! ensure (allocation.Site = nodeId && allocation.SourceType = sourceTypeAt state.Graph nodeId)
+                    "Constructed value differs from its source-issued allocation identity and type."
+            let! size, alignment =
+                match state.Graph.Emission.Numeric.Layouts.TryFind allocation.SourceType with
+                | Some(SettledLayout.Union(_,Some _,Some size,Some alignment))
+                    when size > 0 && alignment > 0 && (alignment &&& (alignment-1)) = 0 ->
+                    preturn (size,alignment)
+                | _ -> fail (Message "Constructed value lacks its held native union layout.")
+            do! ensure (ty = TMemRefStatic(size,TInt(IntWidth 8)))
+                    "Constructed value allocation differs from its settled native carrier."
+            match allocation.Residence with
+            | MemoryResidence.Stack _ -> return! pAlloca ssa size (TInt(IntWidth 8)) (Some alignment)
+            | _ -> return! fail (Message "Constructed value has no admitted source storage residence.")
+        | _ ->
+            let requiresAllocation =
+                memory.Operations.Values |> Seq.exists (function
+                    | MemoryWitnessOperation.Utf8Validation validation ->
+                        validation.Construction.Success = nodeId || validation.Construction.Failure = nodeId
+                    | _ -> false)
+            do! ensure (not requiresAllocation)
+                    "Checked native outcome lacks its exact source-issued constructed-value allocation."
+            // Every allocating site carries its settled class; absence is never read as stack scope.
+            let! escapeKind =
+                match Map.tryFind nodeId state.Graph.Codata.Escapes with
+                | Some kind -> preturn kind
+                | None -> fail (Message $"PSG settlement (Escape) did not settle an escape/lifetime class for the allocation at node {NodeId.value nodeId}")
+            match escapeKind with
+            | EscapeKind.StackScoped -> return! pUndef ssa ty
+            | EscapeKind.StaticLifetime ->
+                let! count, elemType = pMemRefShape nodeId state.Platform.TargetArch ty
+                let storageTy = TMemRefStatic (count, elemType)
+                let globalName = staticValueName nodeId
+                let! authority = pProgramStorageDeclaration (ProgramStorageIdentity.Allocation nodeId) storageTy
+                MLIRAccumulator.tryEmitGlobalMemref globalName storageTy (Some authority) state.Accumulator
+                return! pMemRefGetGlobal ssa globalName storageTy
+            | EscapeKind.EscapesViaReturn | EscapeKind.EscapesViaClosure _ | EscapeKind.EscapesViaByRef ->
+                let! count, elemType = pMemRefShape nodeId state.Platform.TargetArch ty
+                return! pAllocStatic ssa count elemType None
     }
 
 /// Retirement is source-owned. The caller's returned instance is released at
@@ -520,6 +543,44 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
     let memory = state.Graph.Emission.Memory
     match memory.Operations.TryFind state.Current.Id with
     | None -> return! fail (Message "Memory operation lacks its source-published contract.")
+    | Some (MemoryWitnessOperation.ConstructedValue _) ->
+        return! fail (Message "Constructed-value allocation requires its ordinary native construction witness.")
+    | Some (MemoryWitnessOperation.Utf8Validation validation) ->
+        let construction = validation.Construction
+        do! ensure (validation.Site = state.Current.Id && construction.Validation = validation.Site
+                    && construction.Validator = "RFC3629-v1"
+                    && validation.Copy.Source = construction.Input && validation.Copy.Count = construction.Length
+                    && memory.ArrayCopies.TryFind validation.Copy.Site = Some validation.Copy
+                    && memory.Operations.TryFind validation.Allocation.Site = Some(MemoryWitnessOperation.ArrayAllocation validation.Allocation))
+                "UTF-8 validation lacks its exact source-issued snapshot copy, allocation or named validator."
+        do! ensure (match memory.Operations.TryFind construction.Text with
+                    | Some(MemoryWitnessOperation.StringView view) ->
+                        view.Site = construction.Text && view.Owner = construction.Owner
+                        && view.Snapshot = construction.Snapshot && view.Checked = Some construction
+                        && view.Direction = MemoryStringViewDirection.FromBytes
+                    | _ -> false)
+                "UTF-8 validation lacks its exact source-issued checked-text outcome."
+        let! snapshot = pMemoryBuffer construction.Snapshot (TInt(IntWidth 8))
+        do! ensure (snapshot.Type = representationType validation.SourceCarrier)
+                "UTF-8 validation differs from its source-published snapshot carrier."
+        let! resultSSA = getNodeSSA validation.Site
+        let result = { SSA = resultSSA; Type = valueTypeAt state.Graph validation.Site }
+        do! ensure (result.Type = representationType (ValueRepresentation.Scalar SettledSlot.Bool))
+                "UTF-8 validation lacks its settled boolean result carrier."
+        return [Utf8Validate(validation.Site, snapshot, result)], [], TRValue result
+    | Some (MemoryWitnessOperation.SnapshotRetirement retirement) ->
+        do! ensure (retirement.Site = state.Current.Id && retirement.Construction.Retirement = retirement.Site
+                    && memory.Operations.TryFind retirement.Allocation.Site = Some(MemoryWitnessOperation.ArrayAllocation retirement.Allocation))
+                "Checked-text retirement lacks its exact source-issued snapshot allocation."
+        do! ensure (match memory.Operations.TryFind retirement.Construction.Validation with
+                    | Some(MemoryWitnessOperation.Utf8Validation validation) ->
+                        validation.Construction = retirement.Construction && validation.Allocation = retirement.Allocation
+                    | _ -> false)
+                "Checked-text retirement lacks its exact source-issued validator and outcome."
+        do! ensure (match retirement.Allocation.Residence with MemoryResidence.Stack _ -> true | _ -> false)
+                "Checked-text retirement lacks an admitted source storage residence."
+        let! snapshot = pMemoryBuffer retirement.Construction.Snapshot (TInt(IntWidth 8))
+        return [Utf8SnapshotRetire(retirement.Site, snapshot)], [], TRVoid
     | Some (MemoryWitnessOperation.BufferExtent extent) ->
         do! ensure (extent.Site = state.Current.Id && extent.Result.Site = state.Current.Id)
                 "Memory extent and result carrier name different source occurrences."
@@ -532,6 +593,21 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
         return operations, [], result
     | Some (MemoryWitnessOperation.StringView view) ->
         do! ensure (view.Site=state.Current.Id) "String view names a different source occurrence."
+        match view.Checked with
+        | Some construction ->
+            do! ensure (view.Site = construction.Text && view.Owner = construction.Owner
+                        && view.Snapshot = construction.Snapshot
+                        && (match memory.Operations.TryFind construction.Validation with
+                            | Some(MemoryWitnessOperation.Utf8Validation validation) ->
+                                validation.Construction = construction
+                                && memory.ArrayCopies.TryFind validation.Copy.Site = Some validation.Copy
+                                && memory.Operations.TryFind validation.Allocation.Site = Some(MemoryWitnessOperation.ArrayAllocation validation.Allocation)
+                            | _ -> false)
+                        && (match memory.Operations.TryFind construction.Retirement with
+                            | Some(MemoryWitnessOperation.SnapshotRetirement retirement) -> retirement.Construction = construction
+                            | _ -> false))
+                    "Checked string view lacks its exact source-issued snapshot, validator, outcome or retirement account."
+        | None -> ()
         let! element=pMemorySlot view.Element
         let! source=pMemoryBuffer view.Source element
         let sourceType,resultType=representationType view.SourceCarrier,representationType view.ResultCarrier

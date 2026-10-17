@@ -38,6 +38,7 @@ type RegionOutput = {
     Region: WitnessRegion
     Operations: MLIROp list
     Definitions: EmittedDefinition list
+    Emissions: WitnessEmission<TransferResult> list
     Reused: bool
 }
 
@@ -46,6 +47,7 @@ type Output = {
     Scope: SemanticScope
     Operations: MLIROp list
     Definitions: EmittedDefinition list
+    Emissions: WitnessEmission<TransferResult> list
     Regions: RegionOutput list
     State: State
     Statistics: Statistics
@@ -149,7 +151,8 @@ let private freshScalar registry revision coeffects scope (region: WitnessRegion
                       obj.ReferenceEquals(definition.Operation, operation) &&
                       definition.Occurrence.Focus.Id = at.Focus.Id &&
                       definition.Occurrence.Path = region.Path ->
-                    Ok ({ Region = region; Operations = operations; Definitions = [definition]; Reused = false }, visited.Value.Count)
+                    Ok ({ Region = region; Operations = operations; Definitions = [definition]
+                          Emissions = List.rev accumulator.WitnessEmissions; Reused = false }, visited.Value.Count)
                 | _ -> Result.Error (sprintf "Scalar region '%s' did not witness exactly one source-independent function definition" region.Identity)))
 
 let private freshCommon registry revision coeffects scope scalarMembers (region: WitnessRegion) =
@@ -168,7 +171,8 @@ let private freshCommon registry revision coeffects scope scalarMembers (region:
         if not coverage.IsEmpty then Result.Error (coverage |> List.map Diagnostic.format |> String.concat "\n")
         elif not (Set.isSubset actual region.Members) then Result.Error "Common witness escaped its published region"
         else Ok ({ Region = region; Operations = ScopeContext.getOps root.Value
-                   Definitions = List.rev accumulator.EmittedDefinitions; Reused = false }, actual.Count))
+                   Definitions = List.rev accumulator.EmittedDefinitions
+                   Emissions = List.rev accumulator.WitnessEmissions; Reused = false }, actual.Count))
 
 /// The registry parameter makes the traversal contract testable with contract
 /// values. Production supplies its ordinary target registry, unchanged.
@@ -203,7 +207,8 @@ let internal transferWithRegistry registry revision coeffects (prior: State opti
                         | Some held when not (changed.Contains region.Identity) ->
                             occurrence scope region |> Result.map (fun at ->
                                 { Region = region; Operations = [held.Operation]
-                                  Definitions = [{ Operation = held.Operation; Occurrence = at }]; Reused = true }, 0)
+                                  Definitions = [{ Operation = held.Operation; Occurrence = at }]
+                                  Emissions = []; Reused = true }, 0)
                         | _ -> freshScalar registry revision coeffects scope region)
                     |> collect
                 scalarResults |> Result.bind (fun scalarResults ->
@@ -219,7 +224,8 @@ let internal transferWithRegistry registry revision coeffects (prior: State opti
                                 { Fingerprint = output.Region.Fingerprint; Dependencies = output.Region.Dependencies
                                   Operation = List.exactlyOne output.Operations }) |> Map.ofList
                         { Scope = scope; Operations = regions |> List.collect _.Operations
-                          Definitions = regions |> List.collect _.Definitions; Regions = regions
+                          Definitions = regions |> List.collect _.Definitions
+                          Emissions = regions |> List.collect _.Emissions; Regions = regions
                           State = { Coeffects = coeffects; Fingerprints = fingerprints; Held = held }
                           Statistics =
                             { Changed = regions |> List.filter (fun output -> not output.Reused) |> List.map _.Region.Identity

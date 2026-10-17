@@ -59,10 +59,75 @@ let private single (value: SemanticNode) : Revision =
 
 let private context graph position visited =
     let accumulator = MLIRAccumulator.empty ()
+    accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let scope = ref (ScopeContext.root ())
     { Coeffects = coeffects 64; Accumulator = accumulator; RootAccumulator = accumulator
       ScopeContext = scope; RootScopeContext = scope; Graph = graph; Zipper = position
       GlobalVisited = visited; TraversalVisited = visited }
+
+[<Fact>]
+let ``witness result capture refuses a missing run scope without creating one`` () =
+    let value = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
+    let graph = single value
+    let position = Zipper.create graph value.Id |> require "Missing literal occurrence"
+    let ctx = context graph position (ref Set.empty)
+    ctx.Accumulator.WitnessScope <- None
+    EmissionCorrespondence.recordWitness ctx WitnessOutput.empty []
+    Assert.Empty ctx.Accumulator.WitnessEmissions
+    Assert.True ctx.Accumulator.WitnessScope.IsNone
+    let diagnostic = Assert.Single ctx.Accumulator.Errors
+    Assert.Equal("Witness result capture requires the existing witness run scope", diagnostic.Message)
+
+[<Fact>]
+let ``witness result capture refuses a different existing run scope`` () =
+    let value = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
+    let graph = single value
+    let position = Zipper.create graph value.Id |> require "Missing literal occurrence"
+    let ctx = context graph position (ref Set.empty)
+    let other = { graph with DeclarationRoots = [value.Id, DeclRoot.EntryPoint] }
+    ctx.Accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness other)
+    EmissionCorrespondence.recordWitness ctx WitnessOutput.empty []
+    Assert.Empty ctx.Accumulator.WitnessEmissions
+    let diagnostic = Assert.Single ctx.Accumulator.Errors
+    Assert.Equal("Witness result capture scope belongs to a different checked graph", diagnostic.Message)
+
+[<Fact>]
+let ``witness results retain distinct branch occurrences after operand restoration`` () =
+    let condition = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
+    let shared = node 1 (SemanticKind.Literal(NativeLiteral.Bool false)) boolType [] None
+    let choice = node 2 (SemanticKind.IfThenElse(condition.Id, shared.Id, Some shared.Id)) boolType [0; 1; 1] None
+    let domain = numericDomain 3
+    let held = [condition; shared; choice]
+    let graph =
+        { revision held with
+            Emission =
+                { Empty.emission with
+                    Callable = dataRows held
+                    Numeric = boolRows (held |> List.map (fun site -> boolCarrier site [site; domain])) held } }
+        |> declareTraversalReadings
+    let position = Zipper.create graph choice.Id |> require "Missing branch owner"
+    let ctx = context graph position (ref Set.empty)
+    let before = MLIRAccumulator.snapshotOperands ctx.Accumulator
+    for ordinal in [1; 2] do
+        let branch = Zipper.down ordinal position |> require "Missing branch occurrence"
+        let visited = ref Set.empty
+        let scope = ref (ScopeContext.createChild ctx.ScopeContext.Value BlockLevel)
+        let branchContext = { ctx with Zipper = branch; ScopeContext = scope; TraversalVisited = visited }
+        visitAllNodes Alex.Witnesses.LiteralWitness.nanopass.Witness branchContext branch.Focus visited
+        Assert.Empty ctx.Accumulator.Errors
+        MLIRAccumulator.restoreOperands before ctx.Accumulator
+    Assert.Empty ctx.Accumulator.NodeAssoc
+    let emissions = List.rev ctx.Accumulator.WitnessEmissions
+    Assert.Equal(2, emissions.Length)
+    Assert.Equal<NodeId list>([shared.Id; shared.Id], emissions |> List.map (fun row -> row.Occurrence.Focus.Id))
+    Assert.False(emissions[0].Occurrence.Path = emissions[1].Occurrence.Path)
+    for emission in emissions do
+        Assert.Equal(Ok (), Alex.Correspondence.validateOccurrence emission.Occurrence.Scope emission.Occurrence)
+        match emission.Result with
+        | TRValue value ->
+            Assert.Equal(TInt (IntWidth 1), value.Type)
+            Assert.NotEmpty emission.InlineOps
+        | other -> failwithf "Literal lost its actual result: %A" other
 
 [<Theory>]
 [<InlineData(false)>]

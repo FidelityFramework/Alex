@@ -13,6 +13,7 @@ open Alex.Tests.Build
 // occurrence outside the stated set; it never authors or repairs graph facts.
 let private observe (allowed: Set<NodeId>) (graph: Revision) =
     let accumulator = MLIRAccumulator.empty ()
+    accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let root = ref (ScopeContext.root ())
     let visited = ref Set.empty
     let probe : Nanopass =

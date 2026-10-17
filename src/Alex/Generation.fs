@@ -46,6 +46,7 @@ type Witnessed = {
     Scope: SemanticScope
     Operations: MLIROp list
     Definitions: EmittedDefinition list
+    Emissions: WitnessEmission<TransferResult> list
     /// Portable text, or an explicit requirement for the selected backend to
     /// realize the preserved structured operations before producing text.
     Text: ModuleText
@@ -74,7 +75,7 @@ let serialize (pointerBits: Result<int, string>) (moduleName: string option) (op
     moduleText pointerBits moduleName operations
 
 let private witnessWith
-    (transfer: Revision -> NodeId -> TransferCoeffects -> Result<MLIROp list * SemanticScope * EmittedDefinition list * 'state, TransferRefusal>)
+    (transfer: Revision -> NodeId -> TransferCoeffects -> Result<MLIROp list * SemanticScope * EmittedDefinition list * WitnessEmission<TransferResult> list * 'state, TransferRefusal>)
     (request: Request) : Result<Witnessed * 'state, Refusal> =
     let revision = request.Revision
     let arch : Architecture = { Register = revision.Platform.Register; Pointer = revision.Platform.Pointer }
@@ -93,7 +94,7 @@ let private witnessWith
     | Some entry ->
         match transfer revision entry.Focus coeffects with
         | Result.Error refusal -> Result.Error (refuse refusal.Reason refusal.Witnessed)
-        | Result.Ok (operations, scope, definitions, state) ->
+        | Result.Ok (operations, scope, definitions, emissions, state) ->
             // Preserve exactly what the witnesses produced. This boundary never
             // repairs, drops or rewrites witnessed MLIR.
             let storage =
@@ -114,6 +115,7 @@ let private witnessWith
                     { Scope = scope
                       Operations = operations
                       Definitions = definitions
+                      Emissions = emissions
                       Text = serialize arch.Pointer moduleName operations
                       ModuleName = moduleName
                       PointerBits = arch.Pointer
@@ -149,7 +151,7 @@ let generate (request: Request) : Result<Witnessed, Refusal> =
     admit request |> Result.bind (fun () ->
         witnessWith (fun revision entry coeffects ->
             transferWithCorrespondence revision entry coeffects
-            |> Result.map (fun (operations, scope, definitions) -> operations, scope, definitions, ())) request
+            |> Result.map (fun (operations, scope, definitions, emissions) -> operations, scope, definitions, emissions, ())) request
         |> Result.map fst)
 
 /// Accepted operations plus region observations for the next edit and backend
@@ -166,6 +168,6 @@ let generateSelective (request: Request) (prior: Alex.Traversal.SelectiveTravers
     admit request |> Result.bind (fun () ->
         witnessWith (fun revision _ coeffects ->
             Alex.Traversal.SelectiveTraversal.transfer revision coeffects prior
-            |> Result.map (fun output -> output.Operations, output.Scope, output.Definitions, output)) request
+            |> Result.map (fun output -> output.Operations, output.Scope, output.Definitions, output.Emissions, output)) request
         |> Result.map (fun (witnessed, output) ->
             { Witnessed = witnessed; State = output.State; Regions = output.Regions; Statistics = output.Statistics }))

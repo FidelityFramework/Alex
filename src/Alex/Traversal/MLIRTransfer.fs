@@ -28,7 +28,7 @@ let transferWithCorrespondence
     (graph: Revision)
     (entryNodeId: NodeId)
     (coeffects: TransferCoeffects)
-    : Result<MLIROp list * Alex.Correspondence.SemanticScope * Alex.Correspondence.EmittedDefinition list, TransferRefusal> =
+    : Result<MLIROp list * Alex.Correspondence.SemanticScope * Alex.Correspondence.EmittedDefinition list * Alex.Correspondence.WitnessEmission<TransferResult> list, TransferRefusal> =
 
     match Revision.tryNode entryNodeId graph with
     | None ->
@@ -37,16 +37,17 @@ let transferWithCorrespondence
         let registry = createRegistry coeffects.TargetPlatform
         let accumulator = executeNanopasses registry graph coeffects
         let operations = List.rev accumulator.AllOps
-        match accumulator.Errors with
-        | [] ->
-            let scope = accumulator.WitnessScope |> Option.defaultWith (fun () -> Alex.Correspondence.beginWholeGraphWitness graph)
-            Result.Ok (operations, scope, List.rev accumulator.EmittedDefinitions)
-        | errors ->
+        match accumulator.Errors, accumulator.WitnessScope with
+        | [], Some scope ->
+            Result.Ok (operations, scope, List.rev accumulator.EmittedDefinitions, List.rev accumulator.WitnessEmissions)
+        | [], None ->
+            Result.Error { Reason = "Transfer lacks its witness run scope"; Witnessed = operations }
+        | errors, _ ->
             Result.Error { Reason = errors |> List.map Diagnostic.format |> String.concat "\n"; Witnessed = operations }
 
 /// Entry for isolated transfer consumers. The production pipeline retains
 /// correspondence through transferWithCorrespondence.
 let transfer graph entryNodeId coeffects =
     transferWithCorrespondence graph entryNodeId coeffects
-    |> Result.map (fun (operations, _, _) -> operations, [])
+    |> Result.map (fun (operations, _, _, _) -> operations, [])
     |> Result.mapError (fun refusal -> refusal.Reason)

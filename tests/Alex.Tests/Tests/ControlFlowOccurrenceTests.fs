@@ -77,6 +77,7 @@ let ``conditional guard descends through its actual occurrence and recalls the e
                 [1; 2; 3; 4; 5; 6])
     let accumulator = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode formal.Id (Arg 0) (TInt(IntWidth 1)) accumulator
+    accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let scope = ref (ScopeContext.root ())
     let visited = ref (Set.singleton formal.Id)
     let position = Zipper.create graph root.Id |> require "Missing conditional root"
@@ -128,6 +129,7 @@ let ``control flow returns an error and emits nothing for a branch that is not a
                 [0; 1; 2; 3])
     let accumulator = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode yes.Id (Arg 0) (TInt(IntWidth 1)) accumulator
+    accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let scope = ref (ScopeContext.root ())
     let visited = ref Set.empty
     let position = Zipper.create graph choice.Id |> require "Missing conditional root"
@@ -182,6 +184,7 @@ let private sequentialResult bits admittedMeet =
     let graph = { stated with Codata = { stated.Codata with Meets = meets } }
     let accumulator = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode child.Id (Arg 0) (TInt(IntWidth 64)) accumulator
+    accumulator.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let scope = ref (ScopeContext.root ())
     let visited = ref (Set.singleton child.Id)
     let position = Zipper.create graph block.Id |> require "Missing scalar block"

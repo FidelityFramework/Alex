@@ -10,6 +10,21 @@ open Alex.Traversal.ScopeContext
 open Alex.Tests.Build
 module Zipper = Alex.Traversal.PSGZipper
 
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``checked text cannot acquire portable text without its selected validator and retirement realization`` retirement =
+  let snapshot = { SSA = Arg 0; Type = TMemRef(TInt(IntWidth 8)) }
+  let result = { SSA = V(2, 0); Type = TInt(IntWidth 8) }
+  let operation =
+    if retirement then Utf8SnapshotRetire(NodeId 2, snapshot)
+    else Utf8Validate(NodeId 2, snapshot, result)
+  Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
+  let error = Assert.ThrowsAny<System.Exception>(fun () ->
+    Alex.Dialects.Core.Serialize.opToString (Ok 64) operation |> ignore)
+  Assert.Contains("exact snapshot, validator and retirement accounts", error.Message)
+  Assert.Equal<MLIROp list>([operation], OperationStructure.flatten [operation])
+
 [<Fact>]
 let ``Pending obligation emits no solver operation or placeholder and retains ready text`` () =
   let ready: ObligationInfo =
@@ -171,7 +186,8 @@ let private named name parent (fn: Callable) (graph: Revision) =
             Declarations =
                 callable.Declarations.Add(fn.Binding, { callable.Declarations[fn.Binding] with Name = name; Parent = parent }) })
 
-let private context (graph: Revision) site operands =
+let private context (graph: Revision) site (operands: MLIRAccumulator) =
+    operands.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
     let rootScope = ref (ScopeContext.root ())
     let scope = ref (ScopeContext.createChild rootScope.Value FunctionLevel)
     let visited = ref Set.empty

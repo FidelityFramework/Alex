@@ -31,6 +31,16 @@ type EmittedDefinition = {
     Occurrence: Occurrence
 }
 
+/// The actual result and typed operations returned by one successful witness.
+/// This is physical emission evidence, not a source assignment or a naming rule.
+[<NoEquality; NoComparison>]
+type WitnessEmission<'result> = {
+    Occurrence: Occurrence
+    Result: 'result
+    InlineOps: MLIROp list
+    TopLevelOps: MLIROp list
+}
+
 let witnessRun (WholeCheckedGraph(id, _)) = id
 let graph (WholeCheckedGraph(_, graph)) = graph
 let beginWholeGraphWitness graph = WholeCheckedGraph(Guid.NewGuid(), graph)

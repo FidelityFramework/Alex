@@ -254,6 +254,11 @@ let rec visitAllNodes
                 (sprintf "Alex witness coverage did not claim node %d: the traversal witness returned skip" (NodeId.value currentNode.Id))
             |> fun diagnostic -> MLIRAccumulator.addError diagnostic visitedCtx.Accumulator
 
+        // Capture the actual successful occurrence before the enclosing control
+        // witness restores branch-local operand maps.
+        if obj.ReferenceEquals(priorErrors, visitedCtx.Accumulator.Errors) then
+            EmissionCorrespondence.recordWitness visitedCtx output pendingStaticGlobals
+
 // ═══════════════════════════════════════════════════════════════════════════
 // NANOPASS REGISTRY
 // ═══════════════════════════════════════════════════════════════════════════
@@ -409,6 +414,7 @@ let executeNanopasses
     else
         // Create SINGLE shared accumulator for ALL nanopasses
         let sharedAcc = MLIRAccumulator.empty()
+        sharedAcc.WitnessScope <- Some (Alex.Correspondence.beginWholeGraphWitness graph)
 
         // Create SINGLE global visited set for ALL nanopasses
         let globalVisited = ref Set.empty

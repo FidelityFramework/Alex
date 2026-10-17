@@ -385,6 +385,12 @@ type OptionalEntrySlot = {
 /// Top-level portable operation. Target dialects belong to backend realization.
 /// Single-phase execution with nested accumulators - no scope markers needed
 type MLIROp =
+    /// Validation observes only the source-issued independent byte snapshot.
+    /// The selected backend supplies the named validator's operational semantics.
+    | Utf8Validate of site: Fidelity.PSG.NodeId * snapshot: Val * result: Val
+    /// Logical retirement under the source-issued snapshot residence; this is
+    /// never permission to infer a heap free.
+    | Utf8SnapshotRetire of site: Fidelity.PSG.NodeId * snapshot: Val
     /// Resource operations preserve the original source incidence. Their opaque
     /// values have no portable stock spelling; only a selected backend with the
     /// current conversion and cleanup accounts may realize them.
