@@ -246,7 +246,7 @@ type MemRefOp =
     | Copy of source: SSA * destination: SSA * sourceType: MLIRType * destinationType: MLIRType
     | Alloca of SSA * MLIRType * int option                            // result, memrefType, alignment (stack, compile-time size)
     | AllocaDynamic of result: SSA * count: SSA * elementType: MLIRType * alignment: int
-    | Alloc of SSA * SSA * MLIRType                                    // result, sizeSSA, elementType (heap, runtime size)
+    | Alloc of SSA * SSA * MLIRType * int option                       // result, sizeSSA, elementType, alignment (heap, runtime size)
     | Dealloc of SSA * MLIRType                                        // owned heap memref, released after its last use
     | AllocStatic of SSA * MLIRType * int option                        // result, memrefType, alignment (heap, compile-time size)
     | SubView of SSA * SSA * SSA list * MLIRType                       // result, source, offsets, resultType (legacy element access)

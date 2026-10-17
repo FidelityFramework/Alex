@@ -347,6 +347,253 @@ module WritableBuffer =
             else WritableBufferCall(id 3,[{SSA=Arg 0;Type=TMemRef(TInt(IntWidth 8))};{SSA=Arg 1;Type=TInt(IntWidth 64)}],None)
         Assert.Equal(NeedsTargetRealization,moduleText (Ok 64) (Some "writable_component") [operation])
 
+/// Component rows consumed by the existing published-memory owner. Source
+/// admission and complete returned-arm proofs are exercised in the source repo.
+module ReturnedCheckedText =
+    let private id = NodeId
+    let private byte = SettledSlot.Integer(8,Some "octet")
+    let private bytes = ValueRepresentation.Buffer(None,ValueRepresentation.Scalar byte)
+    let private optionType = optionOf stringType
+    let private optionRepresentation = ValueRepresentation.Union(["ValueNone",[];"ValueSome",[bytes]],Some(8,32,8))
+    let private nativeCarrier = TMemRefStatic(32,TInt(IntWidth 8))
+    let private support = [1..50] |> List.map id |> Set.ofList
+    let private carrier site range : ScalarCarrier =
+        {Site=id site;Slot=SettledSlot.Integer(32,None);Range=range;Representation=None;Declaration=None
+         SourceType=intType;Obligations=[];Participants=support}
+    let private fixtureWithSnapshot snapshot owner =
+        let life : MemoryCheckedResultLifetime =
+            {Application=id 9;Callee=id 18;Declaration=id 19;Implementation=id 17;Argument=id 21;Formal=id 23
+             Body=id 3;Caller=id 24;Actual=id 20;Elimination=id 25;SomeUse=id 11;NoneUse=id 12
+             SomeBackingRetirement=id 13;SomeCarrierRetirement=id 14;NoneCarrierRetirement=id 15
+             Uses=[id 9;id 20;id 10;id 11;id 12;id 13;id 14;id 15]
+             Policy={ProjectPath="fixture.fidproj";SourceVersion="component-policy";Model="Standard"}
+             Platform=id 33;Space=id 34;MaximumLiveBytes=35L;Capacity=id 32}
+        let construction : CheckedStringConstruction =
+            {Owner=id 3;Input=id 21;Snapshot=id snapshot;Length=id 2;Validation=id 4;Decision=id 26;Text=id 5
+             Success=id 6;Failure=id 7;Retirement=id 8;Validator="RFC3629-v1";Returned=Some life}
+        let requirement : RequirementWitness =
+            {Site=id 35;Condition=id 36;Diagnostic="capacity";Frontier=id 37;Continuation=id 38;PatternTest=None;Participants=[]}
+        let guard : ArrayRangeGuard =
+            {Requirement=id 35;Predicate=id 36;Frontier=id 37;Continuation=id 38;Count=id 2;Offset=None
+             Buffer=None;Length=None;Zero=id 39;NonnegativeCount=id 41;NonnegativeOffset=None;End=None;Within=None}
+        let allocation : MemoryArrayAllocationWitness =
+            {Site=id 1;Count=id 2;CountCarrier=carrier 2 (ValueRange.Bounded(3I,3I));IndexUnsigned=true;Element=byte
+             ElementBytes=1;Alignment=16;Residence=MemoryResidence.Heap(life.Application,life.Space)
+             MinimumCount=3I;MaximumCount=3I;Requirement=requirement
+             Construction={Site=id 1;Owner=id owner;Count={Actual=id 2;Binding=id 2;Reference=id 2};Default=None;Initialization=None;Guard=guard;Participants=support}
+             Participants=support}
+        let copy : MemoryArrayCopyWitness =
+            {Site=id 40;Source=id 21;SourceOffset=id 39;Destination=id 1;DestinationOffset=id 39
+             Count=id 2;CountCarrier=allocation.CountCarrier;CountOperand=allocation.Construction.Count
+             Allocation=Some(id 1);Loop=None;Read=None;Write=None;Requirements=[];Participants=support}
+        let validation : MemoryUtf8ValidationWitness =
+            {Site=id 4;Construction=construction;Copy=copy;Allocation=allocation;SourceCarrier=bytes}
+        let extent : MemoryExtentWitness =
+            {Site=id 11;Source=id 10;Element={Name="octet";Capability="native";Family="uint";Bits=8;MinMagnitude="0";MaxMagnitude="255";Boundary="exact"}
+             ElementDeclaration=id 42;Result=carrier 11 (ValueRange.Bounded(3I,3I));IndexUnsigned=true
+             Extent={Site=id 11;Source=id 10;ExtentSource=id 10;StaticOrigins=Map.empty;Participants=ParticipantEvidence.Established []}
+             Participants=support}
+        let constructed site : MemoryConstructedValueWitness =
+            {Site=id site;Owner=id 3;SourceType=optionType;Residence=allocation.Residence;Uses=Set.empty
+             Construction=construction;Platform=life.Platform;Layout=id 31;Capacity=id 46}
+        let retirement site value target : MemoryWitnessOperation =
+            MemoryWitnessOperation.CheckedResultRetirement {Site=id site;Value=id value;Target=target;Construction=construction}
+        let operations =
+            [id 1,MemoryWitnessOperation.ArrayAllocation allocation
+             id 4,MemoryWitnessOperation.Utf8Validation validation
+             id 6,MemoryWitnessOperation.ConstructedValue(constructed 6)
+             id 7,MemoryWitnessOperation.ConstructedValue(constructed 7)
+             id 8,MemoryWitnessOperation.SnapshotRetirement {Site=id 8;Construction=construction;Allocation=allocation}
+             id 11,MemoryWitnessOperation.BufferExtent extent
+             id 13,retirement 13 10 MemoryCheckedRetirementTarget.Backing
+             id 14,retirement 14 20 MemoryCheckedRetirementTarget.Carrier
+             id 15,retirement 15 20 MemoryCheckedRetirementTarget.Carrier] |> Map.ofList
+        let nodes = [1,arrayOf uint8Type;2,intType;3,optionType;4,boolType;5,stringType;6,optionType;7,optionType;8,unitType
+                     9,optionType;10,stringType;11,intType;12,intType;13,unitType;14,unitType;15,unitType;16,stringType;20,optionType;22,optionType]
+                    |> List.map(fun (site,ty)->node site (SemanticKind.PatternBinding(sprintf "value%d" site)) ty [] None)
+        let raw = revision nodes
+        let representations = [1,bytes;4,ValueRepresentation.Scalar SettledSlot.Bool;5,bytes;6,optionRepresentation;7,optionRepresentation
+                               9,optionRepresentation;10,bytes;16,bytes;20,optionRepresentation;22,optionRepresentation]
+                              |> List.map(fun (site,representation)->id site,Ok representation) |> Map.ofList
+        let capacity citizen bytes : ObligationInfo =
+            {Id=sprintf "fixture-capacity-%d" citizen;Kind="memory-capacity";Logic="QF_LIA"
+             Statement="Source-issued checked capacity";Source="component contract";Refs=[]
+             Body=ObligationBody.CapacityFits(bytes,4096L)}
+        let claims=Map.ofList[id 32,capacity 32 35L;id 46,capacity 46 32L]
+        { raw with
+            Nodes=claims |> Map.fold(fun nodes citizen info ->
+                nodes.Add(citizen,node (NodeId.value citizen) (SemanticKind.Obligation info) unitType [] None)) raw.Nodes
+            CurrentClaims=claims
+            Obligations=claims.Values |> Seq.toList
+            ObligationSources=Map.ofList[id 32,[Set.toList support];id 46,[Set.toList support]]
+            Emission=
+                { raw.Emission with
+                    Callable={raw.Emission.Callable with AliasTargets=nodes |> List.map(fun node->node.Id,node.Id) |> Map.ofList}
+                    Numeric=
+                        { raw.Emission.Numeric with
+                            SourceTypes=nodes |> List.map(fun node->node.Id,node.Type) |> Map.ofList
+                            OccurrenceRepresentations=representations
+                            Layouts=Map.ofList [optionType,SettledLayout.Union(["ValueNone",None;"ValueSome",Some(SettledSlot.InlineBytes(24,8))],Some 8,Some 32,Some 8)] }
+                    Memory={raw.Emission.Memory with Operations=operations;ArrayCopies=Map.ofList[id 40,copy]} } }
+        |> declareTraversalReadings
+
+    let private fixture () = fixtureWithSnapshot 1 1
+
+    let private observe site graph physical =
+        let operands=MLIRAccumulator.empty ()
+        for value,ssa,ty in [1,Arg 4,TMemRef(TInt(IntWidth 8));2,Arg 3,TInt(IntWidth 32);
+                            10,Arg 1,TMemRef(TInt(IntWidth 8));16,Arg 5,TMemRef(TInt(IntWidth 8));
+                            20,Arg 0,nativeCarrier;22,Arg 2,nativeCarrier] do
+            MLIRAccumulator.bindNode (id value) ssa ty operands
+        let operands=physical operands
+        let result=matchAt Alex.Patterns.MemoryPatterns.pPublishedMemoryOperation (focus graph graph.Nodes[id site]) 64 operands
+        Assert.Empty operands.AllOps
+        result
+
+    [<Theory>]
+    [<InlineData(6)>]
+    [<InlineData(7)>]
+    let ``returned checked outcome allocates its published aligned carrier`` site =
+        let graph=fixture ()
+        let operands=MLIRAccumulator.empty ()
+        let result=matchAt (Alex.Patterns.MemoryPatterns.pAllocValue (id site) (Arg 7) nativeCarrier) (focus graph graph.Nodes[id site]) 64 operands
+        match result with
+        | Ok(MemRefOp(AllocStatic(Arg 7,actual,Some 8)),_) -> Assert.Equal(nativeCarrier,actual)
+        | other -> failwithf "Returned outcome lost aligned heap storage: %A" other
+
+    [<Fact>]
+    let ``returned snapshot owner joins distinct emitted allocation site`` () =
+        let graph=fixtureWithSnapshot 43 43
+        let operands=MLIRAccumulator.empty ()
+        match matchAt (Alex.Patterns.MemoryPatterns.pAllocValue (id 6) (Arg 7) nativeCarrier) (focus graph graph.Nodes[id 6]) 64 operands with
+        | Ok(MemRefOp(AllocStatic(Arg 7,actual,Some 8)),_) -> Assert.Equal(nativeCarrier,actual)
+        | other -> failwithf "Published outer snapshot owner was conflated with emitted allocation site: %A" other
+
+    [<Fact>]
+    let ``returned snapshot owner refuses changed construction owner`` () =
+        let graph=fixtureWithSnapshot 43 44
+        let operands=MLIRAccumulator.empty ()
+        match matchAt (Alex.Patterns.MemoryPatterns.pAllocValue (id 6) (Arg 7) nativeCarrier) (focus graph graph.Nodes[id 6]) 64 operands with
+        | Result.Error reason -> Assert.Contains("original snapshot construction occurrence",reason)
+        | Ok _ -> failwith "Changed snapshot construction owner admitted"
+        Assert.True((MLIRAccumulator.recallSSAType (Arg 7) operands).IsNone)
+
+    [<Fact>]
+    let ``returned snapshot owner refuses changed current allocation row`` () =
+        let graph=fixtureWithSnapshot 43 43
+        let memory=graph.Emission.Memory
+        let original=match memory.Operations[id 1] with MemoryWitnessOperation.ArrayAllocation row->row | _->failwith "fixture"
+        let graph={graph with Emission={graph.Emission with Memory={memory with Operations=memory.Operations.Add(id 1,MemoryWitnessOperation.ArrayAllocation {original with Alignment=8})}}}
+        let operands=MLIRAccumulator.empty ()
+        match matchAt (Alex.Patterns.MemoryPatterns.pAllocValue (id 6) (Arg 7) nativeCarrier) (focus graph graph.Nodes[id 6]) 64 operands with
+        | Result.Error reason -> Assert.Contains("current heap snapshot allocation",reason)
+        | Ok _ -> failwith "Withdrawn current allocation row admitted"
+        Assert.True((MLIRAccumulator.recallSSAType (Arg 7) operands).IsNone)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``returned snapshot owner keeps carrier and combined capacity citizens distinct`` combined =
+        let graph=fixtureWithSnapshot 43 43
+        let citizen=id(if combined then 32 else 46)
+        let changed={graph.CurrentClaims[citizen] with Body=ObligationBody.CapacityFits((if combined then 32L else 35L),4096L)}
+        let graph={graph with CurrentClaims=graph.CurrentClaims.Add(citizen,changed)
+                              Obligations=graph.Obligations |> List.map(fun info->if info.Id=changed.Id then changed else info)}
+        let operands=MLIRAccumulator.empty ()
+        match matchAt (Alex.Patterns.MemoryPatterns.pAllocValue (id 6) (Arg 7) nativeCarrier) (focus graph graph.Nodes[id 6]) 64 operands with
+        | Result.Error reason -> Assert.Contains((if combined then "combined live-byte capacity citizen" else "per-instance capacity citizen"),reason)
+        | Ok _ -> failwith "Distinct capacity proof roles were conflated"
+        Assert.True((MLIRAccumulator.recallSSAType (Arg 7) operands).IsNone)
+
+    [<Theory>]
+    [<InlineData(13,1)>]
+    [<InlineData(14,0)>]
+    [<InlineData(15,0)>]
+    [<InlineData(8,4)>]
+    let ``returned checked retirement deallocates only the recalled actual instance`` site argument =
+        match observe site (fixture ()) (fun value -> value) with
+        | Ok(([MemRefOp(Dealloc(actual,_))],[],TRVoid),_) -> Assert.Equal(Arg argument,actual)
+        | other -> failwithf "Returned retirement lost its exact caller or helper actual: %A" other
+
+    [<Fact>]
+    let ``returned checked snapshot retains runtime count and published alignment`` () =
+        match observe 1 (fixture ()) (fun value -> value) with
+        | Ok(([IndexOp _;MemRefOp(Alloc(_,_,TInt(IntWidth 8),Some 16)) as operation],[],TRValue _),_) ->
+            match moduleText (Ok 64) None [operation] with
+            | Available text -> Assert.Contains("{alignment = 16 : i64}",text)
+            | NeedsTargetRealization -> failwith "Neutral allocation must retain portable text"
+        | other -> failwithf "Returned snapshot lost its allocation alignment: %A" other
+
+    [<Fact>]
+    let ``returned checked changes preserve local empty stack retirement`` () =
+        let graph=fixture ()
+        let memory=graph.Emission.Memory
+        let retired=match memory.Operations[id 8] with MemoryWitnessOperation.SnapshotRetirement row->row | _->failwith "fixture"
+        let construction={retired.Construction with Returned=None}
+        let allocation={retired.Allocation with MinimumCount=0I;MaximumCount=0I;Residence=MemoryResidence.Stack(id 17,id 34)}
+        let operations=memory.Operations
+                        |> Map.add (id 1) (MemoryWitnessOperation.ArrayAllocation allocation)
+                        |> Map.add (id 4) (MemoryWitnessOperation.Utf8Validation {Site=id 4;Construction=construction;Allocation=allocation;Copy=memory.ArrayCopies[id 40];SourceCarrier=bytes})
+                        |> Map.add (id 8) (MemoryWitnessOperation.SnapshotRetirement {Site=id 8;Construction=construction;Allocation=allocation})
+        let graph={graph with Emission={graph.Emission with Memory={memory with Operations=operations}}}
+        match observe 8 graph (fun value->value) with
+        | Ok(([Utf8SnapshotRetire(_,value)],[],TRVoid),_) -> Assert.Equal(Arg 4,value.SSA)
+        | other -> failwithf "Local empty stack retirement changed: %A" other
+
+    [<Fact>]
+    let ``returned checked retirement refuses a changed physical caller carrier`` () =
+        let physical accumulator =
+            MLIRAccumulator.registerSSAType (Arg 0) (TMemRefStatic(31,TInt(IntWidth 8))) accumulator
+            accumulator
+        match observe 14 (fixture ()) physical with
+        | Result.Error reason -> Assert.Contains("exact registered physical caller value",reason)
+        | Ok _ -> failwith "Changed physical caller carrier was retired"
+
+    [<Theory>]
+    [<InlineData("missing")>]
+    [<InlineData("application")>]
+    [<InlineData("space")>]
+    [<InlineData("zero")>]
+    [<InlineData("stack")>]
+    let ``returned checked carrier refuses absent or changed heap lifetime`` defect =
+        let graph=fixture ()
+        let operations=graph.Emission.Memory.Operations
+        let allocation=match operations[id 6] with MemoryWitnessOperation.ConstructedValue row->row | _->failwith "fixture"
+        let life=allocation.Construction.Returned.Value
+        let construction={allocation.Construction with Returned=if defect="missing" then None else Some life}
+        let allocation={allocation with Construction=construction
+                                        Residence=match defect with "application"->MemoryResidence.Heap(id 99,life.Space) | "space"->MemoryResidence.Heap(life.Application,id 99) | "stack"->MemoryResidence.Stack(id 17,life.Space) | _->allocation.Residence}
+        let operations=operations.Add(id 6,MemoryWitnessOperation.ConstructedValue allocation)
+        let operations =
+            if defect="zero" then
+                operations |> Map.map(fun _ operation ->
+                    match operation with
+                    | MemoryWitnessOperation.ArrayAllocation row -> MemoryWitnessOperation.ArrayAllocation {row with MinimumCount=0I}
+                    | MemoryWitnessOperation.Utf8Validation row -> MemoryWitnessOperation.Utf8Validation {row with Allocation={row.Allocation with MinimumCount=0I}}
+                    | _ -> operation)
+            else operations
+        let graph={graph with Emission={graph.Emission with Memory={graph.Emission.Memory with Operations=operations}}}
+        let operands=MLIRAccumulator.empty ()
+        match matchAt (Alex.Patterns.MemoryPatterns.pAllocValue (id 6) (Arg 7) nativeCarrier) (focus graph graph.Nodes[id 6]) 64 operands with
+        | Result.Error reason -> Assert.Contains((if defect="zero" then "positive-count" elif defect="stack" then "local stack residence" else "exact source application"),reason)
+        | Ok _ -> failwithf "Changed returned heap %s admitted" defect
+        Assert.Empty operands.AllOps
+        Assert.True((MLIRAccumulator.recallSSAType (Arg 7) operands).IsNone)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``returned checked retirement refuses a same typed foreign actual`` backing =
+        let graph=fixture ()
+        let site=if backing then 13 else 14
+        let memory=graph.Emission.Memory
+        let retirement=match memory.Operations[id site] with MemoryWitnessOperation.CheckedResultRetirement row->row | _->failwith "fixture"
+        let retirement={retirement with Value=id(if backing then 16 else 22)}
+        let graph={graph with Emission={graph.Emission with Memory={memory with Operations=memory.Operations.Add(id site,MemoryWitnessOperation.CheckedResultRetirement retirement)}}}
+        match observe site graph (fun value -> value) with
+        | Result.Error reason -> Assert.Contains("exact caller value or cleanup occurrence",reason)
+        | Ok _ -> failwith "A foreign same-typed value was retired"
+
 /// The opaque handle type of a register of the width given, as the contract states it.
 let private handleType (bits: int) : TypeIdentity =
     TypeIdentity.Application(

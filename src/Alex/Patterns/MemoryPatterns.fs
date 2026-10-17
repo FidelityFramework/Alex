@@ -248,6 +248,47 @@ let pNativeEntrySlot (storage: ProgramStorageEntry) : PSGParser<NodeId * MLIRTyp
         | Result.Error reason -> return! fail (Message reason)
     }
 
+/// Consume the current source capacity citizen in its published role. The
+/// source proof and Integrity own the capacity conclusion and complete support.
+let private pCheckedCapacity citizen bytes required reason : PSGParser<unit> = parser {
+    let! state = getUserState
+    do! ensure
+            (match state.Graph.CurrentClaims.TryFind citizen, state.Graph.ObligationSources.TryFind citizen with
+             | Some info, Some sources when state.Graph.Obligations |> List.contains info ->
+                 (match info.Body with ObligationBody.CapacityFits(amount, _) -> amount = bytes | _ -> false)
+                 && (required |> List.forall (fun id -> sources |> List.exists (List.contains id)))
+             | _ -> false)
+            reason
+}
+
+/// Join the source's returned instance to its original checked construction.
+/// No caller, storage class or cleanup frontier is inferred by the witness.
+let private pReturnedCheckedConstruction (construction: CheckedStringConstruction) application space
+    : PSGParser<MemoryCheckedResultLifetime * MemoryArrayAllocationWitness> = parser {
+    let! state = getUserState
+    let! lifetime =
+        match construction.Returned with
+        | Some lifetime when lifetime.Application = application && lifetime.Space = space
+                             && lifetime.Body = construction.Owner -> preturn lifetime
+        | _ -> fail (Message "Returned checked text lacks its exact source application, space and lifetime account.")
+    let! allocation =
+        match state.Graph.Emission.Memory.Operations.TryFind construction.Validation with
+        | Some(MemoryWitnessOperation.Utf8Validation validation) when validation.Construction = construction ->
+            preturn validation.Allocation
+        | _ -> fail (Message "Returned checked text lacks its current original validator and allocation account.")
+    do! ensure
+            (allocation.Construction.Owner = construction.Snapshot && allocation.Construction.Site = allocation.Site)
+            "Returned checked text lacks its original snapshot construction occurrence."
+    do! ensure
+            (allocation.MinimumCount > 0I
+             && allocation.Residence = MemoryResidence.Heap(application, space)
+             && state.Graph.Emission.Memory.Operations.TryFind allocation.Site = Some(MemoryWitnessOperation.ArrayAllocation allocation))
+            "Returned checked text lacks its positive-count current heap snapshot allocation."
+    do! pCheckedCapacity lifetime.Capacity lifetime.MaximumLiveBytes [lifetime.Application;lifetime.Platform;lifetime.Space]
+            "Returned checked text lacks its current combined live-byte capacity citizen."
+    return lifetime, allocation
+}
+
 /// Allocate memory for a constructed value — queries escape analysis coeffect
 /// PULL model: pattern pulls allocation decision from pre-computed coeffects.
 /// Four-point lifetime lattice (closure-representation.md §3.3):
@@ -280,7 +321,20 @@ let pAllocValue (nodeId: NodeId) (ssa: SSA) (ty: MLIRType) : PSGParser<MLIROp> =
             do! ensure (ty = TMemRefStatic(size,TInt(IntWidth 8)))
                     "Constructed value allocation differs from its settled native carrier."
             match allocation.Residence with
-            | MemoryResidence.Stack _ -> return! pAlloca ssa size (TInt(IntWidth 8)) (Some alignment)
+            | MemoryResidence.Stack _ ->
+                do! ensure allocation.Construction.Returned.IsNone
+                        "Returned checked carrier cannot use a local stack residence."
+                return! pAlloca ssa size (TInt(IntWidth 8)) (Some alignment)
+            | MemoryResidence.Heap(application, space) ->
+                let! lifetime, _ = pReturnedCheckedConstruction allocation.Construction application space
+                do! ensure
+                        ((nodeId = allocation.Construction.Success || nodeId = allocation.Construction.Failure)
+                         && allocation.Owner = allocation.Construction.Owner
+                         && allocation.Platform = lifetime.Platform)
+                        "Returned checked carrier differs from its exact constructed outcome or published storage account."
+                do! pCheckedCapacity allocation.Capacity (int64 size) [allocation.Site;allocation.Platform;application;space]
+                        "Returned checked carrier lacks its current per-instance capacity citizen."
+                return! pAllocStatic ssa size (TInt(IntWidth 8)) (Some alignment)
             | _ -> return! fail (Message "Constructed value has no admitted source storage residence.")
         | _ ->
             let requiresAllocation =
@@ -577,10 +631,52 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
                         validation.Construction = retirement.Construction && validation.Allocation = retirement.Allocation
                     | _ -> false)
                 "Checked-text retirement lacks its exact source-issued validator and outcome."
-        do! ensure (match retirement.Allocation.Residence with MemoryResidence.Stack _ -> true | _ -> false)
-                "Checked-text retirement lacks an admitted source storage residence."
         let! snapshot = pMemoryBuffer retirement.Construction.Snapshot (TInt(IntWidth 8))
-        return [Utf8SnapshotRetire(retirement.Site, snapshot)], [], TRVoid
+        match retirement.Allocation.Residence with
+        | MemoryResidence.Stack _ ->
+            do! ensure retirement.Construction.Returned.IsNone
+                    "Returned checked failure retirement cannot use a local stack residence."
+            return [Utf8SnapshotRetire(retirement.Site, snapshot)], [], TRVoid
+        | MemoryResidence.Heap(application, space) ->
+            let! _, allocation = pReturnedCheckedConstruction retirement.Construction application space
+            do! ensure (allocation = retirement.Allocation)
+                    "Returned checked failure retirement differs from its original heap snapshot."
+            let! operation = pDealloc snapshot.SSA snapshot.Type
+            return [operation], [], TRVoid
+        | _ -> return! fail (Message "Checked-text retirement lacks an admitted source storage residence.")
+    | Some (MemoryWitnessOperation.CheckedResultRetirement retirement) ->
+        let! lifetime =
+            match retirement.Construction.Returned with
+            | Some lifetime -> preturn lifetime
+            | None -> fail (Message "Checked result retirement lacks its source returned-instance account.")
+        let! _, _ = pReturnedCheckedConstruction retirement.Construction lifetime.Application lifetime.Space
+        do! ensure
+                (retirement.Site = state.Current.Id
+                 && (match retirement.Target with
+                    | MemoryCheckedRetirementTarget.Backing ->
+                        retirement.Site = lifetime.SomeBackingRetirement
+                        && (memory.Operations.TryFind lifetime.SomeUse |> Option.exists (function
+                            | MemoryWitnessOperation.BufferExtent extent -> extent.Site = lifetime.SomeUse && extent.Source = retirement.Value
+                            | _ -> false))
+                    | MemoryCheckedRetirementTarget.Carrier ->
+                        retirement.Value = lifetime.Actual
+                        && (retirement.Site = lifetime.SomeCarrierRetirement || retirement.Site = lifetime.NoneCarrierRetirement)))
+                "Checked result retirement differs from its exact caller value or cleanup occurrence."
+        let! ssa, recalledType = pRecallNode retirement.Value
+        let expected = valueTypeAt state.Graph retirement.Value
+        do! ensure (recalledType = expected) "Checked result retirement differs from its published caller value representation."
+        let! physical =
+            match MLIRAccumulator.recallSSAType ssa state.Accumulator with
+            | Some physical when physical = expected -> preturn physical
+            | _ -> fail (Message "Checked result retirement lacks the exact registered physical caller value.")
+        do! ensure
+                (match retirement.Target, physical with
+                 | MemoryCheckedRetirementTarget.Backing, TMemRef(TInt(IntWidth 8)) -> true
+                 | MemoryCheckedRetirementTarget.Carrier, TMemRefStatic(_, TInt(IntWidth 8)) -> true
+                 | _ -> false)
+                "Checked result retirement has no admitted backing or native-carrier storage representation."
+        let! operation = pDealloc ssa physical
+        return [operation], [], TRVoid
     | Some (MemoryWitnessOperation.BufferExtent extent) ->
         do! ensure (extent.Site = state.Current.Id && extent.Result.Site = state.Current.Id)
                 "Memory extent and result carrier name different source occurrences."
@@ -637,7 +733,23 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
             else pIndexCastS ssas.[0] count countType TIndex
         match allocation.Residence with
         | MemoryResidence.Stack _ ->
+            do! ensure
+                    (memory.Operations.Values |> Seq.forall (function
+                        | MemoryWitnessOperation.Utf8Validation validation when validation.Allocation.Site = allocation.Site ->
+                            validation.Construction.Returned.IsNone
+                        | _ -> true))
+                    "Returned checked snapshot cannot use a local stack residence."
             let! storage = pAllocaDynamic result.SSA ssas.[0] element allocation.Alignment
+            return [countCast; storage], [], TRValue result
+        | MemoryResidence.Heap(application, space) ->
+            let! construction =
+                match memory.Operations.Values |> Seq.choose (function
+                    | MemoryWitnessOperation.Utf8Validation validation when validation.Allocation = allocation -> Some validation.Construction
+                    | _ -> None) |> Seq.toList with
+                | [construction] -> preturn construction
+                | _ -> fail (Message "Heap snapshot allocation lacks its unique source checked construction.")
+            let! _, _ = pReturnedCheckedConstruction construction application space
+            let! storage = pAllocAligned result.SSA ssas.[0] element (Some allocation.Alignment)
             return [countCast; storage], [], TRValue result
         | _ -> return! fail (Message "Dynamic array allocation lacks an admitted source storage residence.")
     | Some (MemoryWitnessOperation.ArrayAccess access) ->
@@ -675,6 +787,8 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
             | MemoryResidence.Stack _ -> parser {
                 let! allocation = pAlloca ssas.[0] literal.Length element (Some literal.Alignment)
                 return [allocation], [], ssas.[0] }
+            | MemoryResidence.Heap _ ->
+                fail (Message "Heap array literals lack an authored checked snapshot allocation.")
             | MemoryResidence.Program identity -> parser {
                 let! storage =
                     match state.Graph.Emission.Storage.ProgramStorage.Entries.TryFind identity with

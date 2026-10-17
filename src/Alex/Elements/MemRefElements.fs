@@ -118,13 +118,16 @@ let pAllocaDynamic (result: SSA) (count: SSA) (elementType: MLIRType) (alignment
 
 /// Emit memref.alloc operation (heap allocation with runtime size)
 /// Registers the created SSA's memref type in the accumulator for downstream pLoad derivation
-let pAlloc (ssa: SSA) (sizeSSA: SSA) (elemType: MLIRType) : PSGParser<MLIROp> =
+let pAllocAligned (ssa: SSA) (sizeSSA: SSA) (elemType: MLIRType) (alignment: int option) : PSGParser<MLIROp> =
     parser {
         let! state = getUserState
         let memrefType = TMemRef elemType
         MLIRAccumulator.registerSSAType ssa memrefType state.Accumulator
-        return MLIROp.MemRefOp (MemRefOp.Alloc (ssa, sizeSSA, elemType))
+        return MLIROp.MemRefOp (MemRefOp.Alloc (ssa, sizeSSA, elemType, alignment))
     }
+
+/// Existing callers retain their unqualified allocation spelling.
+let pAlloc ssa sizeSSA elemType = pAllocAligned ssa sizeSSA elemType None
 
 /// Release an owned heap allocation after all native uses and copy-back finish.
 let pDealloc (ssa: SSA) (memrefType: MLIRType) : PSGParser<MLIROp> =

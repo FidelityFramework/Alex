@@ -416,11 +416,12 @@ let memrefOpToString (pointer: Result<int, string>) (op: MemRefOp) : string =
     | MemRefOp.AllocaDynamic (result, count, elementType, alignment) ->
         sprintf "%s = memref.alloca(%s) {alignment = %d : i64} : %s"
             (ssaToString result) (ssaToString count) alignment (typeToString pointer (TMemRef elementType))
-    | MemRefOp.Alloc (result, sizeSSA, elemType) ->
+    | MemRefOp.Alloc (result, sizeSSA, elemType, alignmentOpt) ->
         // Heap allocation with runtime size: memref.alloc(%size) : memref<?xelemType>
         let memrefType = TMemRef elemType
-        sprintf "%s = memref.alloc(%s) : %s"
-            (ssaToString result) (ssaToString sizeSSA) (typeToString pointer memrefType)
+        let alignment = alignmentOpt |> Option.map (sprintf " {alignment = %d : i64}") |> Option.defaultValue ""
+        sprintf "%s = memref.alloc(%s)%s : %s"
+            (ssaToString result) (ssaToString sizeSSA) alignment (typeToString pointer memrefType)
     | MemRefOp.Dealloc (memref, memrefType) ->
         sprintf "memref.dealloc %s : %s" (ssaToString memref) (typeToString pointer memrefType)
     | MemRefOp.AllocStatic (result, memrefType, alignmentOpt) ->
