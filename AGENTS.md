@@ -5,6 +5,8 @@ These are owner requirements. They apply to every change, by a person or an agen
 ## The boundary
 
 - Alex receives one published revision of the Program Semantic Graph and nothing else. The revision is a value of `Fidelity.PSG.Revision`.
+- Any transformation inside Alex is an architectural violation. Baker's construction, elaboration and saturation of the PSG remain upstream responsibilities; Alex witnesses the published facts through the Huet zipper.
+- No `open`, qualified dependency, compiler call or linked source from Baker, Clef or CCS is permitted anywhere in this repository, including tests and tooling. There are no exceptions to this boundary.
 - Alex references the published contract, `Fidelity.PSG`, and the library the contract references. The contract is its own project. Alex references no compiler and no file of the compiler's repository. `build/Boundary.targets` refuses any other project reference (ALEX002) and any source line that names the compiler service (ALEX001).
 - A fact Alex lacks is missing from the revision. The repair is made where the graph is elaborated and saturated, in Baker, and the fact is then published. A witness never computes the fact, infers it, or asks another component for it.
 - Reading a fact through a function of the compiler service counts as a compiler call, including a function that only reads.
