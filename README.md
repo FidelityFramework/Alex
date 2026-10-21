@@ -38,7 +38,7 @@ A `Request` holds the revision, the selected target, and the libraries the proje
 | `build/Boundary.targets` | The boundary, checked before every compile |
 | `tests/Alex.Tests` | Tests of Patterns, witnesses and the traversal, given revisions assembled from contract values |
 | `docs` | The boundary, the contract, the open decisions, the debt register and the account of the tests |
-| `tools` | `CcsSurfaceInventory.fsx` measured the dependency on the compiler service. `PlanMeasure.fsx` measures what the edge set of a revision says about units of work. |
+| `tools` | `PlanMeasure.fsx` measures what the edge set of a revision says about units of work. The compiler-surface diagnostic is retired; its last source is at revision `060405a4`, with measurements recorded in `docs/01_Boundary.md`. |
 
 ## Build
 

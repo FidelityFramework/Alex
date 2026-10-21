@@ -15,7 +15,7 @@ There is no third case.
 
 Until September 2026 Alex was compiled inside the Composer assembly, and Composer referenced the whole compiler service. Every analysis module of the compiler service was callable from every witness. The separation was a convention.
 
-An inventory taken with the compiler's own symbol resolution, at Composer `896ef98` and clef `b77f888`, measured what the convention had allowed. The script is `tools/CcsSurfaceInventory.fsx`. The rows are in `docs/evidence/ccs-surface-at-notch.tsv`.
+An inventory taken with the compiler's own symbol resolution, at Composer `896ef98` and clef `b77f888`, measured what the convention had allowed. The compiler-dependent diagnostic, formerly `tools/CcsSurfaceInventory.fsx`, is retired from Alex because the boundary applies to tooling too. Its last source is preserved at revision `060405a4` in Git history. The measured rows remain in `docs/evidence/ccs-surface-at-notch.tsv`.
 
 | Measure | Count |
 | --- | --- |
