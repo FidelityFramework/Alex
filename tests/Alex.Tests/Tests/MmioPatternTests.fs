@@ -733,29 +733,30 @@ module ReturnedCheckedText =
             | Result.Error reason -> Assert.Contains("exact caller value or cleanup occurrence",reason)
             | Ok _ -> failwith "Empty backing acquired an allocated retirement"
 
-/// The opaque handle type of a register of the width given, as the contract states it.
-let private handleType (bits: int) : TypeIdentity =
+/// The opaque handle type used by the component fixture.
+/// The fixture deliberately does not encode width in its name; the established access evidence owns width.
+let private handleType : TypeIdentity =
     TypeIdentity.Application(
-        { Declaration = { Module = []; Name = sprintf "Mmio%d" bits }; Parameters = []; NativeKind = None }, [])
+        { Declaration = { Module = []; Name = "DeviceRegister" }; Parameters = []; NativeKind = None }, [])
 
 /// A write of a 16-bit value to an 8-bit register, with the meets published for the write.
 /// The handle and the value are formals that were witnessed before the write.
 let private registerWrite (meets: Meet list) =
-    let handle = node 0 (SemanticKind.PatternBinding "register") (handleType 8) [] None
+    let handle = node 0 (SemanticKind.PatternBinding "register") handleType [] None
     let value = node 1 (SemanticKind.PatternBinding "value") intType [] None
     let intrinsic =
         node 2
             (SemanticKind.Intrinsic
-                { Module = IntrinsicModule.Mmio; Operation = "write"
-                  Category = IntrinsicCategory.Memory; FullName = "Mmio.write" })
-            (functionFrom (handleType 8) (functionFrom intType unitType)) [] None
+                { Module = IntrinsicModule.Mmio; Operation = "write8"
+                  Category = IntrinsicCategory.Memory; FullName = "Mmio.write8" })
+            (functionFrom handleType (functionFrom intType unitType)) [] None
     let write = node 3 (SemanticKind.Application(intrinsic.Id, [handle.Id; value.Id])) unitType [2; 0; 1] None
     let stated = revision [handle; value; intrinsic; write]
     let graph =
         { stated with
             Codata =
                 { stated.Codata with
-                    Mmio = Map.ofList [ (write.Id, { Operation = "write"; Address = 1073741824I; Bits = 8; Binding = None }) ]
+                    Mmio = Map.ofList [ (write.Id, { Operation = "write8"; Address = 1073741824I; Bits = 8; Binding = None }) ]
                     Meets = if meets.IsEmpty then Map.empty else Map.ofList [ (write.Id, meets) ] }
             Emission =
                 { stated.Emission with
@@ -808,6 +809,20 @@ let ``register write without a published meet returns an error and selects no ca
         failwithf "A cast was selected from the widths of the operands: %A" operations
     Assert.Empty(operands.AllOps)
     Assert.Equal(None, MLIRAccumulator.recallNode write operands)
+
+[<Fact>]
+let ``register write with missing MMIO evidence refuses the operation`` () =
+  let truncation consumer operand = { Consumer = consumer; Operand = operand; From = 16; To = 8; Adapt = MeetKind.Truncate }
+  let graph, _, operands, write, _ = registerWrite [ truncation (NodeId 3) (NodeId 1) ]
+  let graph = { graph with Codata = { graph.Codata with Mmio = Map.empty } }
+  let position = focus graph graph.Nodes[write]
+  match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic position 64 operands with
+  | Result.Error message ->
+    Assert.Contains("MMIO operation has no established CCS access evidence", message)
+  | Result.Ok ((operations, _), _) ->
+    failwithf "MMIO operation admitted without evidence: %A" operations
+  Assert.Empty(operands.AllOps)
+  Assert.Equal(None, MLIRAccumulator.recallNode write operands)
 
 [<Theory>]
 [<InlineData("%p = llvm.inttoptr %address : i64 to !llvm.ptr")>]

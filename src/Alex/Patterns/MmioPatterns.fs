@@ -29,9 +29,6 @@ let pMmioIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
         return [MLIROp.ArithOp (ArithOp.ConstI (s 0, address, TIndex))], TRValue { SSA = s 0; Type = TIndex }
     else
         do! ensure (args.Length = (if isRead then 1 else 2)) "Invalid MMIO accessor arity"
-        let handleType = state.Graph.Nodes.[args.Head].Type
-        do! ensure (match handleType with TypeIdentity.Application(constructor, []) -> constructor.Declaration.Name = "Mmio" + string bits | _ -> false)
-                   "MMIO access width does not match its opaque register handle"
         let! address, addressTy = pRecallNode args.Head
         do! ensure (addressTy = TIndex) "MMIO handle must have the platform pointer representation"
         let elementTy = TInt (IntWidth bits)
