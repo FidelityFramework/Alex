@@ -754,6 +754,9 @@ let private registerWrite (meets: Meet list) =
     let stated = revision [handle; value; intrinsic; write]
     let graph =
         { stated with
+            Foreign =
+                { stated.Foreign with
+                    Mmio = Map.ofList [ write.Id, { Site = write.Id; Operation = "write8"; Arguments = [handle.Id; value.Id] } ] }
             Codata =
                 { stated.Codata with
                     Mmio = Map.ofList [ (write.Id, { Operation = "write8"; Address = 1073741824I; Bits = 8; Binding = None }) ]
@@ -823,6 +826,81 @@ let ``register write with missing MMIO evidence refuses the operation`` () =
     failwithf "MMIO operation admitted without evidence: %A" operations
   Assert.Empty(operands.AllOps)
   Assert.Equal(None, MLIRAccumulator.recallNode write operands)
+
+[<Fact>]
+let ``register write with missing descriptor refuses the occurrence`` () =
+    let graph, _, operands, write, _ = registerWrite []
+    let graph = { graph with Foreign = { graph.Foreign with Mmio = Map.empty } }
+    match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[write]) 64 operands with
+    | Result.Error message ->
+        Assert.Equal(sprintf "MMIO occurrence %d has no published Foreign.Mmio descriptor" (NodeId.value write), message)
+    | Result.Ok _ -> failwith "MMIO occurrence admitted without its descriptor"
+    Assert.Empty operands.AllOps
+    Assert.Equal(None, MLIRAccumulator.recallNode write operands)
+
+[<Fact>]
+let ``register write consumes descriptor through nested callee annotations`` () =
+    let truncation consumer operand = { Consumer = consumer; Operand = operand; From = 16; To = 8; Adapt = MeetKind.Truncate }
+    let graph, _, operands, write, _ = registerWrite [ truncation (NodeId 3) (NodeId 1) ]
+    // This synthetic PSG shape proves descriptor consumption, not real upstream alias support.
+    let intrinsic = graph.Nodes[NodeId 2]
+    let inner = node 4 (SemanticKind.TypeAnnotation(intrinsic.Id, intrinsic.Type)) intrinsic.Type [2] None
+    let outer = node 5 (SemanticKind.TypeAnnotation(inner.Id, intrinsic.Type)) intrinsic.Type [4] None
+    let application = { graph.Nodes[write] with Kind = SemanticKind.Application(outer.Id, [NodeId 0; NodeId 1]); Children = [outer.Id; NodeId 0; NodeId 1] }
+    let graph =
+        { graph with Nodes = graph.Nodes.Add(inner.Id, inner).Add(outer.Id, outer).Add(write, application) }
+        |> declareTraversalReadings
+    match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[write]) 64 operands with
+    | Result.Error message -> failwithf "Published descriptor was not consumed: %s" message
+    | Result.Ok ((operations, _), _) ->
+        let adapted = Alex.Traversal.Values.meetValue write 0
+        Assert.Contains(ArithOp(ArithOp.TruncI(adapted, Arg 1, TInt(IntWidth 16), TInt(IntWidth 8))), operations)
+        Assert.Contains(MLIROp.MmioStore(write, adapted, Arg 0, 8), operations)
+
+[<Fact>]
+let ``register read consumes its published descriptor`` () =
+    let graph, _, operands, site, _ = registerWrite []
+    let intrinsic = graph.Nodes[NodeId 2]
+    let intrinsic = { intrinsic with Kind = SemanticKind.Intrinsic { Module = IntrinsicModule.Mmio; Operation = "read8"; Category = IntrinsicCategory.Memory; FullName = "Mmio.read8" } }
+    let application = { graph.Nodes[site] with Kind = SemanticKind.Application(intrinsic.Id, [NodeId 0]); Children = [intrinsic.Id; NodeId 0]; Type = uint8Type }
+    let graph =
+        { graph with
+            Nodes = graph.Nodes.Add(intrinsic.Id, intrinsic).Add(site, application)
+            Foreign = { graph.Foreign with Mmio = Map.ofList [ site, { Site = site; Operation = "read8"; Arguments = [NodeId 0] } ] }
+            Codata = { graph.Codata with Mmio = Map.ofList [ site, { Operation = "read8"; Address = 1073741824I; Bits = 8; Binding = None } ] }
+            Emission =
+                { graph.Emission with
+                    Callable = { graph.Emission.Callable with UnitNodes = graph.Emission.Callable.UnitNodes.Remove site }
+                    Numeric = { graph.Emission.Numeric with OccurrenceRepresentations = Map.ofList [ site, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(8, Some "uint8"))) ] } } }
+        |> declareTraversalReadings
+    match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[site]) 64 operands with
+    | Result.Ok (([MLIROp.MmioLoad(actual, result, Arg 0, 8)], TRValue value), _) ->
+        Assert.Equal(site, actual)
+        Assert.Equal({ SSA = result; Type = TInt(IntWidth 8) }, value)
+    | other -> failwithf "Published read descriptor was not witnessed: %A" other
+
+[<Fact>]
+let ``register address consumes its published descriptor`` () =
+    let graph, _, operands, site, _ = registerWrite []
+    let intrinsic = graph.Nodes[NodeId 2]
+    let intrinsic = { intrinsic with Kind = SemanticKind.Intrinsic { Module = IntrinsicModule.Mmio; Operation = "reg8"; Category = IntrinsicCategory.Memory; FullName = "Mmio.reg8" } }
+    let application = { graph.Nodes[site] with Kind = SemanticKind.Application(intrinsic.Id, [NodeId 1]); Children = [intrinsic.Id; NodeId 1]; Type = handleType }
+    let graph =
+        { graph with
+            Nodes = graph.Nodes.Add(intrinsic.Id, intrinsic).Add(site, application)
+            Foreign = { graph.Foreign with Mmio = Map.ofList [ site, { Site = site; Operation = "reg8"; Arguments = [NodeId 1] } ] }
+            Codata = { graph.Codata with Mmio = Map.ofList [ site, { Operation = "reg8"; Address = 1073741824I; Bits = 8; Binding = None } ] }
+            // This component control proves descriptor dispatch and the existing address output only.
+            // It supplies no pointer-representation authority; that remains a separate design question.
+            Emission =
+                { graph.Emission with
+                    Callable = { graph.Emission.Callable with UnitNodes = graph.Emission.Callable.UnitNodes.Remove site }
+                    Numeric = { graph.Emission.Numeric with OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Remove site } } }
+        |> declareTraversalReadings
+    match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[site]) 64 operands with
+    | Result.Ok (([MLIROp.ArithOp(ArithOp.ConstI(result, 1073741824L, TIndex))], TRValue value), _) ->
+        Assert.Equal({ SSA = result; Type = TIndex }, value)
+    | other -> failwithf "Published register descriptor was not witnessed: %A" other
 
 [<Theory>]
 [<InlineData("%p = llvm.inttoptr %address : i64 to !llvm.ptr")>]

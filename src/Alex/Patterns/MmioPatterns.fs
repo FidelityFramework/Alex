@@ -9,13 +9,17 @@ open Alex.Elements.MLIRAtomics
 open Fidelity.PSG
 
 let pMmioIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
-    let! info, args = pIntrinsicApplication IntrinsicModule.Mmio
     let! node = getCurrentNode
     let! state = getUserState
+    let! declared =
+        match Map.tryFind node.Id state.Graph.Foreign.Mmio with
+        | Some declared -> preturn declared
+        | None -> fail (Message (sprintf "MMIO occurrence %d has no published Foreign.Mmio descriptor" (NodeId.value node.Id)))
+    let operation, args = declared.Operation, declared.Arguments
     let! ssas = getNodeSSAs node.Id
     let s i = ssas.[i]
-    let isReg = info.Operation.StartsWith("reg") || info.Operation.StartsWith("bind")
-    let isRead = info.Operation.StartsWith("read")
+    let isReg = operation.StartsWith("reg") || operation.StartsWith("bind")
+    let isRead = operation.StartsWith("read")
     let! evidence =
         match Map.tryFind node.Id state.Graph.Codata.Mmio with
         | Some evidence -> preturn evidence
