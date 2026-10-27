@@ -122,7 +122,7 @@ let ``unit conditional preserves ordered branch effects before its sole i32 zero
     Assert.Equal(unitType, result.Type)
     match operations with
     | [MLIROp.SCFOp(SCFOp.If(Arg 0, thenOps, Some elseOps, None));
-       MLIROp.ArithOp(ArithOp.ConstI(ssa, 0L, TInt(IntWidth 32)))] ->
+       MLIROp.ArithOp(ArithOp.ConstI(ssa, value, TInt(IntWidth 32)))] when value = 0I ->
         Assert.Equal<MLIROp list>(thenEffects @ [MLIROp.SCFOp(SCFOp.Yield [])], thenOps)
         Assert.Equal<MLIROp list>(elseEffects @ [MLIROp.SCFOp(SCFOp.Yield [])], elseOps)
         Assert.Equal(result.SSA, ssa)

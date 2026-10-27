@@ -312,7 +312,7 @@ let private pBuildMultipleMatchElimination
                             let cmpSSA = allSSAs.[1 + 2 * armIdx + 1]
                             parser {
                                 let! tagIndex = pArmDiscriminant arm.Pattern
-                                let! tagLitOp = pConstI tagLitSSA tagIndex scrutineeType
+                                let! tagLitOp = pConstI tagLitSSA (bigint tagIndex) scrutineeType
                                 let! cmpOp = pCombICmp cmpSSA ICmpPred.Eq scrutineeSSA tagLitSSA scrutineeType
                                 return! buildComparisons (armIdx + 1) ((tagLitOp, cmpOp, cmpSSA) :: acc)
                             }
@@ -372,7 +372,7 @@ let private pBuildMultipleMatchElimination
                         let indexZeroSSA = allSSAs.[1]
                         let tagSSA = allSSAs.[2]
                         let memrefI8Ty = TMemRef (TInt (IntWidth 8))
-                        let indexZeroOp = MLIROp.ArithOp (ArithOp.ConstI (indexZeroSSA, 0L, TIndex))
+                        let indexZeroOp = MLIROp.ArithOp (ArithOp.ConstI (indexZeroSSA, 0I, TIndex))
                         let loadOp = MLIROp.MemRefOp (MemRefOp.Load (tagSSA, scrutineeSSA, [indexZeroSSA], tagTy, memrefI8Ty))
                         preturn ([indexZeroOp; loadOp], tagSSA, 3, tagTy)
                     // memref.reinterpret_cast keeps the element type of its source, so the
@@ -383,7 +383,7 @@ let private pBuildMultipleMatchElimination
                         let tagSSA = allSSAs.[3]
                         let memrefI8Ty = TMemRef (TInt (IntWidth 8))
                         let castOp = MLIROp.MemRefOp (MemRefOp.ReinterpretCast (castSSA, scrutineeSSA, 0, 1, scrutineeType, memrefI8Ty))
-                        let zeroOp = MLIROp.ArithOp (ArithOp.ConstI (zeroSSA, 0L, TIndex))
+                        let zeroOp = MLIROp.ArithOp (ArithOp.ConstI (zeroSSA, 0I, TIndex))
                         let loadOp = MLIROp.MemRefOp (MemRefOp.Load (tagSSA, castSSA, [zeroSSA], tagTy, memrefI8Ty))
                         preturn ([castOp; zeroOp; loadOp], tagSSA, 4, tagTy)
                     | TResourceOption _ -> parser {
@@ -451,7 +451,7 @@ let private pBuildMultipleMatchElimination
                         let cmpSSA = allSSAs.[ssaOffset + 1]
                         ssaOffset <- ssaOffset + 2
 
-                        let tagLitOp = MLIROp.ArithOp (ArithOp.ConstI (tagLitSSA, int64 tagIndex, tagTy))
+                        let tagLitOp = MLIROp.ArithOp (ArithOp.ConstI (tagLitSSA, bigint tagIndex, tagTy))
                         let cmpOp = MLIROp.ArithOp (ArithOp.CmpI (cmpSSA, ICmpPred.Eq, tagSSA, tagLitSSA, tagTy))
 
                         let thenOps =

@@ -92,7 +92,7 @@ let pReadContinuationSlot nodeId frameId bytes (slot: ContinuationSlot) : PSGPar
     let! load =
         match slot.Holds with
         | CaptureSlotKind.InlineValue _ -> parser {
-            let! index = pConstI (s 2) (int64 offset) TIndex
+            let! index = pConstI (s 2) (bigint offset) TIndex
             let! view = pMemRefView descriptor frameSSA (s 2) frameType fieldType
             return [index; view]
           }
@@ -100,7 +100,7 @@ let pReadContinuationSlot nodeId frameId bytes (slot: ContinuationSlot) : PSGPar
     let! operations, valueType =
         match slot.Holds, fieldType with
         | CaptureSlotKind.CellView _, TMemRefStatic(1, payloadType) -> parser {
-            let! zero = pConstI (s 5) 0L TIndex
+            let! zero = pConstI (s 5) 0I TIndex
             let! state = getUserState
             MLIRAccumulator.registerSSAType descriptor fieldType state.Accumulator
             let! scalar = pLoadFrom (s 0) descriptor [s 5] payloadType
@@ -122,7 +122,7 @@ let pBorrowContinuationSlot nodeId frameId bytes (slot: ContinuationSlot) : PSGP
         return read, TRValue { SSA = s 0; Type = fieldType }
     | CaptureSlotKind.Scalar _ ->
         let viewType = TMemRefStatic(1, fieldType)
-        let! index = pConstI (s 1) (int64 offset) TIndex
+        let! index = pConstI (s 1) (bigint offset) TIndex
         let! view = pMemRefView (s 0) frameSSA (s 1) frameType viewType
         return [index; view], TRValue { SSA = s 0; Type = viewType }
     | _ -> return! fail (Message $"Continuation slot {NodeId.value slot.Source} has no admitted mutable-cell borrow representation")
@@ -174,7 +174,7 @@ let pWriteContinuationSlot nodeId frameId valueId bytes (slot: ContinuationSlot)
     | CaptureSlotKind.CellView _, TMemRefStatic(1, payloadType) ->
         do! ensure (valueType = payloadType) $"Continuation cell {NodeId.value slot.Source} write lacks its settled operand representation: actual {valueType}, expected {payloadType}"
         let! descriptor = pTypedExtractView (s 1) frameSSA offset (s 2) (s 3) (s 4) fieldType frameType
-        let! zero = pConstI (s 5) 0L TIndex
+        let! zero = pConstI (s 5) 0I TIndex
         let! write = pStore value (s 1) [s 5] payloadType fieldType
         return adaptations @ descriptor @ [zero; write], TRVoid
     | _ ->
@@ -256,7 +256,7 @@ let private pAllocateFrame nodeId (frame: ContinuationFrame) = parser {
         let! parentSSA, actual = pRecallContinuationValue region.ParentFormal
         do! ensure (actual = parentType) $"Continuation region {NodeId.value nodeId} parent formal lacks its settled frame carrier"
         let offsetSSA = Values.value nodeId 1
-        let! offset = pConstI offsetSSA (int64 region.Offset) TIndex
+        let! offset = pConstI offsetSSA (bigint region.Offset) TIndex
         let! view = pMemRefView ssa parentSSA offsetSSA parentType ty
         return [offset; view], ssa, ty
     | None ->
@@ -285,7 +285,7 @@ let private pInitializeState nodeId frameSSA frameType (frame: ContinuationFrame
     let! offset, ty = pSlotPlacement frame.Bytes slot
     do! ensure (ty = TIndex || (match ty with TInt(IntWidth width) -> width > 0 | _ -> false)) "Continuation state requires an integer carrier"
     let s = Values.continuationValue nodeId 0
-    let! zero = pConstI (s 0) 0L ty
+    let! zero = pConstI (s 0) 0I ty
     let! store = pTypedInsertView frameSSA (s 0) offset (s 1) (s 2) (s 3) ty frameType
     return zero :: store
 }
@@ -428,7 +428,7 @@ let pSequenceCurrent nodeId (sequence: SequenceOperand) = parser {
     let s = Values.value nodeId
     let! read =
         if inlineValue then parser {
-            let! index = pConstI (s 1) (int64 offset) TIndex
+            let! index = pConstI (s 1) (bigint offset) TIndex
             let! view = pMemRefView (s 0) sequence.Environment.SSA (s 1) sequence.Environment.Type ty
             return [index; view]
         }
@@ -460,7 +460,7 @@ let pAcquireSequence nodeId (template: SequenceOperand) shape (copy: SequenceTem
             let! parentSSA, parentType = pRecallContinuationValue region.ParentFormal
             do! ensure (parentType = TMemRefStatic(parent.Bytes, TInt(IntWidth 8))) "Sequence region parent has a different physical carrier"
             let offsetSSA = Values.value nodeId 1
-            let! offset = pConstI offsetSSA (int64 region.Offset) TIndex
+            let! offset = pConstI offsetSSA (bigint region.Offset) TIndex
             let! view = pMemRefView environment.SSA parentSSA offsetSSA parentType environment.Type
             return [offset; view]
           }
@@ -481,7 +481,7 @@ let pAcquireSequence nodeId (template: SequenceOperand) shape (copy: SequenceTem
         | SettledSlot.Integer(bits, _), Some offset when bits > 0 -> preturn (TInt(IntWidth bits), offset)
         | _ -> fail (Message "Fresh sequence entry state lacks its common integer placement")
     let s = Values.continuationValue nodeId 0
-    let! zero = pConstI (s 0) 0L stateType
+    let! zero = pConstI (s 0) 0I stateType
     let! reset = pTypedInsertView environment.SSA (s 0) offset (s 1) (s 2) (s 3) stateType environment.Type
     let! result =
         match Sequences.create shape template.Code environment with

@@ -104,7 +104,7 @@ let pExtractDUTag (nodeId: NodeId) (duSSA: SSA) (duType: MLIRType) : PSGParser<M
             do! ensure (ssas.Length >= 2) $"pExtractDUTag (pointer): Expected 2 SSAs, got {ssas.Length}"
             let indexZeroSSA = ssas.[0]
             let tagSSA = ssas.[1]
-            let! indexZeroOp = pConstI indexZeroSSA 0L TIndex
+            let! indexZeroOp = pConstI indexZeroSSA 0I TIndex
             let! loadOp = pLoad tagSSA duSSA [indexZeroSSA]
             return ([indexZeroOp; loadOp], TRValue { SSA = tagSSA; Type = tagTy })
         | _ ->
@@ -444,7 +444,7 @@ let pDUCaseAt (nodeId: NodeId) (destination: Val) (identity: TypeIdentity) (tag:
 
         // Insert tag at byte offset 0 via reinterpret_cast (same element type: i8→i8)
         let tagTy = TInt (IntWidth 8)  // DU tags are always i8
-        let! tagConstOp = pConstI (s 1) tag tagTy
+        let! tagConstOp = pConstI (s 1) (bigint tag) tagTy
         let! insertTagOps = pTypedInsert destination.SSA (s 1) 0 (s 2) (s 3) tagTy ty
 
         // Insert payload fields at the settled payload offset (after the tag) via memref.view

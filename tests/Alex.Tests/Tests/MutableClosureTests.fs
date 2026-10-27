@@ -402,7 +402,7 @@ let ``witnessed closure cell and snapshot verify and lower through standard MLIR
             let symbol = Alex.CodeGeneration.CallableSymbols.lambda f.Graph f.Graph.Nodes[carrier.Implementation] false
             let result = { SSA = V(NodeId.value carrier.Implementation, 0); Type = boolean }
             MLIROp.FuncOp(FuncOp.FuncDef(symbol, [Arg 0, unitType], [boolean],
-                [MLIROp.ArithOp(ArithOp.ConstI(result.SSA, (if value then 1L else 0L), boolean))
+                [MLIROp.ArithOp(ArithOp.ConstI(result.SSA, (if value then 1I else 0I), boolean))
                  MLIROp.FuncOp(FuncOp.Return [result])], FuncVisibility.Private)))
     let inputOps =
         [f.Initial; f.Replacement] |> List.map (fun source ->
@@ -415,7 +415,7 @@ let ``witnessed closure cell and snapshot verify and lower through standard MLIR
     let currentResult = { SSA = V(900001, 1); Type = boolean }
     let unitArgument = { SSA = V(900001, 2); Type = unitType }
     let body = inputOps @ (outputs |> List.collect _.InlineOps) @
-               [MLIROp.ArithOp(ArithOp.ConstI(unitArgument.SSA, 0L, unitType))
+               [MLIROp.ArithOp(ArithOp.ConstI(unitArgument.SSA, 0I, unitType))
                 MLIROp.FuncOp(FuncOp.FuncCallIndirect([savedResult], (Operands.code snapshot).SSA, [unitArgument]))
                 MLIROp.FuncOp(FuncOp.FuncCallIndirect([currentResult], (Operands.code current).SSA, [unitArgument]))
                 MLIROp.FuncOp(FuncOp.Return [savedResult; currentResult])]
@@ -425,11 +425,11 @@ let ``witnessed closure cell and snapshot verify and lower through standard MLIR
     let zero, one, status = read 5 unitType, read 6 unitType, read 7 unitType
     let main = MLIROp.FuncOp(FuncOp.FuncDef("main", [], [unitType],
         [MLIROp.FuncOp(FuncOp.FuncCall([saved; latest], "closure_snapshot", []))
-         MLIROp.ArithOp(ArithOp.ConstI(truth.SSA, 1L, boolean))
+         MLIROp.ArithOp(ArithOp.ConstI(truth.SSA, 1I, boolean))
          MLIROp.ArithOp(ArithOp.XorI(unchanged.SSA, saved.SSA, truth.SSA, boolean))
          MLIROp.ArithOp(ArithOp.AndI(passed.SSA, unchanged.SSA, latest.SSA, boolean))
-         MLIROp.ArithOp(ArithOp.ConstI(zero.SSA, 0L, unitType))
-         MLIROp.ArithOp(ArithOp.ConstI(one.SSA, 1L, unitType))
+         MLIROp.ArithOp(ArithOp.ConstI(zero.SSA, 0I, unitType))
+         MLIROp.ArithOp(ArithOp.ConstI(one.SSA, 1I, unitType))
          MLIROp.ArithOp(ArithOp.Select(status.SSA, passed.SSA, zero.SSA, one.SSA, unitType))
          MLIROp.FuncOp(FuncOp.Return [status])], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok pointerBits) "mutable_closure_component" (implementations @ [definition; main])

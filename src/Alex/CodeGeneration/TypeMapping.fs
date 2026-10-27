@@ -129,6 +129,15 @@ let valueTypeAt (graph: Revision) (nodeId: NodeId) =
         (numericProjection graph).OccurrenceRepresentations.TryFind nodeId
         |> read (sprintf "value occurrence %d" (NodeId.value nodeId))
 
+/// A pointer occurrence must publish its scalar form directly. Generic callable
+/// component unwrapping cannot establish this contract for the occurrence.
+let pointerTypeAt (graph: Revision) (nodeId: NodeId) =
+    match (numericProjection graph).OccurrenceRepresentations.TryFind nodeId with
+    | Some(Ok(ValueRepresentation.Scalar(SettledSlot.Pointer 1) as form)) -> representationType form
+    | Some(Ok _) ->
+        failwithf "TypeMapping: value occurrence %d has no source-published scalar pointer representation" (NodeId.value nodeId)
+    | other -> read (sprintf "value occurrence %d" (NodeId.value nodeId)) other
+
 let typeOfIdentity (graph: Revision) (identity: TypeIdentity) =
     (numericProjection graph).TypeRepresentations.TryFind identity |> read "type identity"
 

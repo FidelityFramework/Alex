@@ -47,7 +47,7 @@ let pOptionIsSome (nodeId: NodeId) (optionSSA: SSA) : PSGParser<MLIROp list * Tr
 
         let tagTy = TInt (IntWidth 8)
         let! extractTagOps = pExtractValue tagSSA optionSSA 0 offsetSSA tagTy
-        let! oneConstOp = pConstI oneSSA 1L tagTy
+        let! oneConstOp = pConstI oneSSA 1I tagTy
         let! cmpOp = pCmpI resultSSA ICmpPred.Eq tagSSA oneSSA tagTy
         let ops = extractTagOps @ [oneConstOp; cmpOp]
         return (ops, TRValue { SSA = resultSSA; Type = TInt (IntWidth 1) })
@@ -67,7 +67,7 @@ let pOptionIsNone (nodeId: NodeId) (optionSSA: SSA) : PSGParser<MLIROp list * Tr
 
         let tagTy = TInt (IntWidth 8)
         let! extractTagOps = pExtractValue tagSSA optionSSA 0 offsetSSA tagTy
-        let! zeroConstOp = pConstI zeroSSA 0L tagTy
+        let! zeroConstOp = pConstI zeroSSA 0I tagTy
         let! cmpOp = pCmpI resultSSA ICmpPred.Eq tagSSA zeroSSA tagTy
         let ops = extractTagOps @ [zeroConstOp; cmpOp]
         return (ops, TRValue { SSA = resultSSA; Type = TInt (IntWidth 1) })
@@ -115,7 +115,7 @@ let pListIsEmpty (nodeId: NodeId) (listSSA: SSA) : PSGParser<MLIROp list * Trans
 
         let tagTy = TInt (IntWidth 8)
         let! extractTagOps = pExtractValue tagSSA listSSA 0 offsetSSA tagTy
-        let! zeroConstOp = pConstI zeroSSA 0L tagTy
+        let! zeroConstOp = pConstI zeroSSA 0I tagTy
         let! cmpOp = pCmpI resultSSA ICmpPred.Eq tagSSA zeroSSA tagTy
         let ops = extractTagOps @ [zeroConstOp; cmpOp]
         return (ops, TRValue { SSA = resultSSA; Type = TInt (IntWidth 1) })

@@ -88,7 +88,7 @@ let ``union allocation and selected descriptor stores consume the source aligned
         | _ -> None)
     if present then
         let offset = Assert.Single views
-        Assert.Contains(writes, function MLIROp.ArithOp(ArithOp.ConstI(actual, value, TIndex)) -> actual = offset && value = int64 word | _ -> false)
+        Assert.Contains(writes, function MLIROp.ArithOp(ArithOp.ConstI(actual, value, TIndex)) -> actual = offset && value = bigint word | _ -> false)
     else Assert.Empty views
     let stores = writes |> List.filter (function MLIROp.MemRefOp(MemRefOp.StoreAligned _) -> true | _ -> false)
     Assert.Equal((if present then 2 else 1), stores.Length)

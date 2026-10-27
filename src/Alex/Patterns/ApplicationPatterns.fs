@@ -330,7 +330,7 @@ let pNumericOperation nodeId : PSGParser<MLIROp list * TransferResult> = parser 
         when operation.Kind = NumericOperationKind.Negate || operation.Kind = NumericOperationKind.Complement ->
         let! names = getNodeSSAs nodeId
         do! ensure (names.Length > 1) "Published unary operation has no canonical constant value name."
-        let constant = if operation.Kind = NumericOperationKind.Negate then 0L else -1L
+        let constant = if operation.Kind = NumericOperationKind.Negate then 0I else -1I
         let! literal = Alex.Elements.MLIRAtomics.pConstI names[1] constant operationType
         let! instruction =
             if operation.Kind = NumericOperationKind.Negate then
@@ -341,7 +341,7 @@ let pNumericOperation nodeId : PSGParser<MLIROp list * TransferResult> = parser 
     | NumericOperationForm.Boolean, [operand] when operation.Kind = NumericOperationKind.LogicalNot ->
         let! names = getNodeSSAs nodeId
         do! ensure (names.Length > 1) "Published Boolean operation has no canonical constant value name."
-        let! literal = Alex.Elements.MLIRAtomics.pConstI names[1] 1L operationType
+        let! literal = Alex.Elements.MLIRAtomics.pConstI names[1] 1I operationType
         let! instruction = if platform = FPGA then pCombXor result operand.SSA names[1] operationType else pXorI result operand.SSA names[1] operationType
         return! finish [literal; instruction] operationType
     | _ -> return! fail (Message "Published numeric operation form, kind and ordered operands have no corresponding Element.")
@@ -451,7 +451,7 @@ let pIgnoreIntrinsic : PSGParser<MLIROp list * TransferResult> =
         do! ensure (ssas.Length >= 1) "Operators.ignore has no assigned result value"
         let! state = getUserState
         let unitTy = valueTypeAt state.Graph state.Current.Id
-        let! unitValue = Alex.Elements.MLIRAtomics.pConstI ssas.[0] 0L unitTy
+        let! unitValue = Alex.Elements.MLIRAtomics.pConstI ssas.[0] 0I unitTy
         return [unitValue], TRValue { SSA = ssas.[0]; Type = unitTy }
     }
 

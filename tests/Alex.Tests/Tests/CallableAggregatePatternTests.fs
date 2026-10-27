@@ -427,7 +427,7 @@ let private capturedFixture union selected =
                    FormationInputs = if row.Operation = CallableAggregateOperation.Construct then [first.Id; second.Id] else [aggregate.Id] }
     let written = if selected = 0 then first.Id else second.Id
     let construction = { update originals[aggregate.Id].Head with Value = Some written; SelectedAlternative = Some selected }
-    let projection = update originals[read.Id].Head
+    let projection = { update originals[read.Id].Head with FormationInputs = [aggregate.Id; written] }
     let withTag (row: CallableAggregateValue) =
         let tag = row.Tag |> Option.map (fun tag ->
             { tag with Payload = Some written
@@ -560,7 +560,7 @@ let ``aggregate writes preserve the selected actual environment and reads recons
             | MLIROp.ArithOp(ArithOp.ConstI(value, ordinal, TInt(IntWidth 8))) when value = selectorStore -> Some ordinal
             | _ -> None)
         |> Assert.Single
-    Assert.Equal(int64 selected, selectorLiteral)
+    Assert.Equal(bigint selected, selectorLiteral)
     MLIRAccumulator.bindNode aggregate.Id (Arg 4) (TMemRefStatic(96, TInt(IntWidth 8))) operands
     let output = observe union graph read operands
     match output.Result with
@@ -596,14 +596,14 @@ let ``aggregate writes preserve the selected actual environment and reads recons
             | MLIROp.SCFOp(SCFOp.If(condition, firstOps, Some secondOps, Some(_, ty))) -> Some(condition, firstOps, secondOps, ty)
             | _ -> None)
     for condition, firstOps, secondOps, resultType in lanes do
-        Assert.Equal(0L, literal output.InlineOps (comparison output.InlineOps condition))
+        Assert.Equal(0I, literal output.InlineOps (comparison output.InlineOps condition))
         let finalCondition =
             secondOps
             |> List.choose (function
                 | MLIROp.Assert(condition, _) -> Some condition
                 | _ -> None)
             |> Assert.Single
-        Assert.Equal(1L, literal secondOps (comparison secondOps finalCondition))
+        Assert.Equal(1I, literal secondOps (comparison secondOps finalCondition))
         let yielded operations =
             operations
             |> List.choose (function
@@ -626,8 +626,8 @@ let ``aggregate writes preserve the selected actual environment and reads recons
                     | MLIROp.MemRefOp(MemRefOp.LoadAligned(result, _, _, _, _, _)) -> result = yielded operations
                     | _ -> false)
                 operations |> List.choose (function MLIROp.ArithOp(ArithOp.ConstI(_, value, TIndex)) -> Some value | _ -> None)
-            Assert.Contains(8L, offset firstOps)
-            Assert.Contains(48L, offset secondOps)
+            Assert.Contains(8I, offset firstOps)
+            Assert.Contains(48I, offset secondOps)
         | other -> failwithf "Unexpected callable selection lane %A" other
     Assert.Empty(operands.Errors)
 
@@ -726,7 +726,9 @@ let private nativeFixture union =
     let implementation = { original.Nodes[NodeId 2] with Parent = Some binding.Id }
     let code = { original.Nodes[NodeId 3] with Type = nativeType }
     let aggregate = { aggregate with Type = aggregateType }
-    let read = { read with Type = nativeType }
+    let read =
+        { read with Type = nativeType
+                    Kind = if union then SemanticKind.DUEliminate(aggregate.Id, 1, "Some", nativeType) else read.Kind }
     let premise form text numbers references children parent sourceType embedded : BoundarySourcePremise =
         { Shape = { Form = form; Text = text; Numbers = numbers; References = references
                     Children = children; Parent = parent; SourceType = sourceType }

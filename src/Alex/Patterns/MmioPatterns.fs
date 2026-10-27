@@ -6,6 +6,7 @@ open Alex.XParsec.PSGCombinators
 open Alex.Dialects.Core.Types
 open Alex.Traversal.TransferTypes
 open Alex.Elements.MLIRAtomics
+open Alex.CodeGeneration.TypeMapping
 open Fidelity.PSG
 
 let pMmioIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
@@ -27,14 +28,13 @@ let pMmioIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
     let bits = evidence.Bits
     do! ensure (bits = 8 || bits = 16 || bits = 32) "Unsupported MMIO access width"
     if isReg then
-        // ConstI carries signed bits; a high 64-bit CPU address is the same
-        // pointer bit pattern after index-to-pointer conversion.
-        let address = int64 (if evidence.Address > bigint System.Int64.MaxValue then evidence.Address - (1I <<< 64) else evidence.Address)
-        return [MLIROp.ArithOp (ArithOp.ConstI (s 0, address, TIndex))], TRValue { SSA = s 0; Type = TIndex }
+        let addressTy = pointerTypeAt state.Graph node.Id
+        return [MLIROp.ArithOp (ArithOp.ConstI (s 0, evidence.Address, addressTy))], TRValue { SSA = s 0; Type = addressTy }
     else
         do! ensure (args.Length = (if isRead then 1 else 2)) "Invalid MMIO accessor arity"
+        let publishedTy = pointerTypeAt state.Graph args.Head
         let! address, addressTy = pRecallNode args.Head
-        do! ensure (addressTy = TIndex) "MMIO handle must have the platform pointer representation"
+        do! ensure (addressTy = publishedTy) "MMIO handle differs from its published pointer representation"
         let elementTy = TInt (IntWidth bits)
         if isRead then
             return [MLIROp.MmioLoad (node.Id, s 0, address, bits)], TRValue { SSA = s 0; Type = elementTy }

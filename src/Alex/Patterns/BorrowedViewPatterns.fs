@@ -31,7 +31,7 @@ let pBorrowedViewIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
     let dataTy = TMemRef (TInt (IntWidth layout.ElementBits))
     let resultTy = valueTypeAt state.Graph node.Id
     let! dataOps = pTypedExtractView (s 1) view header.Offsets.[0] (s 20) (s 21) (s 22) dataTy viewTy
-    let zero = MLIROp.ArithOp (ArithOp.ConstI (s 4, 0L, TIndex))
+    let zero = MLIROp.ArithOp (ArithOp.ConstI (s 4, 0I, TIndex))
     let length = MLIROp.MemRefOp (MemRefOp.Dim (s 5, s 1, s 4, dataTy))
     match info.Operation, args with
     | "length", [_] ->
@@ -46,7 +46,7 @@ let pBorrowedViewIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
         let beforeIndexCast =
             match indexTy with
             | TInt (IntWidth bits) when bits > span.PointerBits ->
-                [MLIROp.ArithOp (ArithOp.ConstI (s 23, int64 span.MaximumExtent, indexTy))
+                [MLIROp.ArithOp (ArithOp.ConstI (s 23, bigint (int64 span.MaximumExtent), indexTy))
                  MLIROp.ArithOp (ArithOp.CmpI (s 24, ICmpPred.Ule, index, s 23, indexTy))
                  MLIROp.Assert (s 24, "BorrowedView index cannot be represented in the mapped address space")]
             | _ -> []
@@ -86,10 +86,10 @@ let pBorrowedViewIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
                 [MLIROp.ArithOp ((if unsigned then ArithOp.ExtUI else ArithOp.ExtSI) (s 8, value, valueTy, checkTy))]
             let checkedValue = if bits = checkBits then value else s 8
             let constant id temporary number =
-                if number <= bigint System.Int64.MaxValue then [MLIROp.ArithOp (ArithOp.ConstI (id, int64 number, checkTy))]
+                if number <= bigint System.Int64.MaxValue then [MLIROp.ArithOp (ArithOp.ConstI (id, bigint (int64 number), checkTy))]
                 else
                     let raw = int64 (number - (1I <<< 64))
-                    [MLIROp.ArithOp (ArithOp.ConstI (temporary, raw, TInt (IntWidth 64)))
+                    [MLIROp.ArithOp (ArithOp.ConstI (temporary, bigint raw, TInt (IntWidth 64)))
                      MLIROp.ArithOp (ArithOp.ExtUI (id, temporary, TInt (IntWidth 64), checkTy))]
             let predLow, predHigh = ICmpPred.Sge, ICmpPred.Sle
             let checks = constant (s 9) (s 15) lo @ constant (s 10) (s 16) hi @
@@ -104,7 +104,7 @@ let pBorrowedViewIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
             let stored = if conversion.IsEmpty then value else s 14
             return prefix @ extend @ checks @ conversion @
                    [MLIROp.MemRefOp (MemRefOp.StoreAligned (stored, s 1, [index], elementTy, dataTy, span.ElementAlignment))
-                    MLIROp.ArithOp (ArithOp.ConstI (s 0, 0L, TInt (IntWidth 32)))],
+                    MLIROp.ArithOp (ArithOp.ConstI (s 0, 0I, TInt (IntWidth 32)))],
                    TRValue { SSA = s 0; Type = TInt (IntWidth 32) }
     | _ -> return! fail (Message "Unsupported BorrowedView intrinsic arity")
 }

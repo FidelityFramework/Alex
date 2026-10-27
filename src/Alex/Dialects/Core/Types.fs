@@ -264,7 +264,7 @@ type MemRefOp =
 /// Arithmetic dialect operations
 type ArithOp =
     // Constants
-    | ConstI of SSA * int64 * MLIRType                      // result, value, type
+    | ConstI of SSA * bigint * MLIRType                     // result, exact value, type
     | ConstF of SSA * float * MLIRType                      // result, value, type
     // Integer arithmetic
     | AddI of SSA * SSA * SSA * MLIRType                    // result, lhs, rhs, type

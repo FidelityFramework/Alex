@@ -93,7 +93,7 @@ let pFunctionDef (visibility: FuncVisibility) (name: string) (params': (SSA * ML
                 match returnSSA, unitReturnSSA with
                 | Some _, _ -> preturn (returnSSA, [])
                 | None, Some zeroSSA ->
-                    let zeroOp = MLIROp.ArithOp (ArithOp.ConstI (zeroSSA, 0L, retTy))
+                    let zeroOp = MLIROp.ArithOp (ArithOp.ConstI (zeroSSA, 0I, retTy))
                     preturn (Some zeroSSA, [zeroOp])
                 | None, None ->
                     fail (Message $"pFunctionDef: function '{name}' has no witnessed return value and SSAAssignment derived no unit-return value for its Lambda")

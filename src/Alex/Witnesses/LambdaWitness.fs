@@ -221,7 +221,7 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                     let ssa = Values.value paramId 0
                     let ty = representationType (ValueRepresentation.Scalar SettledSlot.Unit)
                     MLIRAccumulator.bindNode paramId ssa ty ctx.Accumulator
-                    bodyScopeRef := ScopeContext.addOp (MLIROp.ArithOp(ArithOp.ConstI(ssa, 0L, ty))) !bodyScopeRef
+                    bodyScopeRef := ScopeContext.addOp (MLIROp.ArithOp(ArithOp.ConstI(ssa, 0I, ty))) !bodyScopeRef
                 | Scalar, [value] ->
                     let adaptation = native |> Option.bind (fun (entry, _) -> List.zip entry.Formals entry.ParameterAdaptations |> List.tryFind (fst >> (=) paramId) |> Option.bind snd)
                     let adapted =

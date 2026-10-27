@@ -178,7 +178,7 @@ let fcmpPredToString (pred: FCmpPred) : string =
 let arithOpToString (pointer: Result<int, string>) (op: ArithOp) : string =
     match op with
     | ConstI (result, value, ty) ->
-        sprintf "%s = arith.constant %d : %s" (ssaToString result) value (typeToString pointer ty)
+        sprintf "%s = arith.constant %s : %s" (ssaToString result) (value.ToString(System.Globalization.CultureInfo.InvariantCulture)) (typeToString pointer ty)
     | ConstF (result, value, ty) ->
         sprintf "%s = arith.constant %f : %s" (ssaToString result) value (typeToString pointer ty)
     | AddI (result, lhs, rhs, ty) ->

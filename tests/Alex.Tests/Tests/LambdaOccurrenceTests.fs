@@ -698,7 +698,7 @@ let private nativeScalarBlock mode =
     let combinator (_: WitnessContext) (current: SemanticNode) =
         if current.Id = leaf.Id then
             {
-                InlineOps = [ MLIROp.ArithOp(ArithOp.ConstI(V(800, 0), 4294967295L, TInt(IntWidth 64))) ]
+                InlineOps = [ MLIROp.ArithOp(ArithOp.ConstI(V(800, 0), 4294967295I, TInt(IntWidth 64))) ]
                 TopLevelOps = []
                 Result =
                     TRValue
@@ -1166,7 +1166,7 @@ let ``native unit callback consumes canonical literal and block tokens`` mode re
     let units =
         body
         |> List.choose (function
-            | MLIROp.ArithOp(ArithOp.ConstI(_, 0L, ty)) -> Some ty
+            | MLIROp.ArithOp(ArithOp.ConstI(_, value, ty)) when value = 0I -> Some ty
             | _ -> None)
 
     Assert.Equal<MLIRType>(
@@ -1180,7 +1180,7 @@ let ``sole unit formal is used logically with zero native parameters`` () =
     match output.Result with TRError error -> failwith error.Message | _ -> ()
     let body = operations |> List.choose(function FuncOp(FuncDef("nativeUnit",[],[],body,_))->Some body|_->None) |> Assert.Single
     Assert.Contains(effect,body)
-    Assert.Contains(MLIROp.ArithOp(ArithOp.ConstI(V(900,0),0L,TInt(IntWidth 32))),body)
+    Assert.Contains(MLIROp.ArithOp(ArithOp.ConstI(V(900,0),0I,TInt(IntWidth 32))),body)
     Assert.Equal(FuncOp(Return []),List.last body)
 
 [<Theory>]

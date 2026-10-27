@@ -98,7 +98,7 @@ let pBuildDUConstruct (nodeId: NodeId) (tag: int64) (payload: Val list) (duTy: M
                     return ([op], TRValue { SSA = ssa; Type = settledTy })
                 | TTag _ | TInt _ ->
                     // Enum DU on FPGA: just a tag constant. Type is TTag which serializes to correct width.
-                    let! op = pConstI ssa tag duTy
+                    let! op = pConstI ssa (bigint tag) duTy
                     return ([op], TRValue { SSA = ssa; Type = duTy })
                 | other ->
                     return! fail (Message $"PSG settlement (type mapping) did not settle an enum tag or struct carrier for the FPGA DU construction at node {NodeId.value nodeId}: got {other}")

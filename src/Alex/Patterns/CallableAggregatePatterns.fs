@@ -402,7 +402,7 @@ let private pStorage (row: CallableAggregateValue) (value: Val) = parser {
                 if bytes = 0 then return operations, parent, child
                 else
                     let result = { SSA = name 60; Type = TMemRefStatic(bytes, TInt(IntWidth 8)) }
-                    let! literal = pConstI (name 61) (int64 offset) TIndex
+                    let! literal = pConstI (name 61) (bigint offset) TIndex
                     let! view = pMemRefView result.SSA parent.SSA (name 61) parent.Type result.Type
                     return operations @ [literal; view], result, child
             | ValueRepresentation.Record _ | ValueRepresentation.Union _ ->
@@ -483,7 +483,7 @@ let private pWrite (ctx: WitnessContext) (destination: Val) (row: CallableAggreg
             match selector with
             | None -> preturn []
             | Some(offset, ty) -> parser {
-                let! constant = pConstI (name 3) (int64 alternative.Ordinal) ty
+                let! constant = pConstI (name 3) (bigint alternative.Ordinal) ty
                 let! stores = pTypedInsertView destination.SSA (name 3) offset (name 4) (name 5) (name 6) ty destination.Type
                 return constant :: stores
               }
@@ -529,7 +529,7 @@ let private pSelect (row: CallableAggregateValue) lane (selector: Val option)
     | _ :: _, Some selector ->
         let finalOrdinal, finalOps, finalValue = List.last arms
         let finalName = Values.aggregateComponent row.Occurrence row.Slot finalOrdinal
-        let! finalLiteral = pConstI (finalName lane) (int64 finalOrdinal) selector.Type
+        let! finalLiteral = pConstI (finalName lane) (bigint finalOrdinal) selector.Type
         let! finalCompare = pCmpI (finalName (lane + 1)) ICmpPred.Eq selector.SSA (finalName lane) selector.Type
         let! finalAssert = pAssert (finalName (lane + 1)) "Callable aggregate selector is outside its published alternative domain."
         let checkedFinalOps = [finalLiteral; finalCompare; finalAssert] @ finalOps
@@ -542,7 +542,7 @@ let private pSelect (row: CallableAggregateValue) lane (selector: Val option)
                 let name = Values.aggregateComponent row.Occurrence row.Slot ordinal
                 let constant, condition = name lane, name (lane + 1)
                 let result = { SSA = name (lane + 2); Type = value.Type }
-                let! literal = pConstI constant (int64 ordinal) selector.Type
+                let! literal = pConstI constant (bigint ordinal) selector.Type
                 let! compare = pCmpI condition ICmpPred.Eq selector.SSA constant selector.Type
                 let! selectedYield = pSCFYield [value.SSA, value.Type]
                 let! fallbackYield = pSCFYield [fallbackValue.SSA, fallbackValue.Type]

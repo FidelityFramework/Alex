@@ -309,7 +309,7 @@ let ``fresh enumerators allocate distinct state and copy complete capture descri
     let allocations = operations |> List.choose (function MLIROp.MemRefOp(MemRefOp.Alloca(ssa, _, _)) -> Some ssa | _ -> None)
     Assert.Equal<SSA list>([template.SSA; one.SSA; two.SSA], allocations)
     let offsets = operations |> List.choose (function MLIROp.ArithOp(ArithOp.ConstI(_, offset, TIndex)) -> Some offset | _ -> None)
-    Assert.DoesNotContain(8L, offsets) // The current field is neither read nor copied.
+    Assert.DoesNotContain(8I, offsets) // The current field is neither read nor copied.
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("enumerator_component", [Arg 0, TMemRefStatic(1, TInt(IntWidth 1))], [result.Type],
         operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "enumerator_component" [definition]
@@ -435,7 +435,7 @@ let ``empty activation storage has zero extent and admits no slot access`` () =
     let zero = Alex.Traversal.Values.value binding.Id 0
     let resultType = TInt(IntWidth 32)
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("empty_activation", [], [resultType],
-        operations @ [MLIROp.ArithOp(ArithOp.ConstI(zero, 0L, resultType)); MLIROp.FuncOp(FuncOp.Return([{ SSA = zero; Type = resultType }]))], FuncVisibility.Public))
+        operations @ [MLIROp.ArithOp(ArithOp.ConstI(zero, 0I, resultType)); MLIROp.FuncOp(FuncOp.Return([{ SSA = zero; Type = resultType }]))], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "empty_activation" [definition]
     let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
     Assert.Contains("memref<0xi8>", verified)
@@ -556,8 +556,8 @@ let ``owned child sites view distinct settled parent regions without allocating`
             Assert.Equal(destinationType, value.Type)
             operations, value
         | other -> failwithf "Owned region allocated or lost its settled coordinates: %A" other
-    let firstOps, one = emit first 16L
-    let secondOps, two = emit second 72L
+    let firstOps, one = emit first 16I
+    let secondOps, two = emit second 72I
     Assert.NotEqual(one.SSA, two.SSA)
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("owned_regions_component", [parentSSA, TMemRefStatic(128, TInt(IntWidth 8))], [two.Type],
         firstOps @ secondOps @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = two.SSA; Type = two.Type }]))], FuncVisibility.Public))

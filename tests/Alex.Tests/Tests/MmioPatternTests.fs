@@ -770,7 +770,8 @@ let private registerWrite (meets: Meet list) =
                     Numeric =
                         { stated.Emission.Numeric with
                             OccurrenceRepresentations =
-                                Map.ofList [ (write.Id, Ok(ValueRepresentation.Scalar SettledSlot.Unit)) ] } } }
+                                Map.ofList [ (handle.Id, Ok(ValueRepresentation.Scalar(SettledSlot.Pointer 1)))
+                                             (write.Id, Ok(ValueRepresentation.Scalar SettledSlot.Unit)) ] } } }
         |> declareTraversalReadings
     let operands = MLIRAccumulator.empty ()
     MLIRAccumulator.bindNode handle.Id (Arg 0) TIndex operands
@@ -871,7 +872,7 @@ let ``register read consumes its published descriptor`` () =
             Emission =
                 { graph.Emission with
                     Callable = { graph.Emission.Callable with UnitNodes = graph.Emission.Callable.UnitNodes.Remove site }
-                    Numeric = { graph.Emission.Numeric with OccurrenceRepresentations = Map.ofList [ site, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(8, Some "uint8"))) ] } } }
+                    Numeric = { graph.Emission.Numeric with OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Add(site, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(8, Some "uint8")))) } } }
         |> declareTraversalReadings
     match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[site]) 64 operands with
     | Result.Ok (([MLIROp.MmioLoad(actual, result, Arg 0, 8)], TRValue value), _) ->
@@ -879,28 +880,122 @@ let ``register read consumes its published descriptor`` () =
         Assert.Equal({ SSA = result; Type = TInt(IntWidth 8) }, value)
     | other -> failwithf "Published read descriptor was not witnessed: %A" other
 
-[<Fact>]
-let ``register address consumes its published descriptor`` () =
+let private registerAddress operation bits address =
     let graph, _, operands, site, _ = registerWrite []
     let intrinsic = graph.Nodes[NodeId 2]
-    let intrinsic = { intrinsic with Kind = SemanticKind.Intrinsic { Module = IntrinsicModule.Mmio; Operation = "reg8"; Category = IntrinsicCategory.Memory; FullName = "Mmio.reg8" } }
+    let intrinsic = { intrinsic with Kind = SemanticKind.Intrinsic { Module = IntrinsicModule.Mmio; Operation = operation; Category = IntrinsicCategory.Memory; FullName = "Mmio." + operation } }
     let application = { graph.Nodes[site] with Kind = SemanticKind.Application(intrinsic.Id, [NodeId 1]); Children = [intrinsic.Id; NodeId 1]; Type = handleType }
     let graph =
         { graph with
             Nodes = graph.Nodes.Add(intrinsic.Id, intrinsic).Add(site, application)
-            Foreign = { graph.Foreign with Mmio = Map.ofList [ site, { Site = site; Operation = "reg8"; Arguments = [NodeId 1] } ] }
-            Codata = { graph.Codata with Mmio = Map.ofList [ site, { Operation = "reg8"; Address = 1073741824I; Bits = 8; Binding = None } ] }
-            // This component control proves descriptor dispatch and the existing address output only.
-            // It supplies no pointer-representation authority; that remains a separate design question.
+            Foreign = { graph.Foreign with Mmio = Map.ofList [ site, { Site = site; Operation = operation; Arguments = [NodeId 1] } ] }
+            Codata = { graph.Codata with Mmio = Map.ofList [ site, { Operation = operation; Address = address; Bits = bits; Binding = None } ] }
+            // Component rows state the source-issued constructor representation.
             Emission =
                 { graph.Emission with
                     Callable = { graph.Emission.Callable with UnitNodes = graph.Emission.Callable.UnitNodes.Remove site }
-                    Numeric = { graph.Emission.Numeric with OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Remove site } } }
+                    Numeric = { graph.Emission.Numeric with OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Add(site, Ok(ValueRepresentation.Scalar(SettledSlot.Pointer 1))) } } }
         |> declareTraversalReadings
+    graph, site, operands
+
+[<Fact>]
+let ``register address consumes its published descriptor`` () =
+    let graph, site, operands = registerAddress "reg8" 8 1073741824I
     match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[site]) 64 operands with
-    | Result.Ok (([MLIROp.ArithOp(ArithOp.ConstI(result, 1073741824L, TIndex))], TRValue value), _) ->
+    | Result.Ok (([MLIROp.ArithOp(ArithOp.ConstI(result, address, TIndex))], TRValue value), _) ->
+        Assert.Equal(1073741824I, address)
         Assert.Equal({ SSA = result; Type = TIndex }, value)
     | other -> failwithf "Published register descriptor was not witnessed: %A" other
+
+[<Theory>]
+[<InlineData("reg8", 8, 32, "1073741824")>]
+[<InlineData("reg16", 16, 32, "4294967292")>]
+[<InlineData("reg32", 32, 64, "9223372036854775808")>]
+[<InlineData("bind8", 8, 64, "18446744073709551615")>]
+[<InlineData("bind16", 16, 64, "18446744073709551612")>]
+[<InlineData("bind32", 32, 64, "1073741824")>]
+let ``MMIO address transport preserves the exact published integer`` operation bits pointerBits (decimal: string) =
+    let address = System.Numerics.BigInteger.Parse(decimal, System.Globalization.CultureInfo.InvariantCulture)
+    let graph, site, operands = registerAddress operation bits address
+    match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[site]) pointerBits operands with
+    | Result.Ok (([MLIROp.ArithOp(ArithOp.ConstI(result, actual, ty)) as instruction], TRValue value), _) ->
+        Assert.Equal(address, actual)
+        Assert.Equal(TIndex, ty)
+        Assert.Equal({ SSA = result; Type = TIndex }, value)
+        let text = moduleToString (Ok pointerBits) "exact_mmio_address" [instruction]
+        Assert.Contains("arith.constant " + decimal + " : index", text)
+    | other -> failwithf "Published MMIO integer was changed: %A" other
+
+[<Theory>]
+[<InlineData(true, "missing")>]
+[<InlineData(true, "integer")>]
+[<InlineData(true, "wrapped-pointer")>]
+[<InlineData(false, "missing")>]
+[<InlineData(false, "integer")>]
+[<InlineData(false, "wrapped-pointer")>]
+let ``MMIO requires the pointer representation at each occurrence`` constructor defect =
+    let graph, site, operands, occurrence =
+        if constructor then
+            let graph, site, operands = registerAddress "reg8" 8 1073741824I
+            graph, site, operands, site
+        else
+            let meet = { Consumer = NodeId 3; Operand = NodeId 1; From = 16; To = 8; Adapt = MeetKind.Truncate }
+            let graph, _, operands, site, _ = registerWrite [meet]
+            graph, site, operands, NodeId 0
+    let rows = graph.Emission.Numeric.OccurrenceRepresentations
+    let rows =
+        match defect with
+        | "missing" -> rows.Remove occurrence
+        | "integer" -> rows.Add(occurrence, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(64, None))))
+        | "wrapped-pointer" -> rows.Add(occurrence, Ok(ValueRepresentation.CallableComponent(occurrence, ValueRepresentation.Scalar(SettledSlot.Pointer 1))))
+        | other -> failwithf "Unknown pointer-row defect %s" other
+    let graph = { graph with Emission = { graph.Emission with Numeric = { graph.Emission.Numeric with OccurrenceRepresentations = rows } } }
+    let observe () = matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[site]) 64 operands
+    let error = Assert.Throws<System.Exception>(fun () -> observe () |> ignore)
+    let expected =
+        if defect = "missing" then sprintf "TypeMapping: source publication omitted value occurrence %d" (NodeId.value occurrence)
+        else sprintf "TypeMapping: value occurrence %d has no source-published scalar pointer representation" (NodeId.value occurrence)
+    Assert.Equal(expected, error.Message)
+    Assert.Empty operands.AllOps
+    Assert.Equal(None, MLIRAccumulator.recallNode site operands)
+
+[<Fact>]
+let ``MMIO recalled handle must match its published pointer representation`` () =
+    let meet = { Consumer = NodeId 3; Operand = NodeId 1; From = 16; To = 8; Adapt = MeetKind.Truncate }
+    let graph, position, operands, site, _ = registerWrite [meet]
+    MLIRAccumulator.bindNode (NodeId 0) (Arg 0) (TInt(IntWidth 64)) operands
+    match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic position 64 operands with
+    | Result.Error message -> Assert.Equal("MMIO handle differs from its published pointer representation", message)
+    | Result.Ok _ -> failwith "MMIO accepted a recalled handle with a different representation"
+    Assert.Empty operands.AllOps
+    Assert.Equal(None, MLIRAccumulator.recallNode site operands)
+
+[<Theory>]
+[<InlineData(true)>]
+[<InlineData(false)>]
+let ``integer literal transport retains unsigned maximum and signed negative values`` unsigned =
+    let literal, expected =
+        if unsigned then
+            NativeLiteral.UInt(System.UInt64.MaxValue, NTUKind.NTUuint(NTUWidth.Resolved WidthDimension.Register)), bigint System.UInt64.MaxValue
+        else NativeLiteral.Int(-4L, NTUKind.NTUint(NTUWidth.Resolved WidthDimension.Register)), -4I
+    let source = node 0 (SemanticKind.Literal literal) intType [] None
+    let graph = revision [source]
+    let graph =
+        { graph with
+            Emission =
+                { graph.Emission with
+                    Numeric =
+                        { graph.Emission.Numeric with
+                            OccurrenceRepresentations = Map.ofList [source.Id, Ok(ValueRepresentation.Scalar(SettledSlot.Integer(64, None)))] } } }
+        |> declareTraversalReadings
+    let operands = MLIRAccumulator.empty ()
+    let parser = Alex.Patterns.LiteralPatterns.pBuildLiteral literal (V(0, 0)) (coeffects 64).Platform.TargetArch
+    match matchAt parser (focus graph source) 64 operands with
+    | Result.Ok (([MLIROp.ArithOp(ArithOp.ConstI(_, actual, TInt(IntWidth 64))) as instruction], _), _) ->
+        Assert.Equal(expected, actual)
+        let decimal = expected.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        Assert.Contains("arith.constant " + decimal + " : i64", moduleToString (Ok 64) "exact_literal" [instruction])
+    | other -> failwithf "Integer literal changed its mathematical value: %A" other
 
 [<Theory>]
 [<InlineData("%p = llvm.inttoptr %address : i64 to !llvm.ptr")>]

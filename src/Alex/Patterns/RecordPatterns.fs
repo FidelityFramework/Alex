@@ -193,7 +193,7 @@ let pBuildRecordCopyWith
             let! castDst = pIndexCastS dstPtrWordSSA dstPtrIdxSSA TIndex platformWordTy
 
             // 4. Size constant + memcpy call
-            let! sizeOp = pConstI sizeSSA (int64 totalBytes) platformWordTy
+            let! sizeOp = pConstI sizeSSA (bigint totalBytes) platformWordTy
             let memcpyArgs = [
                 { SSA = dstPtrWordSSA; Type = platformWordTy }
                 { SSA = srcPtrWordSSA; Type = platformWordTy }

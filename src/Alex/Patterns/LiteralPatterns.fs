@@ -26,24 +26,24 @@ let pBuildLiteral (lit: NativeLiteral) (ssa: SSA) (_arch: Architecture) : PSGPar
 
         match lit with
         | NativeLiteral.Unit ->
-            let! op = pConstI ssa 0L ty
+            let! op = pConstI ssa 0I ty
             return ([op], TRValue { SSA = ssa; Type = ty })
 
         | NativeLiteral.Bool b ->
-            let value = if b then 1L else 0L
+            let value = if b then 1I else 0I
             let! op = pConstI ssa value ty
             return ([op], TRValue { SSA = ssa; Type = ty })
 
         | NativeLiteral.Int (n, kind) ->
-            let! op = pConstI ssa n ty
+            let! op = pConstI ssa (bigint n) ty
             return ([op], TRValue { SSA = ssa; Type = ty })
 
         | NativeLiteral.UInt (n, kind) ->
-            let! op = pConstI ssa (int64 n) ty
+            let! op = pConstI ssa (bigint n) ty
             return ([op], TRValue { SSA = ssa; Type = ty })
 
         | NativeLiteral.Char c ->
-            let! op = pConstI ssa (int64 c) ty
+            let! op = pConstI ssa (bigint (int c)) ty
             return ([op], TRValue { SSA = ssa; Type = ty })
 
         | NativeLiteral.Float (f, kind) ->

@@ -374,7 +374,7 @@ let ``void Console call output remains in its eager conditional arm before unit 
     let yes, no = operations |> List.choose (function MLIROp.SCFOp(SCFOp.If(_, yes, Some no, _)) -> Some(yes, no) | _ -> None) |> Assert.Single
     Assert.Single(List.filter isCall yes) |> ignore
     Assert.DoesNotContain(no, isCall)
-    Assert.True(yes |> List.exists (function MLIROp.ArithOp(ArithOp.ConstI(_, 0L, TInt(IntWidth 32))) -> true | _ -> false))
+    Assert.True(yes |> List.exists (function MLIROp.ArithOp(ArithOp.ConstI(_, value, TInt(IntWidth 32))) when value = 0I -> true | _ -> false))
     let result, resultType = MLIRAccumulator.recallNode choice.Id accumulator |> require "Missing conditional unit"
     let declaration = MLIROp.FuncOp(FuncOp.FuncDef("eager_console", [], [resultType],
         operations @ [MLIROp.FuncOp(FuncOp.Return [{ SSA = result; Type = resultType }])], FuncVisibility.Private))
