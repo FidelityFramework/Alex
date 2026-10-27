@@ -36,6 +36,7 @@ These are owner requirements. They apply to every change, by a person or an agen
 
 ## Tests
 
+- For Alex changes, run `ALEX_ANALYZER_PROJECT=/home/hhh/repos/Alex/src/Alex/Alex.fsproj bash /home/hhh/repos/Bozzetto/tools/Alex.Analyzers/analyze-alex.sh`. This uses Bozzetto's leased development tooling outside this repository and runs the shared baseline and Alex boundary checks. Keep its failures visible; the boundary-only result is a narrowed check and does not replace the combined gate.
 - A test in this repository states a revision from values of the contract. It references no compiler, and the boundary gate applies to test files.
 - A fixture states the rows the compiler service publishes for it. Where the compiler service refuses the fixture, the fixture states the rows the Pattern under test reads and says so in its comment.
 - A test of a refusal requires the refusal text, no emitted operation and no bound operand. An assertion that cannot fail is removed.
