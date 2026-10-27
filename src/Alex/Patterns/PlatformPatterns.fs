@@ -377,14 +377,16 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                     call.Arguments |> List.mapi (fun ordinal operand -> parser {
                         match operand.OptionalEntry with
                         | None -> return ()
-                        | Some selected when selected.CaseOrdinal = 0 ->
+                        | Some (BoundaryOptionalEntryChoice.Direct selected) when selected.CaseOrdinal = 0 ->
                             match BoundaryAbi.optionalEntryAbsenceConversionAt state.Graph call ordinal operand with
                             | Result.Ok _ -> return ()
                             | Result.Error reason -> return! fail (Message reason)
-                        | Some _ ->
+                        | Some (BoundaryOptionalEntryChoice.Direct _) ->
                             match BoundaryAbi.optionalEntryConversionAt state.Graph call ordinal operand with
                             | Result.Ok _ -> return ()
                             | Result.Error reason -> return! fail (Message reason)
+                        | Some (BoundaryOptionalEntryChoice.Conditional _) ->
+                            return! fail (Message "Conditional optional-entry conversion requires source-authored assigned tag projection and both arm conversions.")
                     }) |> Alex.XParsec.Extensions.sequence
                 return ()
             }
@@ -419,7 +421,7 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                         let raw = { SSA = ssa; Type = ty }
                         let! operations, value, slot = parser {
                             match operand.OptionalEntry with
-                            | Some selected when selected.CaseOrdinal = 0 ->
+                            | Some (BoundaryOptionalEntryChoice.Direct selected) when selected.CaseOrdinal = 0 ->
                                 let! selected, _, _, _ =
                                     match BoundaryAbi.optionalEntryAbsenceConversionAt state.Graph call ordinal operand with
                                     | Result.Ok row -> preturn row
@@ -429,7 +431,7 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                         "Optional absence intent differs from its original Option operand."
                                 return [], raw, Some { Ordinal = ordinal; CaseOrdinal = selected.CaseOrdinal
                                                        Claim = selected.Obligation; Code = None }
-                            | Some _ ->
+                            | Some (BoundaryOptionalEntryChoice.Direct _) ->
                                 let! selected, _, model =
                                     match BoundaryAbi.optionalEntryConversionAt state.Graph call ordinal operand with
                                     | Result.Ok row -> preturn row
@@ -462,6 +464,8 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                 return codeOps, raw,
                                        Some { Ordinal = ordinal; CaseOrdinal = selected.CaseOrdinal
                                               Claim = selected.Obligation; Code = Some {SSA = code; Type = codeType} }
+                            | Some (BoundaryOptionalEntryChoice.Conditional _) ->
+                                return! fail (Message "Conditional optional-entry conversion requires source-authored assigned tag projection and both arm conversions.")
                             | None ->
                                 let! operations, value =
                                     match witnessed.TryFind operand.Actual with

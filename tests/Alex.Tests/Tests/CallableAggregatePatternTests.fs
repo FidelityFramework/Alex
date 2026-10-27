@@ -198,7 +198,7 @@ let private fixture union =
           FormationInputs = if operation = CallableAggregateOperation.Construct then [code.Id] else [aggregate.Id; code.Id]
           Value = value; SelectedAlternative = selected
           Operation = operation; Frontier = if operation = CallableAggregateOperation.Project then Some occurrence else None
-          Tag = tag; Bytes = 0; Alignment = 1; Participants = []; ResultRetirement = None }
+          Tag = tag; Selection = None; Bytes = 0; Alignment = 1; Participants = []; ResultRetirement = None }
         |> fun row -> { row with Participants = valueParticipants row }
     let construction = row aggregate.Id CallableAggregateOperation.Construct (Some code.Id) (Some 0)
     let projection = row read.Id CallableAggregateOperation.Project None None
@@ -997,7 +997,7 @@ let ``absent callable Result case retains the selected scalar payload without in
                        PayloadOrdinal = Some 0; Payload = Some payload.Id
                        Participants = [p ParticipantRole.AggregateConstructor 0 initialization.Id initialization.Id
                                        p ParticipantRole.AggregatePayload 0 initialization.Id payload.Id] }
-          Bytes = 0; Alignment = 1; Participants = []; ResultRetirement = None }
+          Selection = None; Bytes = 0; Alignment = 1; Participants = []; ResultRetirement = None }
     let row = { row with Participants = valueParticipants row }
     let account : CallableAggregateDependencyAccount =
         { Occurrence = initialization.Id; Slots = [slot]; Values = [row]; Carriers = []; Contracts = []

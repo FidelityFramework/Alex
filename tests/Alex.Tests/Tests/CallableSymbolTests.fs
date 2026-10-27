@@ -792,7 +792,7 @@ let ``optional native entry boundary refuses Some and None before operand loweri
       Obligation = NodeId 70 }
   let operand: BoundaryOperand =
     { Actual = NodeId 33; Formal = NodeId 71; Abi = BoundaryScalar.Entry(NodeId 72)
-      Adaptation = None; OptionalEntry = Some account }
+      Adaptation = None; OptionalEntry = Some (BoundaryOptionalEntryChoice.Direct account) }
   let changed =
     { boundary with
         Calls =
@@ -808,6 +808,31 @@ let ``optional native entry boundary refuses Some and None before operand loweri
     Assert.Equal((if present then "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it."
                   else "Optional native-entry absence conversion lacks its exact current source account."), reason)
   | Result.Ok result -> failwithf "Optional native entry was lowered as a plain entry: %A" result
+  Assert.Empty accumulator.AllOps
+  Assert.Null(MLIRAccumulator.recallNode operand.Actual accumulator)
+  Assert.Null(MLIRAccumulator.recallNode call.Site accumulator)
+
+[<Fact>]
+let ``conditional optional entry refuses without assigned tag projection`` () =
+  let graph = importedFixture ()
+  let boundary = graph.Emission.Boundary
+  let call = boundary.Calls[NodeId 34]
+  let present: BoundaryOptionalEntry =
+    { Construction = NodeId 33; CaseOrdinal = 1; Payload = Some(NodeId 31); Formation = Some(NodeId 31)
+      Transport = Set.singleton(NodeId 33); Obligation = NodeId 70 }
+  let absent = {present with Construction = NodeId 35; CaseOrdinal = 0; Payload = None; Formation = None; Obligation = NodeId 73}
+  let operand: BoundaryOperand =
+    { Actual = NodeId 33; Formal = NodeId 71; Abi = BoundaryScalar.Entry(NodeId 72); Adaptation = None
+      OptionalEntry = Some (BoundaryOptionalEntryChoice.Conditional(NodeId 36, present, absent)) }
+  let changed = {boundary with Calls=boundary.Calls.Add(call.Site, {call with Arguments=[operand]})}
+  let graph = {graph with Emission={graph.Emission with Boundary=changed}}
+  let accumulator = MLIRAccumulator.empty ()
+  let ctx = context graph call.Site accumulator
+  match Alex.XParsec.PSGCombinators.tryMatchWithDiagnostics
+          Alex.Patterns.PlatformPatterns.pBoundaryCall graph graph.Nodes[call.Site]
+          ctx.Zipper ctx.Coeffects accumulator with
+  | Result.Error reason -> Assert.Equal("Conditional optional-entry conversion requires source-authored assigned tag projection and both arm conversions.", reason)
+  | Result.Ok result -> failwithf "Unassigned conditional entry was lowered: %A" result
   Assert.Empty accumulator.AllOps
   Assert.Null(MLIRAccumulator.recallNode operand.Actual accumulator)
   Assert.Null(MLIRAccumulator.recallNode call.Site accumulator)

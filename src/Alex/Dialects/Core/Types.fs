@@ -537,7 +537,7 @@ module BoundaryAbi =
                                   (operand: Fidelity.PSG.BoundaryOperand) =
         let missing () = Error "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it."
         match operand.OptionalEntry with
-        | Some selected ->
+        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Direct selected) ->
             match selected.Payload, selected.Formation, operand.Abi,
                   revision.CurrentClaims.TryFind selected.Obligation with
             | Some payload, Some formation, Fidelity.PSG.BoundaryScalar.Entry invocation, Some claim
@@ -554,7 +554,7 @@ module BoundaryAbi =
                     Ok(selected, claim, model)
                 | _ -> missing ()
             | _ -> missing ()
-        | None -> missing ()
+        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Conditional _) | None -> missing ()
 
     /// Absence has its own current per-use account. It supplies no callable
     /// formation, payload or native null value to the portable witness.
@@ -563,7 +563,7 @@ module BoundaryAbi =
                                          (operand: Fidelity.PSG.BoundaryOperand) =
         let missing () = Error "Optional native-entry absence conversion lacks its exact current source account."
         match operand.OptionalEntry with
-        | Some selected when selected.CaseOrdinal = 0 && selected.Payload.IsNone && selected.Formation.IsNone ->
+        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Direct selected) when selected.CaseOrdinal = 0 && selected.Payload.IsNone && selected.Formation.IsNone ->
             match operand.Abi, revision.CurrentClaims.TryFind selected.Obligation with
             | Fidelity.PSG.BoundaryScalar.Entry invocation, Some claim when List.contains claim revision.Obligations ->
                 match claim.Body with
