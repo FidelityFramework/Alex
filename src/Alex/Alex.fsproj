@@ -112,6 +112,10 @@
     <Compile Include="Generation.fs" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <AlexPermittedPackages>FSharp.Core;XParsec</AlexPermittedPackages>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="FSharp.Core" Version="10.1.401" />
     <PackageReference Include="XParsec" Version="0.3.0" />
