@@ -787,7 +787,7 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
                             | Some(MemoryWitnessOperation.SnapshotRetirement retirement) -> retirement.Construction = construction
                             | _ -> false))
                     "Checked string view lacks its exact source-issued snapshot, validator, outcome or retirement account."
-        | None -> ()
+        | None -> do! preturn ()
         let! element=pMemorySlot view.Element
         let! source=pMemoryBuffer view.Source element
         let sourceType,resultType=representationType view.SourceCarrier,representationType view.ResultCarrier

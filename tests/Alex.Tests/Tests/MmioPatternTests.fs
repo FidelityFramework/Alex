@@ -470,6 +470,49 @@ module ReturnedCheckedText =
             Assert.Equal(result,actual)
         | other -> failwithf "Allocated validation lost its successful parser continuation: %A" other
 
+    let private fixtureWithStringView isChecked =
+        let graph = fixture ()
+        let memory = graph.Emission.Memory
+        let validation =
+            match memory.Operations[id 4] with
+            | MemoryWitnessOperation.Utf8Validation row -> row
+            | _ -> failwith "fixture"
+        let representation =
+            match memory.Operations[id 11] with
+            | MemoryWitnessOperation.BufferExtent row -> row.Element
+            | _ -> failwith "fixture"
+        let view : MemoryStringViewWitness =
+            { Site = id 5; Source = validation.Construction.Snapshot; Owner = validation.Construction.Owner
+              Snapshot = validation.Construction.Snapshot; Direction = MemoryStringViewDirection.FromBytes
+              Checked = if isChecked then Some validation.Construction else None
+              SourceCarrier = bytes; ResultCarrier = bytes; Element = byte
+              Representation = representation; Declaration = id 42
+              Extent = validation.Copy.CountCarrier; Participants = support }
+        let memory = { memory with Operations = memory.Operations.Add(id 5, MemoryWitnessOperation.StringView view) }
+        let emission = { graph.Emission with Memory = memory }
+        { graph with Emission = emission }
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``string view preserves its published byte buffer for unchecked and checked constructions`` isChecked =
+        match observe 5 (fixtureWithStringView isChecked) (fun accumulator -> accumulator) with
+        | Ok(([], [], TRValue value), _) ->
+            Assert.Equal(Arg 4, value.SSA)
+            Assert.Equal(TMemRef(TInt(IntWidth 8)), value.Type)
+        | other -> failwithf "String view did not preserve the published buffer: %A" other
+
+    [<Fact>]
+    let ``checked string view refuses a withdrawn validation account`` () =
+        let graph = fixtureWithStringView true
+        let memory = graph.Emission.Memory
+        let memory = { memory with Operations = memory.Operations.Remove(id 4) }
+        let emission = { graph.Emission with Memory = memory }
+        let graph = { graph with Emission = emission }
+        match observe 5 graph (fun accumulator -> accumulator) with
+        | Result.Error reason -> Assert.Contains("Checked string view lacks its exact source-issued", reason)
+        | Ok _ -> failwith "Checked string view admitted without its validation account"
+
     [<Theory>]
     [<InlineData(6)>]
     [<InlineData(7)>]
