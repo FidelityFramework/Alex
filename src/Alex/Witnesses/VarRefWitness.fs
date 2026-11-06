@@ -172,6 +172,10 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
                     // Naming the destination is not a value demand. The write
                     // witness recalls its shared cell directly.
                     { InlineOps = []; TopLevelOps = []; Result = TRVoid }
+                | SourceBindingClass.MutableCell when ctx.Graph.Codata.Escapes.TryFind bindingId = Some EscapeKind.StaticLifetime ->
+                    // A program-long cell is obtained from its global at this read
+                    // (Farscape #109); it is never witnessed in the reading scope.
+                    callable (pReadMutableCallable ctx bindingId node.Id)
                 | SourceBindingClass.MutableCell ->
                     match MLIRAccumulator.recallCallableCell bindingId ctx.Accumulator with
                     | None -> WitnessOutput.error $"VarRef '{name}': Binding not yet witnessed"

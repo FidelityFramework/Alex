@@ -67,31 +67,78 @@ let private pWrite nodeId (cell: CallableCellOperand) (write: MutableCallableWri
     return [zeroOp; tagOp] @ environmentOps @ [tagStore]
 }
 
+/// The symbol of a program-long callable cell's discriminator global.
+let private cellGlobalName (binding: NodeId) = sprintf "__clef_callable_cell_%d" (NodeId.value binding)
+
+/// A program-long callable cell (Farscape #109): the published residence and the
+/// source inventory entry together declare its discriminator global; each use obtains
+/// that global in its own function. Nothing here infers residence or layout.
+let private pProgramCell (storage: MutableCallableStorage) (slot: SSA) = parser {
+    let! state = getUserState
+    do! ensure (state.Graph.Codata.Escapes.TryFind storage.Binding = Some EscapeKind.StaticLifetime)
+            "A program callable cell requires its published program-long residence."
+    do! ensure storage.EnvironmentBytes.IsNone
+            "A program callable cell with a retained environment requires its environment declaration."
+    let slotTy = TMemRefStatic(1, TIndex)
+    let! authority =
+        Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot storage.Binding) slotTy
+    do! ensure (authority.Shape = ProgramStorageShape.CallableCell storage.EnvironmentBytes)
+            "The program callable cell's inventory entry differs from its published storage protocol."
+    let name = cellGlobalName storage.Binding
+    MLIRAccumulator.tryEmitGlobalMemref name slotTy (Some authority) state.Accumulator
+    let! reference = pMemRefGetGlobal slot name slotTy
+    let cell = { Contract = storage; Discriminator = { SSA = slot; Type = slotTy }; Environment = None }
+    return reference, cell
+}
+
+/// The cell a read or assignment acts on: a program-long cell is obtained from its
+/// global at this occurrence; a local cell is the one witnessed in this scope.
+let private pUseCell (storage: MutableCallableStorage) (occurrence: NodeId) (missing: string) = parser {
+    let! state = getUserState
+    match state.Graph.Codata.Escapes.TryFind storage.Binding with
+    | Some EscapeKind.StaticLifetime ->
+        let! reference, cell = pProgramCell storage (Values.value occurrence 5)
+        return [reference], cell
+    | _ ->
+        match MLIRAccumulator.recallCallableCell storage.Binding state.Accumulator with
+        | Some cell when cell.Contract = storage -> return [], cell
+        | _ -> return! fail (Message missing)
+}
+
 let pCreateMutableCallable (ctx: WitnessContext) binding = parser {
     let! state = getUserState
     do! ensure (state.Current.Id = binding && state.Zipper.Focus.Id = binding)
             "Mutable callable allocation requires its actual source occurrence."
     let! storage = pStorage binding
-    do! ensure (state.Graph.Codata.Escapes.TryFind binding = Some EscapeKind.StackScoped)
-            "Mutable callable cell requires an admitted local allocation lifetime."
-    do! ensure storage.Captures.IsEmpty
-            "Captured mutable callable storage requires its shared protocol descriptor and covering residence proof."
-    let! value = pValue ctx storage storage.Initializer
-    let cell =
-        { Contract = storage; Discriminator = { SSA = Values.value binding 0; Type = TMemRefStatic(1, TIndex) }
-          Environment = storage.EnvironmentBytes |> Option.map (fun bytes ->
-              { SSA = Values.value binding 1; Type = TMemRefStatic(1, TMemRefStatic(bytes, TInt(IntWidth 8))) }) }
-    let! allocation = pAlloca cell.Discriminator.SSA 1 TIndex None
-    let! environmentOps =
-        match cell.Environment with
-        | Some { SSA = ssa; Type = TMemRefStatic(1, element) } -> parser {
-            let! allocation = pAlloca ssa 1 element None
-            return [allocation]
-          }
-        | None -> preturn []
-        | _ -> fail (Message "Mutable callable environment cell lost its descriptor representation.")
-    let! initialization = pWrite binding cell storage.Initializer value
-    return allocation :: environmentOps @ initialization, TRCallableCell cell
+    match state.Graph.Codata.Escapes.TryFind binding with
+    | Some EscapeKind.StaticLifetime ->
+        do! ensure storage.Captures.IsEmpty
+                "Captured mutable callable storage requires its shared protocol descriptor and covering residence proof."
+        let! value = pValue ctx storage storage.Initializer
+        let! reference, cell = pProgramCell storage (Values.value binding 0)
+        let! initialization = pWrite binding cell storage.Initializer value
+        return reference :: initialization, TRCallableCell cell
+    | _ ->
+        do! ensure (state.Graph.Codata.Escapes.TryFind binding = Some EscapeKind.StackScoped)
+                "Mutable callable cell requires an admitted local allocation lifetime."
+        do! ensure storage.Captures.IsEmpty
+                "Captured mutable callable storage requires its shared protocol descriptor and covering residence proof."
+        let! value = pValue ctx storage storage.Initializer
+        let cell =
+            { Contract = storage; Discriminator = { SSA = Values.value binding 0; Type = TMemRefStatic(1, TIndex) }
+              Environment = storage.EnvironmentBytes |> Option.map (fun bytes ->
+                  { SSA = Values.value binding 1; Type = TMemRefStatic(1, TMemRefStatic(bytes, TInt(IntWidth 8))) }) }
+        let! allocation = pAlloca cell.Discriminator.SSA 1 TIndex None
+        let! environmentOps =
+            match cell.Environment with
+            | Some { SSA = ssa; Type = TMemRefStatic(1, element) } -> parser {
+                let! allocation = pAlloca ssa 1 element None
+                return [allocation]
+              }
+            | None -> preturn []
+            | _ -> fail (Message "Mutable callable environment cell lost its descriptor representation.")
+        let! initialization = pWrite binding cell storage.Initializer value
+        return allocation :: environmentOps @ initialization, TRCallableCell cell
 }
 
 let pAssignMutableCallable (ctx: WitnessContext) binding assignment = parser {
@@ -103,13 +150,10 @@ let pAssignMutableCallable (ctx: WitnessContext) binding assignment = parser {
         match storage.Writes |> List.filter (fun write -> write.Site = assignment) with
         | [write] -> preturn write
         | _ -> fail (Message "Mutable callable assignment has no unique settled write event.")
-    let! cell =
-        match MLIRAccumulator.recallCallableCell binding state.Accumulator with
-        | Some cell when cell.Contract = storage -> preturn cell
-        | _ -> fail (Message "Mutable callable target cell has not been witnessed in this scope.")
+    let! reference, cell = pUseCell storage assignment "Mutable callable target cell has not been witnessed in this scope."
     let! value = pValue ctx storage write
     let! operations = pWrite assignment cell write value
-    return operations, TRVoid
+    return reference @ operations, TRVoid
 }
 
 let pReadMutableCallable (ctx: WitnessContext) binding occurrence = parser {
@@ -118,10 +162,7 @@ let pReadMutableCallable (ctx: WitnessContext) binding occurrence = parser {
             "Mutable callable read requires its actual source snapshot frontier."
     let! storage = pStorage binding
     do! ensure (storage.Reads.Contains occurrence) "This occurrence is not an admitted mutable callable read."
-    let! cell =
-        match MLIRAccumulator.recallCallableCell binding state.Accumulator with
-        | Some cell when cell.Contract = storage -> preturn cell
-        | _ -> fail (Message "Mutable callable cell has not been witnessed in this scope.")
+    let! reference, cell = pUseCell storage occurrence "Mutable callable cell has not been witnessed in this scope."
     let! shape =
         match Operands.project ctx occurrence with
         | Result.Ok shape -> preturn shape
@@ -166,5 +207,5 @@ let pReadMutableCallable (ctx: WitnessContext) binding occurrence = parser {
         match Operands.create shape code environment with
         | Result.Ok value -> preturn value
         | Result.Error reason -> fail (Message reason)
-    return [zeroOp; tagLoad] @ environmentOps @ dispatch, TRCallable value
+    return reference @ [zeroOp; tagLoad] @ environmentOps @ dispatch, TRCallable value
 }

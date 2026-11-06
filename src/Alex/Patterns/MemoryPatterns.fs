@@ -222,10 +222,11 @@ let programStorageType arch graph (entry: ProgramStorageEntry) =
         valueTypeAt graph site
         |> physicalStorageType arch
         |> fun value -> Some(TMemRefStatic(1, value))
-    // A callable cell is two declarations, its discriminator and its retained
-    // environment, owned by the mutable callable witness (Farscape #109). It has
-    // no single declared storage type here.
-    | ProgramStorageShape.CallableCell _ -> None
+    // A program callable cell without a retained environment is its one index
+    // discriminator (Farscape #109). A retained environment is a second object
+    // with its own declaration, which this inventory shape does not yet carry.
+    | ProgramStorageShape.CallableCell None -> Some(TMemRefStatic(1, TIndex))
+    | ProgramStorageShape.CallableCell(Some _) -> None
 
 let pProgramStorageDeclaration identity storageTy : PSGParser<ProgramStorageEntry> =
     parser {
