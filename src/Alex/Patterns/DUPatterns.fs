@@ -127,7 +127,15 @@ let pBuildDUGetTag (nodeId: NodeId) (duSSA: SSA) (duType: MLIRType) : PSGParser<
                 return! fail (Message $"backend (FPGA) has no tag extraction for the DU carrier {other} at node {NodeId.value nodeId}; only an enum DU's value is its tag")
         | _ ->
             // CPU/MCU: memory-based tag extraction
-            return! pExtractDUTag nodeId duSSA duType
+            let! (ops, result) = pExtractDUTag nodeId duSSA duType
+            match result with
+            | TRValue value ->
+                let! (meetOps, readSSA, readTy) = pAdapt nodeId nodeId value.SSA value.Type
+                let! state = getUserState
+                let readTy = requireValueType state.Graph nodeId readTy
+                return (ops @ meetOps, TRValue { SSA = readSSA; Type = readTy })
+            | other ->
+                return! fail (Message $"PSG settlement did not settle a tag value for DUGetTag at node {NodeId.value nodeId}: extraction produced {other}")
     }
 
 // ═══════════════════════════════════════════════════════════

@@ -305,20 +305,38 @@ let reproject (ctx: WitnessContext) source destination =
                 left.Implementation = right.Implementation && left.Environment = right.Environment &&
                 left.Kind = right.Kind && left.Formation = right.Formation &&
                 left.EnvironmentValue = right.EnvironmentValue && left.Contract = right.Contract
-            let exactAlternatives = function
-                | Exact carrier -> [carrier]
-                | Flow flow -> flow.Alternatives |> List.choose ctx.Graph.Codata.CallableCarriers.TryFind
-                | Joined _ -> []
+            let sameJoin (left: CallableJoin) (right: CallableJoin) =
+                left.SourceType = right.SourceType && left.Storage = right.Storage &&
+                left.Read = right.Read && left.Alternatives = right.Alternatives
+            let alternatives = function
+                | Exact carrier -> Some [Choice1Of2 carrier]
+                | Joined join -> Some [Choice2Of2 join]
+                | Flow flow ->
+                    let members = flow.Alternatives |> List.map (fun occurrence ->
+                        match ctx.Graph.Codata.CallableCarriers.TryFind occurrence,
+                              ctx.Graph.Codata.CallableJoins.TryFind occurrence,
+                              ctx.Graph.Emission.Callable.Joins.TryFind occurrence with
+                        | Some carrier, None, None -> Some(Choice1Of2 carrier)
+                        | None, Some join, Some published when join = published -> Some(Choice2Of2 join)
+                        | _ -> None)
+                    if members |> List.exists Option.isNone then None else Some(List.choose id members)
+            let sameAlternative left right =
+                match left, right with
+                | Choice1Of2 left, Choice1Of2 right -> sameExact left right
+                | Choice2Of2 left, Choice2Of2 right -> sameJoin left right
+                | _ -> false
             let sameOrigin =
                 match value.Carrier, shape.Contract with
                 | Exact source, Exact destination ->
                     sameExact source destination
                 | Joined source, Joined destination ->
-                    source.Storage = destination.Storage && source.Read = destination.Read && source.Alternatives = destination.Alternatives
-                | (Exact _ | Flow _), (Exact _ | Flow _) ->
-                    let sources, destinations = exactAlternatives value.Carrier, exactAlternatives shape.Contract
-                    not sources.IsEmpty && not destinations.IsEmpty &&
-                    (sources |> List.forall (fun source -> destinations |> List.exists (sameExact source)))
+                    sameJoin source destination
+                | (Exact _ | Flow _ | Joined _), Flow _
+                | (Exact _ | Flow _), Exact _ ->
+                    match alternatives value.Carrier, alternatives shape.Contract with
+                    | Some sources, Some destinations when not sources.IsEmpty && not destinations.IsEmpty ->
+                        sources |> List.forall (fun source -> destinations |> List.exists (sameAlternative source))
+                    | _ -> false
                 | _ -> false
             let transported =
                 ctx.Graph.Emission.Callable.Transports.TryFind destination |> Option.exists (Set.contains source)

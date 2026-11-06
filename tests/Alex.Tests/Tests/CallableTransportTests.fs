@@ -135,6 +135,104 @@ let private bindResult id (output: WitnessOutput) accumulator =
     | TRCallable value -> MLIRAccumulator.bindCallable id value accumulator |> ok; value
     | other -> failwithf "Expected separate callable operands: %A" other
 
+/// These synthetic rows isolate passive snapshot transport; they do not
+/// establish source publication or a source allocation lifetime proof.
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``joined snapshot reaches callable flows without changing witnessed operands`` captured =
+    let original, owner, alias, reference, annotation, sequence, _ = fixture captured
+    let read, cell, other = NodeId 13, NodeId 14, NodeId 15
+    let join: CallableJoin =
+        { Occurrence = alias; SourceType = ty; Storage = cell; Read = read; Alternatives = [owner] }
+    let makeFlow occurrence dependency : CallableFlow =
+        { Occurrence = occurrence; SourceType = ty; Alternatives = [alias]
+          Dependencies = Map.ofList [occurrence, [dependency]]; Calls = [] }
+    let flow, next = makeFlow reference alias, makeFlow annotation reference
+    let removeTransport = original.Emission.Callable.Carriers.Remove(alias).Remove(reference).Remove(annotation)
+    let joins = Map.ofList [alias, join]
+    let flows = Map.ofList [reference, flow; annotation, next]
+    let graph =
+        { original with
+            Nodes = original.Nodes.Add(alias, { original.Nodes[alias] with Children = [read] })
+                                  .Add(reference, { original.Nodes[reference] with Kind = SemanticKind.PatternBinding "work"; Children = [] })
+                                  .Add(read, node 13 (SemanticKind.VarRef("selected", Some cell)) ty [] (Some 8))
+                                  .Add(cell, node 14 (SemanticKind.Binding("selected", true, false, None)) ty [NodeId.value owner] None)
+                                  .Add(other, node 15 (SemanticKind.VarRef("selected", Some cell)) ty [] None) }
+        |> withCodata (fun data -> { data with CallableCarriers = removeTransport; CallableJoins = joins; CallableFlows = flows })
+        |> withCallable (fun callable ->
+            { callable with Carriers = removeTransport; Joins = joins; Flows = flows
+                            Transports = callable.Transports.Add(reference, Set.ofList [alias; reference]).Add(annotation, Set.ofList [alias; reference; annotation]) })
+    let accumulator = MLIRAccumulator.empty ()
+    let root = Zipper.create graph sequence |> require "Missing sequence"
+    let ctx = context graph root accumulator
+    let shape = Operands.project ctx alias |> ok
+    let code = { SSA = Arg 0; Type = Operands.functionType shape }
+    let environment = Operands.environmentType shape |> Option.map (fun ty -> { SSA = Arg 2; Type = ty })
+    Operands.bind ctx alias code environment |> ok
+    let copied = Operands.reproject ctx alias reference |> ok
+    Assert.Equal(code, Operands.code copied)
+    Assert.Equal(environment, Operands.environment copied)
+    Operands.copy ctx alias reference |> ok
+    let forwarded = Operands.reproject ctx reference annotation |> ok
+    Assert.Equal(code, Operands.code forwarded)
+    Assert.Equal(environment, Operands.environment forwarded)
+    let mixedFlow = { flow with Alternatives = [alias; owner] }
+    let mixed =
+        graph
+        |> withCodata (fun data -> { data with CallableFlows = flows.Add(reference, mixedFlow) })
+        |> withCallable (fun callable ->
+            { callable with Flows = flows.Add(reference, mixedFlow)
+                            Transports = callable.Transports.Add(reference, Set.ofList [alias; owner; reference]) })
+    let mixedOperands = MLIRAccumulator.empty ()
+    let mixedContext = context mixed root mixedOperands
+    Operands.bind mixedContext alias code environment |> ok
+    let otherCode = { code with SSA = Arg 3 }
+    let otherEnvironment = environment |> Option.map (fun value -> { value with SSA = Arg 4 })
+    Operands.bind mixedContext owner otherCode otherEnvironment |> ok
+    for source, expectedCode, expectedEnvironment in [alias, code, environment; owner, otherCode, otherEnvironment] do
+        let value = Operands.reproject mixedContext source reference |> ok
+        Assert.Equal(expectedCode, Operands.code value)
+        Assert.Equal(expectedEnvironment, Operands.environment value)
+    let absentFlow = { flow with Alternatives = [owner] }
+    let absent =
+        mixed
+        |> withCodata (fun data -> { data with CallableFlows = flows.Add(reference, absentFlow) })
+        |> withCallable (fun callable -> { callable with Flows = flows.Add(reference, absentFlow) })
+    match Operands.reproject (context absent root mixedOperands) alias reference with
+    | Result.Error reason -> Assert.Contains("Callable copy does not preserve", reason)
+    | Result.Ok _ -> failwith "A snapshot absent from a mixed flow was accepted."
+    let mismatchedType = { join with Occurrence = other; SourceType = functionFrom uint8Type boolType }
+    let typeMismatch =
+        graph
+        |> withCodata (fun data -> { data with CallableJoins = joins.Add(other, mismatchedType) })
+        |> withCallable (fun callable ->
+            { callable with Joins = joins.Add(other, mismatchedType)
+                            Transports = callable.Transports.Add(other, Set.ofList [alias; other]) })
+    match Operands.reproject (context typeMismatch root mixedOperands) alias other with
+    | Result.Error reason -> Assert.Contains("Callable copy does not preserve", reason)
+    | Result.Ok _ -> failwith "A snapshot with a different source type was accepted."
+    let badJoin = { join with Occurrence = other; Read = other }
+    let otherFlow = { flow with Alternatives = [other] }
+    let differentRead =
+        graph
+        |> withCodata (fun data -> { data with CallableJoins = joins.Add(other, badJoin); CallableFlows = flows.Add(reference, otherFlow) })
+        |> withCallable (fun callable -> { callable with Joins = joins.Add(other, badJoin); Flows = flows.Add(reference, otherFlow) })
+    let missingTransport =
+        graph |> withCallable (fun callable -> { callable with Transports = callable.Transports.Remove reference })
+    let staleJoin =
+        graph |> withCodata (fun data -> { data with CallableJoins = joins.Add(alias, { join with Read = other }) })
+    for changed in [differentRead; missingTransport; staleJoin] do
+        let operands = MLIRAccumulator.empty ()
+        let source = context graph root operands
+        Operands.bind source alias code environment |> ok
+        let target = context changed root operands
+        match Operands.reproject target alias reference with
+        | Result.Error reason -> Assert.Contains("Callable copy does not preserve", reason)
+        | Result.Ok _ -> failwith "An unrelated snapshot or missing transport was accepted."
+        Assert.True((MLIRAccumulator.recallCallable reference operands).IsNone)
+        Assert.Empty operands.Errors
+
 [<Fact>]
 let ``immutable binding reference annotation and sequence preserve the actual callable operands`` () =
     let graph, owner, alias, reference, annotation, sequence, _ = fixture true

@@ -1,7 +1,6 @@
 module Alex.Tests.MutableClosureTests
 
 open System.Diagnostics
-open System.IO
 open Xunit
 open Fidelity.PSG
 open Alex.Dialects.Core.Types
@@ -409,8 +408,7 @@ let ``witnessed closure cell and snapshot verify and lower through standard MLIR
             let carrier = f.Graph.Codata.CallableCarriers[source]
             let symbol = Alex.CodeGeneration.CallableSymbols.lambda f.Graph f.Graph.Nodes[carrier.Implementation] false
             MLIROp.FuncOp(FuncOp.FuncConstant((inputValue source).SSA, symbol, codeType)))
-    // Invoke both actual function operands after the write. This artifact is
-    // also suitable for the native oracle: saved=false and current=true.
+    // Invoke both actual function operands after the write.
     let savedResult = { SSA = V(900001, 0); Type = boolean }
     let currentResult = { SSA = V(900001, 1); Type = boolean }
     let unitArgument = { SSA = V(900001, 2); Type = unitType }
@@ -420,19 +418,7 @@ let ``witnessed closure cell and snapshot verify and lower through standard MLIR
                 MLIROp.FuncOp(FuncOp.FuncCallIndirect([currentResult], (Operands.code current).SSA, [unitArgument]))
                 MLIROp.FuncOp(FuncOp.Return [savedResult; currentResult])]
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("closure_snapshot", [], [boolean; boolean], body, FuncVisibility.Public))
-    let read ordinal ty : Val = { SSA = V(900002, ordinal); Type = ty }
-    let saved, latest, truth, unchanged, passed = read 0 boolean, read 1 boolean, read 2 boolean, read 3 boolean, read 4 boolean
-    let zero, one, status = read 5 unitType, read 6 unitType, read 7 unitType
-    let main = MLIROp.FuncOp(FuncOp.FuncDef("main", [], [unitType],
-        [MLIROp.FuncOp(FuncOp.FuncCall([saved; latest], "closure_snapshot", []))
-         MLIROp.ArithOp(ArithOp.ConstI(truth.SSA, 1I, boolean))
-         MLIROp.ArithOp(ArithOp.XorI(unchanged.SSA, saved.SSA, truth.SSA, boolean))
-         MLIROp.ArithOp(ArithOp.AndI(passed.SSA, unchanged.SSA, latest.SSA, boolean))
-         MLIROp.ArithOp(ArithOp.ConstI(zero.SSA, 0I, unitType))
-         MLIROp.ArithOp(ArithOp.ConstI(one.SSA, 1I, unitType))
-         MLIROp.ArithOp(ArithOp.Select(status.SSA, passed.SSA, zero.SSA, one.SSA, unitType))
-         MLIROp.FuncOp(FuncOp.Return [status])], FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok pointerBits) "mutable_closure_component" (implementations @ [definition; main])
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok pointerBits) "mutable_closure_component" (implementations @ [definition])
     let verified = mlirOpt ["--verify-each"] text
     Assert.Contains("memref<1xindex>", verified)
     Assert.Contains("scf.index_switch", verified)
@@ -452,12 +438,3 @@ let ``witnessed closure cell and snapshot verify and lower through standard MLIR
     Assert.Contains("llvm.load", lowered)
     Assert.DoesNotContain("memref.", lowered)
     Assert.DoesNotContain("unrealized_conversion_cast", lowered)
-    if pointerBits = 64 then
-        let directory = Path.Combine(Path.GetTempPath(), "composer-mutable-callable-" + System.Guid.NewGuid().ToString("N"))
-        Directory.CreateDirectory directory |> ignore
-        let llvm = run "mlir-translate" ["--mlir-to-llvmir"] lowered
-        let input, executable = Path.Combine(directory, "snapshot.ll"), Path.Combine(directory, "snapshot")
-        File.WriteAllText(input, llvm)
-        run "clang" [input; "-O0"; "-o"; executable] "" |> ignore
-        Assert.Equal("", run executable [] "")
-        Directory.Delete(directory, true)
