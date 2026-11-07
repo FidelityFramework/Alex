@@ -157,8 +157,8 @@ let private scope (ob: ObligationInfo) : MLIROp list =
         match ob.Body with
         | ObligationBody.Pending _ ->
             invalidArg "ob" "A Pending obligation has no solver scope."
-        | ObligationBody.SnapshotBorrowBound(_, _, _, _, minimum, maximum) ->
-            SnapshotBorrowProof.ofBounds minimum maximum |> resource
+        | ObligationBody.SnapshotBorrowBound(count, snapshot, copy, allocation, minimum, maximum, elementBytes, allocationCapacity) ->
+            SnapshotBorrowProof.ofBounds count snapshot copy allocation minimum maximum elementBytes allocationCapacity |> resource
         | ObligationBody.ResourceConversion model -> ResourceProof.ofConversion model |> resource
         | ObligationBody.ResourceCleanup model -> ResourceProof.ofCleanup model |> resource
         | ObligationBody.OptionalEntryArgumentConversion model -> OptionalEntryArgumentProof.project model |> resource
@@ -168,25 +168,25 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 ForeignResultCoverage.ofModel model
                 |> Result.defaultWith (fun reason -> invalidArg "ob" (sprintf "Obligation '%s': %s" ob.Id reason))
 
-            let arguments =
-                projection.Arguments |> List.map (fun index -> index, v ()) |> Map.ofList
+            let declaredTerms = ForeignResultCoverage.declaredTerms projection
 
-            let result = v ()
+            let declared =
+                declaredTerms
+                |> List.map (fun item -> item, (v (), ForeignResultCoverage.termName item))
+                |> Map.ofList
 
             let declarations =
-                (arguments
-                 |> Map.toList
-                 |> List.map (fun (index, value) ->
-                     smt (SMTDeclareFun(value, ForeignResultCoverage.argumentName index, SMTInt))))
-                @ [ smt (SMTDeclareFun(result, "foreign_result", SMTInt)) ]
+                declaredTerms
+                |> List.map (fun item ->
+                    let value, name = declared[item]
+                    smt (SMTDeclareFun(value, name, SMTInt)))
 
             let term =
                 function
-                | ForeignResultCoverage.Term.Argument index -> arguments[index], []
-                | ForeignResultCoverage.Term.Result -> result, []
                 | ForeignResultCoverage.Term.Constant value ->
                     let name = v ()
                     name, [ smt (SMTBigIntConstant(name, value)) ]
+                | variable -> fst declared[variable], []
             // Structural formatting of the canonical predicate, not graph
             // analysis or a second coverage formula.
             let rec predicate =
@@ -213,8 +213,9 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     @ conclusionOps
                     @ [ smt (SMTNot(negated, premise)); smt (SMTOr(value, [ negated; conclusion ])) ]
 
+            let premise, premiseOps = predicate (ForeignResultCoverage.refutationPremises projection)
             let conclusion, body = predicate projection.Conclusion
-            anchor conclusion (declarations @ body)
+            anchor conclusion (declarations @ premiseOps @ body @ [ smt (SMTAssert premise) ])
         | ObligationBody.ProgramInitializationOrder(initializerOrdinal, initializerCount, useOrdinals) ->
             let constant (value: int) =
                 let name = v ()
