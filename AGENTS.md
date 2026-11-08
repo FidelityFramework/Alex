@@ -42,4 +42,4 @@ These are owner requirements. They apply to every change, by a person or an agen
 - A fixture states the rows the compiler service publishes for it. Where the compiler service refuses the fixture, the fixture states the rows the Pattern under test reads and says so in its comment.
 - A test of a refusal requires the refusal text, no emitted operation and no bound operand. An assertion that cannot fail is removed.
 - A test whose input comes from Clef source text, or which enters a Composer backend, resides in the Composer repository.
-- A test that fails because of a defect in Alex stays as written. The defect is repaired in `src/Alex`, or recorded in `docs/04_Debt.md` with the evidence.
+- A test that fails because of a defect in Alex stays as written. The defect is repaired in `src/Alex`, or recorded in the [debt register](https://forge.spkez.dev/FidelityFramework/Alex/wiki/04_Debt) with the evidence.

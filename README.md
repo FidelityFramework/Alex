@@ -38,7 +38,7 @@ A `Request` holds the revision, the selected target, and the libraries the proje
 | `build/Boundary.targets` | The boundary, checked before every compile |
 | `tests/Alex.Tests` | Tests of Patterns, witnesses and the traversal, given revisions assembled from contract values |
 | `docs` | The boundary, the contract, the open decisions, the debt register and the account of the tests |
-| `tools` | `PlanMeasure.fsx` measures what the edge set of a revision says about units of work. The compiler-surface diagnostic is retired; its last source is at revision `060405a4`, with measurements recorded in `docs/01_Boundary.md`. |
+| `tools` | `PlanMeasure.fsx` measures what the edge set of a revision says about units of work. The compiler-surface diagnostic is retired; its last source is at revision `060405a4`, with measurements recorded in [01_Boundary](https://forge.spkez.dev/FidelityFramework/Alex/wiki/01_Boundary). |
 
 ## Build
 
@@ -52,7 +52,7 @@ The contract is expected at `../Fidelity.PSG/src/Fidelity.PSG/Fidelity.PSG.fspro
 dotnet test tests/Alex.Tests/Alex.Tests.fsproj
 ```
 
-`docs/05_Tests.md` states what a test is given and how one file is run alone.
+[05_Tests](https://forge.spkez.dev/FidelityFramework/Alex/wiki/05_Tests) states what a test is given and how one file is run alone.
 
 ## State
 
