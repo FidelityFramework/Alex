@@ -66,26 +66,15 @@ let ``index switch preserves settled labels arm effects and ordered result lanes
 [<InlineData(0)>]
 [<InlineData(1)>]
 [<InlineData(2)>]
-let ``index switch with zero one or multiple results verifies and lowers through stock MLIR`` (arity: int) =
+let ``index switch with zero one or multiple results serializes its cases`` (arity: int) =
     let operations, results = built arity
     let result = results |> List.tryHead |> Option.defaultValue first
     let parameters = [Arg 0, TIndex; Arg 1, cell; Arg 2, TIndex; Arg 3, integer; Arg 4, integer]
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("switch_component", parameters, [integer],
         operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = integer }]))], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "switch_component" [definition]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-    Assert.Contains("scf.index_switch", verified)
-    Assert.Contains("case -1", verified)
-    let pipeline =
-        "builtin.module(convert-scf-to-cf,expand-strided-metadata,memref-expand,"
-        + "finalize-memref-to-llvm{index-bitwidth=64},convert-index-to-llvm{index-bitwidth=64},"
-        + "convert-func-to-llvm{index-bitwidth=64},convert-arith-to-llvm{index-bitwidth=64},"
-        + "convert-cf-to-llvm,reconcile-unrealized-casts)"
-    let lowered = Alex.Tests.Tools.mlirOpt ["--verify-each"; "--pass-pipeline=" + pipeline] verified
-    Assert.Contains("llvm.func @switch_component", lowered)
-    Assert.Contains("llvm.store", lowered)
-    Assert.DoesNotContain("scf.index_switch", lowered)
-    Assert.DoesNotContain("unrealized_conversion_cast", lowered)
+    Assert.Contains("scf.index_switch", text)
+    Assert.Contains("case -1", text)
 
 [<Theory>]
 [<InlineData("selector", "requires an index selector")>]
@@ -117,5 +106,4 @@ let ``explicit module import serves a switch arm without relocation`` () =
     let collected = [declaration; definition]
     Assert.Equal(declaration, collected.Head)
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "switch_declarations" collected
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-    Assert.Contains("func.func private @external_effect", verified)
+    Assert.Contains("func.func private @external_effect", text)

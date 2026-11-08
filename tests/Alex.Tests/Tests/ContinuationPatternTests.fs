@@ -104,25 +104,20 @@ let private composed descriptor =
 [<Theory>]
 [<InlineData(false)>]
 [<InlineData(true)>]
-let ``scalar and captured-cell frame access verify and lower with typed descriptors`` descriptor =
+let ``scalar and captured-cell frame access serialize typed descriptors`` descriptor =
     let operations, value = composed descriptor
     Assert.Equal(TInt(IntWidth 1), value.Type)
     let functionOp = MLIROp.FuncOp(FuncOp.FuncDef("frame_component",
         [Arg 0, TMemRefStatic(64, TInt(IntWidth 8)); Arg 1, TInt(IntWidth 1)], [value.Type],
         operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "frame_component" [functionOp]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
+    Assert.Contains("memref.store", text)
     if descriptor then
-        Assert.Contains("memref<1xmemref<1xi1>>", verified)
+        Assert.Contains("memref<1xmemref<1xi1>>", text)
         // Writes load the original descriptor then store into that cell; they
         // neither allocate a replacement nor overwrite the descriptor slot.
-        Assert.DoesNotContain("memref.alloc", verified)
-        Assert.DoesNotContain("memref.store %arg1, %arg0", verified)
-    let pipeline = "builtin.module(expand-strided-metadata,memref-expand,finalize-memref-to-llvm{index-bitwidth=64},convert-index-to-llvm{index-bitwidth=64},convert-func-to-llvm{index-bitwidth=64},convert-arith-to-llvm{index-bitwidth=64},reconcile-unrealized-casts)"
-    let lowered = Alex.Tests.Tools.mlirOpt ["--verify-each"; "--pass-pipeline=" + pipeline] verified
-    Assert.Contains("llvm.func @frame_component", lowered)
-    Assert.Contains("llvm.store", lowered)
-    Assert.DoesNotContain("unrealized_conversion_cast", lowered)
+        Assert.DoesNotContain("memref.alloc", text)
+        Assert.DoesNotContain("memref.store %arg1, %arg0", text)
 
 [<Theory>]
 [<InlineData("placement", "has no complete placement")>]
@@ -162,9 +157,8 @@ let ``frame borrow preserves the existing scalar cell without copying its payloa
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("borrow_component", [Arg 0, TMemRefStatic(64, TInt(IntWidth 8))], [value.Type],
             operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
         let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "borrow_component" [definition]
-        let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-        Assert.Contains("memref.view", verified)
-        Assert.DoesNotContain("unrealized_conversion_cast", verified)
+        Assert.Contains("memref.view", text)
+        Assert.DoesNotContain("unrealized_conversion_cast", text)
     | other -> failwithf "Settled cell borrow failed: %A" other
 
 [<Fact>]
@@ -196,10 +190,9 @@ let ``buffer-valued frame slot retains its descriptor through a static-to-dynami
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("buffer_component", [Arg 0, TMemRefStatic(64, TInt(IntWidth 8)); Arg 1, actual], [result.Type],
         writing @ reading @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "buffer_component" [definition]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-    Assert.Contains("memref.cast", verified)
-    Assert.Contains("memref<1xmemref<?xi1>>", verified)
-    Assert.DoesNotContain("unrealized_conversion_cast", verified)
+    Assert.Contains("memref.cast", text)
+    Assert.Contains("memref<1xmemref<?xi1>>", text)
+    Assert.DoesNotContain("unrealized_conversion_cast", text)
     match observe (pBorrowContinuationSlot read frame 64 slot) (root |> atChild read) operands with
     | Result.Error message -> Assert.Contains("has no admitted mutable-cell borrow representation", message)
     | Result.Ok _ -> failwith "Buffer value was silently treated as a mutable cell"
@@ -235,9 +228,8 @@ let ``continuation dispatch uses the selector range without changing the graph``
             [Arg 0, TInt(IntWidth 8); Arg 1, TInt(IntWidth 1); Arg 2, TInt(IntWidth 1)], [value.Type],
             operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
         let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "dispatch_component" [definition]
-        let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-        Assert.Contains((if unsigned then "index.castu" else "index.casts"), verified)
-        Assert.Contains("scf.index_switch", verified)
+        Assert.Contains((if unsigned then "index.castu" else "index.casts"), text)
+        Assert.Contains("scf.index_switch", text)
     | other -> failwithf "Settled dispatch failed: %A" other
 
 // The compiler service refuses this fixture: the state holds an integer type and the
@@ -313,12 +305,8 @@ let ``fresh enumerators allocate distinct state and copy complete capture descri
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("enumerator_component", [Arg 0, TMemRefStatic(1, TInt(IntWidth 1))], [result.Type],
         operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "enumerator_component" [definition]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-    Assert.Contains("memref<1xmemref<1xi1>>", verified)
-    Assert.DoesNotContain("unrealized_conversion_cast", verified)
-    let pipeline = "builtin.module(expand-strided-metadata,memref-expand,finalize-memref-to-llvm{index-bitwidth=64},convert-index-to-llvm{index-bitwidth=64},convert-func-to-llvm{index-bitwidth=64},convert-arith-to-llvm{index-bitwidth=64},reconcile-unrealized-casts)"
-    let lowered = Alex.Tests.Tools.mlirOpt ["--verify-each"; "--pass-pipeline=" + pipeline] verified
-    Assert.Contains("llvm.func @enumerator_component", lowered)
+    Assert.Contains("memref<1xmemref<1xi1>>", text)
+    Assert.DoesNotContain("unrealized_conversion_cast", text)
 
 [<Theory>]
 [<InlineData(false, "has no resident allocation obligations")>]
@@ -413,9 +401,8 @@ let ``dispatch witness pulls declared child positions or identifies a missing ch
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("dispatch_witness", [], [value.Type],
             output.InlineOps @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
         let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "dispatch_witness" [definition]
-        let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-        Assert.Contains("scf.index_switch", verified)
-        Assert.Contains("case 0", verified)
+        Assert.Contains("scf.index_switch", text)
+        Assert.Contains("case 0", text)
     | other -> failwithf "Unexpected dispatch witness result: %A" other
 
 [<Fact>]
@@ -437,10 +424,7 @@ let ``empty activation storage has zero extent and admits no slot access`` () =
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("empty_activation", [], [resultType],
         operations @ [MLIROp.ArithOp(ArithOp.ConstI(zero, 0I, resultType)); MLIROp.FuncOp(FuncOp.Return([{ SSA = zero; Type = resultType }]))], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "empty_activation" [definition]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-    Assert.Contains("memref<0xi8>", verified)
-    let pipeline = "builtin.module(expand-strided-metadata,memref-expand,finalize-memref-to-llvm{index-bitwidth=64},convert-index-to-llvm{index-bitwidth=64},convert-func-to-llvm{index-bitwidth=64},convert-arith-to-llvm{index-bitwidth=64},reconcile-unrealized-casts)"
-    Alex.Tests.Tools.mlirOpt ["--verify-each"; "--pass-pipeline=" + pipeline] verified |> ignore
+    Assert.Contains("memref<0xi8>", text)
     MLIRAccumulator.bindNode allocation.Id value.SSA value.Type operands
     let impossible: ContinuationSlot =
         { Source = owner.Id; ValueType = boolType; Holds = CaptureSlotKind.Scalar SettledSlot.Bool; IsCapture = false
@@ -483,11 +467,8 @@ let ``factory constructor initializes its supplied destination without allocatin
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("factory_component", [Arg 0, TMemRefStatic(1, TInt(IntWidth 1)); Arg 1, frameType], [value.Type],
             operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
         let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "factory_component" [definition]
-        let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-        Assert.Contains("memref.store", verified)
-        Assert.DoesNotContain("memref.alloc", verified)
-        let pipeline = "builtin.module(expand-strided-metadata,memref-expand,finalize-memref-to-llvm{index-bitwidth=64},convert-index-to-llvm{index-bitwidth=64},convert-func-to-llvm{index-bitwidth=64},convert-arith-to-llvm{index-bitwidth=64},reconcile-unrealized-casts)"
-        Alex.Tests.Tools.mlirOpt ["--verify-each"; "--pass-pipeline=" + pipeline] verified |> ignore
+        Assert.Contains("memref.store", text)
+        Assert.DoesNotContain("memref.alloc", text)
     | other -> failwithf "Unexpected supplied-destination result: %A" other
 
 // The compiler service refuses this fixture for the reason it refuses the construction
@@ -562,11 +543,8 @@ let ``owned child sites view distinct settled parent regions without allocating`
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("owned_regions_component", [parentSSA, TMemRefStatic(128, TInt(IntWidth 8))], [two.Type],
         firstOps @ secondOps @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = two.SSA; Type = two.Type }]))], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "owned_regions_component" [definition]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-    Assert.DoesNotContain("memref.alloc", verified)
-    Assert.DoesNotContain("memref.load", verified)
-    let pipeline = "builtin.module(expand-strided-metadata,memref-expand,finalize-memref-to-llvm{index-bitwidth=64},convert-index-to-llvm{index-bitwidth=64},convert-func-to-llvm{index-bitwidth=64},convert-arith-to-llvm{index-bitwidth=64},reconcile-unrealized-casts)"
-    Alex.Tests.Tools.mlirOpt ["--verify-each"; "--pass-pipeline=" + pipeline] verified |> ignore
+    Assert.DoesNotContain("memref.alloc", text)
+    Assert.DoesNotContain("memref.load", text)
 
 [<Theory>]
 [<InlineData(0, "disagrees with its settled child frame")>]

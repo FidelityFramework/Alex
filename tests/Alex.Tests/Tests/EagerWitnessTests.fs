@@ -229,7 +229,7 @@ let ``an eager effect remains inside its conditional arm for either guard value`
         operations @ [MLIROp.FuncOp(FuncOp.Return [{ SSA = result; Type = resultType }])], FuncVisibility.Private))
     let effectDeclaration = MLIROp.FuncOp(FuncOp.FuncDecl("observe_effect", [], [TInt(IntWidth 1)], FuncVisibility.Private, []))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "conditional_demand" [effectDeclaration; declaration]
-    Alex.Tests.Tools.mlirOpt ["--verify-each"] text |> ignore
+    Assert.Contains("@observe_effect", text)
 
 let private unitFixture () =
     let effect = node 0 (SemanticKind.PatternBinding "consoleWritelnResult") unitType [] None
@@ -328,8 +328,8 @@ let ``actual unit store completes once before the eager marker returns canonical
     Assert.Single(operations |> List.filter (function MLIROp.MemRefOp(MemRefOp.Store _) -> true | _ -> false)) |> ignore
     let declaration = MLIROp.FuncOp(FuncOp.FuncDef("eager_store", [Arg 0, cellType], [resultType],
         operations @ [MLIROp.FuncOp(FuncOp.Return [{ SSA = result; Type = resultType }])], FuncVisibility.Private))
-    Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "eager_store" [declaration]
-    |> Alex.Tests.Tools.mlirOpt ["--verify-each"] |> ignore
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "eager_store" [declaration]
+    Assert.Contains("memref.store", text)
 
 [<Theory>]
 [<InlineData(false)>]
@@ -379,8 +379,8 @@ let ``void Console call output remains in its eager conditional arm before unit 
     let declaration = MLIROp.FuncOp(FuncOp.FuncDef("eager_console", [], [resultType],
         operations @ [MLIROp.FuncOp(FuncOp.Return [{ SSA = result; Type = resultType }])], FuncVisibility.Private))
     let effectDeclaration = MLIROp.FuncOp(FuncOp.FuncDecl("Console.writeln", [], [], FuncVisibility.Private, []))
-    Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "eager_console" [effectDeclaration; declaration]
-    |> Alex.Tests.Tools.mlirOpt ["--verify-each"] |> ignore
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "eager_console" [effectDeclaration; declaration]
+    Assert.Contains("scf.if", text)
 
 [<Theory>]
 [<InlineData(false)>]

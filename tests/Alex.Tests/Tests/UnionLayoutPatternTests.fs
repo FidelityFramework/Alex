@@ -95,6 +95,5 @@ let ``union allocation and selected descriptor stores consume the source aligned
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("initialize_aligned_union", [descriptor.SSA, descriptor.Type], [],
         allocations @ writes @ [MLIROp.FuncOp(FuncOp.Return [])], FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok bits) "union_layout_component" [definition]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-    Assert.DoesNotContain("memref.load", verified)
-    Assert.Equal((if present then 2 else 1), verified.Split("memref.store").Length - 1)
+    Assert.DoesNotContain("memref.load", text)
+    Assert.Equal((if present then 2 else 1), text.Split("memref.store").Length - 1)

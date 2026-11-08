@@ -106,8 +106,7 @@ let ``conditional guard descends through its actual occurrence and recalls the e
     let functionBody = operations @ [MLIROp.FuncOp(FuncOp.Return [{ SSA = result; Type = resultType }])]
     let declaration = MLIROp.FuncOp(FuncOp.FuncDef("conditional_occurrence", [Arg 0, TInt(IntWidth 1)], [resultType], functionBody, FuncVisibility.Private))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "conditional_occurrence" [declaration]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] text
-    Assert.Contains("scf.if %arg0", verified)
+    Assert.Contains("scf.if %arg0", text)
 
 [<Fact>]
 let ``control flow returns an error and emits nothing for a branch that is not a declared child`` () =

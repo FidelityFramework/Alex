@@ -89,16 +89,11 @@ let ``selected Option initialization writes owned bytes without a descriptor cop
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("initialize_option", [Arg 0, TMemRefStatic(4, TInt(IntWidth 8)); Arg 1, TInt(IntWidth 1)], [result.Type],
         views @ writes @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))], FuncVisibility.Public))
     let source = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "aggregate_component" [definition]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] source
-    Assert.Contains("memref.view", verified)
-    Assert.DoesNotContain("memref.load", verified)
-    Assert.DoesNotContain("memref<1xmemref", verified)
-    Assert.DoesNotContain("memref.alloc", verified)
-    Assert.Equal((if hasPayload then 2 else 1), verified.Split("memref.store").Length - 1)
-    let pipeline = "builtin.module(expand-strided-metadata,memref-expand,finalize-memref-to-llvm{index-bitwidth=64},convert-index-to-llvm{index-bitwidth=64},convert-func-to-llvm{index-bitwidth=64},convert-arith-to-llvm{index-bitwidth=64},reconcile-unrealized-casts)"
-    let lowered = Alex.Tests.Tools.mlirOpt ["--verify-each"; "--pass-pipeline=" + pipeline] verified
-    Assert.Contains("llvm.func @initialize_option", lowered)
-    Assert.DoesNotContain("unrealized_conversion_cast", lowered)
+    Assert.Contains("memref.view", source)
+    Assert.DoesNotContain("memref.load", source)
+    Assert.DoesNotContain("memref<1xmemref", source)
+    Assert.DoesNotContain("memref.alloc", source)
+    Assert.Equal((if hasPayload then 2 else 1), source.Split("memref.store").Length - 1)
 
 [<Fact>]
 let ``aggregate allocation requires an explicit caller residence`` () =

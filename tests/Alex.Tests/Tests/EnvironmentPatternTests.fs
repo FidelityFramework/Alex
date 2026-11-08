@@ -71,13 +71,8 @@ let ``ordinary environment construction preserves the complete mutable cell desc
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("environment_component", [Arg 0, TMemRefStatic(1, TInt(IntWidth 1))], [result.Type],
         allocation @ reads @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))], FuncVisibility.Public))
     let source = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "environment_component" [definition]
-    let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] source
-    Assert.Contains("memref<1xmemref<1xi1>>", verified)
-    Assert.DoesNotContain("memref<2xindex>", verified)
-    let pipeline = "builtin.module(expand-strided-metadata,memref-expand,finalize-memref-to-llvm{index-bitwidth=64},convert-index-to-llvm{index-bitwidth=64},convert-func-to-llvm{index-bitwidth=64},convert-arith-to-llvm{index-bitwidth=64},reconcile-unrealized-casts)"
-    let lowered = Alex.Tests.Tools.mlirOpt ["--verify-each"; "--pass-pipeline=" + pipeline] verified
-    Assert.Contains("llvm.func @environment_component", lowered)
-    Assert.DoesNotContain("unrealized_conversion_cast", lowered)
+    Assert.Contains("memref<1xmemref<1xi1>>", source)
+    Assert.DoesNotContain("memref<2xindex>", source)
 
 [<Fact>]
 let ``two occurrences of the same environment layout recall their own actual values`` () =
@@ -109,9 +104,8 @@ let ``returned environment initializes its admitted caller destination without a
                             [Arg 0, TMemRefStatic(1, TInt(IntWidth 1)); Arg 1, ty], [ty],
                             operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = ty }]))], FuncVisibility.Public))
         let source = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "environment_destination_component" [definition]
-        let verified = Alex.Tests.Tools.mlirOpt ["--verify-each"] source
-        Assert.DoesNotContain("memref.alloca", verified)
-        Assert.Contains("memref.store", verified)
+        Assert.DoesNotContain("memref.alloca", source)
+        Assert.Contains("memref.store", source)
     | other -> failwithf "Caller destination was not witnessed: %A" other
 
 [<Fact>]

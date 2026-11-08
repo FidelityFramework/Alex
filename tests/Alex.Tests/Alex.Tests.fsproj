@@ -22,7 +22,6 @@
 
   <ItemGroup>
     <Compile Include="Build.fs" />
-    <Compile Include="Tools.fs" />
     <Compile Include="Fixtures/*.fs" Condition="'$(OnlyTests)' == ''" />
     <Compile Include="Fixtures/$(WithFixtures).fs" Condition="'$(OnlyTests)' != '' and '$(WithFixtures)' != ''" />
     <Compile Include="Tests/*.fs" Condition="'$(OnlyTests)' == ''" />

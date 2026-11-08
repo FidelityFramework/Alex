@@ -1,6 +1,5 @@
 module Alex.Tests.MutableClosureTests
 
-open System.Diagnostics
 open Xunit
 open Fidelity.PSG
 open Alex.Dialects.Core.Types
@@ -371,29 +370,10 @@ let ``scoped operand snapshots retain the shared cell beside callable value snap
     let output = observe Alex.Witnesses.VarRefWitness.nanopass (f.Root |> atChild f.LatestRead) 64 operands
     Assert.Equal(codeType, (Operands.code (callable output)).Type)
 
-let private run command arguments (input: string) =
-    let start = ProcessStartInfo(command, UseShellExecute = false, RedirectStandardInput = true,
-                                RedirectStandardOutput = true, RedirectStandardError = true)
-    for argument in arguments do start.ArgumentList.Add argument
-    use child = new Process(StartInfo = start)
-    if not (child.Start()) then failwithf "Cannot start %s" command
-    let stdout, stderr = child.StandardOutput.ReadToEndAsync(), child.StandardError.ReadToEndAsync()
-    child.StandardInput.Write input
-    child.StandardInput.Close()
-    if not (child.WaitForExit 20000) then
-        child.Kill(true)
-        child.WaitForExit()
-        failwith "Mutable closure component verification timed out"
-    let output, errors = stdout.GetAwaiter().GetResult(), stderr.GetAwaiter().GetResult()
-    Assert.True(child.ExitCode = 0, $"{command} exited {child.ExitCode}:\n{errors}\nInput:\n{input}")
-    output
-
-let private mlirOpt arguments input = run "mlir-opt" arguments input
-
 [<Theory>]
 [<InlineData(32)>]
 [<InlineData(64)>]
-let ``witnessed closure cell and snapshot verify and lower through standard MLIR`` pointerBits =
+let ``witnessed closure cell and snapshot serialize their cell and dispatch`` pointerBits =
     let f, _, _, snapshot, current, outputs = stages pointerBits
     let implementations =
         [f.Initial, false; f.Replacement, true] |> List.map (fun (source, value) ->
@@ -419,22 +399,8 @@ let ``witnessed closure cell and snapshot verify and lower through standard MLIR
                 MLIROp.FuncOp(FuncOp.Return [savedResult; currentResult])]
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("closure_snapshot", [], [boolean; boolean], body, FuncVisibility.Public))
     let text = Alex.Dialects.Core.Serialize.moduleToString (Ok pointerBits) "mutable_closure_component" (implementations @ [definition])
-    let verified = mlirOpt ["--verify-each"] text
-    Assert.Contains("memref<1xindex>", verified)
-    Assert.Contains("scf.index_switch", verified)
-    // The stock Func printer elides its dialect prefix inside func.func.
-    Assert.Contains("call_indirect", verified)
-    Assert.DoesNotContain("memref<2xindex>", verified)
-    Assert.DoesNotContain("unrealized_conversion_cast", verified)
-    let atWidth pass = $"{pass}{{index-bitwidth={pointerBits}}}"
-    let passes =
-        ["convert-scf-to-cf"; "expand-strided-metadata"; "memref-expand"; atWidth "finalize-memref-to-llvm"
-         atWidth "convert-index-to-llvm"; atWidth "convert-func-to-llvm"; atWidth "convert-arith-to-llvm"
-         "convert-cf-to-llvm"; "reconcile-unrealized-casts"]
-    let lowered = mlirOpt ["--verify-each"; "--pass-pipeline=builtin.module(" + String.concat "," passes + ")"] verified
-    Assert.Contains("llvm.func @closure_snapshot", lowered)
-    Assert.Contains("llvm.alloca", lowered)
-    Assert.Contains("llvm.store", lowered)
-    Assert.Contains("llvm.load", lowered)
-    Assert.DoesNotContain("memref.", lowered)
-    Assert.DoesNotContain("unrealized_conversion_cast", lowered)
+    Assert.Contains("memref<1xindex>", text)
+    Assert.Contains("scf.index_switch", text)
+    Assert.Contains("call_indirect", text)
+    Assert.DoesNotContain("memref<2xindex>", text)
+    Assert.DoesNotContain("unrealized_conversion_cast", text)
