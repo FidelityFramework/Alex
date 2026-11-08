@@ -74,6 +74,26 @@ let ``function code SSA has no implicit packed storage size`` () =
     let error = Assert.Throws<System.Exception>(fun () -> mlirTypeSizeWith (Ok 64) callback |> ignore)
     Assert.Contains("no admitted data-storage layout", error.Message)
 
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``function definition pattern rejects missing or reordered mandatory result components`` reorder =
+    let position = (arrayRead true).Position
+    let supplied = if reorder then [value (V(804, 0)) environment; value (V(804, 1)) callback] else []
+    let pattern = Alex.Patterns.ClosurePatterns.pFunctionDefResults FuncVisibility.Public "required_results" [] None results [] supplied
+    match matchAt pattern position 64 (MLIRAccumulator.empty ()) with
+    | Result.Error message -> Assert.Contains("mismatched result components", message)
+    | Result.Ok _ -> failwith "pFunctionDefResults accepted missing or reordered result components"
+
+[<Fact>]
+let ``indirect application pattern rejects conflicting callable result signature`` () =
+    let position = (arrayRead true).Position
+    let code = value (V(804, 2)) (TFunc([environment], results))
+    let pattern = Alex.Patterns.ApplicationPatterns.pIndirectApplication position.Focus.Id code [value (Arg 0) environment] integer
+    match matchAt pattern position 64 (MLIRAccumulator.empty ()) with
+    | Result.Error message -> Assert.Contains("Callable invocation operands disagree with its witnessed physical signature", message)
+    | Result.Ok _ -> failwith "pIndirectApplication accepted a conflicting callable result signature"
+
 [<Fact>]
 let ``void scalar call cannot silently create a result`` () =
     let position = (arrayRead true).Position

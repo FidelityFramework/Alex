@@ -7,13 +7,17 @@ open Alex.Dialects.Core.Types
 open Alex.Dialects.Core.Serialize
 
 [<Theory>]
-[<InlineData(true, 32)>]
-[<InlineData(false, 32)>]
-[<InlineData(true, 64)>]
-[<InlineData(false, 64)>]
-let ``pattern output serializes the index read`` (unsigned: bool) (pointerBits: int) =
+[<InlineData(true, 32, "index.castu", "index.casts")>]
+[<InlineData(false, 32, "index.casts", "index.castu")>]
+[<InlineData(true, 64, "index.castu", "index.casts")>]
+[<InlineData(false, 64, "index.casts", "index.castu")>]
+let ``pattern output serializes the index read`` (unsigned: bool) (pointerBits: int) (expectedCast: string) (forbiddenCast: string) =
     let text = readModule (arrayRead unsigned) pointerBits
     Assert.Contains("func.func @read_index", text)
+    Assert.Contains(expectedCast, text)
+    Assert.Contains("i8 to index", text)
+    Assert.Contains("memref.load", text)
+    Assert.DoesNotContain(forbiddenCast, text)
     Assert.DoesNotContain("TODO", text)
 
 [<Theory>]
