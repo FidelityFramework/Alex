@@ -87,6 +87,25 @@ let private context graph root frontier site condition conditionType =
       GlobalVisited = visited; TraversalVisited = visited }
 
 [<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``requirement follows the published operand prefix at its actual frontier`` prefixed =
+    // Synthetic positional fixture: CCS source coverage supplies the actual
+    // two-operand memory prefix; this Pattern reads only the published frontier.
+    let graph, root, frontier, site, condition = fixture ()
+    let graph =
+        if not prefixed then graph else
+        let original = graph.Nodes[frontier]
+        let children = condition :: original.Children
+        { graph with Nodes = graph.Nodes.Add(frontier, {original with Kind = SemanticKind.Sequential children; Children = children}) }
+        |> declareTraversalReadings
+    let ctx = context graph root frontier site condition (TInt(IntWidth 1))
+    let output = Alex.Witnesses.RequirementWitness.nanopass.Witness ctx ctx.Zipper.Focus
+    match output.Result with TRValue value -> Assert.Equal(TInt(IntWidth 32),value.Type) | other -> failwithf "Expected witnessed unit: %A" other
+    Assert.Contains(output.InlineOps, fun operation -> operation = MLIROp.Assert(Arg 0,"Pattern match failed"))
+    Assert.Empty output.TopLevelOps
+
+[<Theory>]
 [<InlineData("missing-evidence")>]
 [<InlineData("wrong-order")>]
 [<InlineData("wrong-condition")>]
