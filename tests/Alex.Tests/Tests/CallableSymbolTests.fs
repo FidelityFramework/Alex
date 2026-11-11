@@ -823,7 +823,7 @@ let ``conditional optional entry refuses without assigned tag projection`` () =
   let absent = {present with Construction = NodeId 35; CaseOrdinal = 0; Payload = None; Formation = None; Obligation = NodeId 73}
   let operand: BoundaryOperand =
     { Actual = NodeId 33; Formal = NodeId 71; Abi = BoundaryScalar.Entry(NodeId 72); Adaptation = None
-      OptionalEntry = Some (BoundaryOptionalEntryChoice.Conditional(NodeId 36, present, absent)) }
+      OptionalEntry = Some (BoundaryOptionalEntryChoice.Conditional(NodeId 36, NodeId 37, present, absent)) }
   let changed = {boundary with Calls=boundary.Calls.Add(call.Site, {call with Arguments=[operand]})}
   let graph = {graph with Emission={graph.Emission with Boundary=changed}}
   let accumulator = MLIRAccumulator.empty ()
