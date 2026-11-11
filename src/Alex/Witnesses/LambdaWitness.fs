@@ -84,7 +84,7 @@ let private ordinaryParameterComponents (ctx: WitnessContext) parameters =
                 Alex.Traversal.LazyOperands.componentTypes shape, Lazy shape)
         | Result.Ok(CallableValueShape.Data _) ->
             try Result.Ok([mapTypeAt id ctx], Scalar)
-            with ex -> Result.Error ex.Message)
+            with ex -> Result.Error (Alex.Text.exceptionMessage ex))
     match groups |> List.tryPick (function Result.Error reason -> Some reason | _ -> None) with
     | Some reason -> Result.Error reason
     | None -> Result.Ok(groups |> List.choose (function Result.Ok group -> Some group | _ -> None))
@@ -101,7 +101,7 @@ let private parameterComponents (ctx: WitnessContext) parameters =
                 Result.Error "Closed native implementation omitted or reordered an original formal."
             else
                 try Result.Ok(signature.Parameters |> List.map (fun scalar -> [BoundaryAbi.scalarType scalar], Scalar))
-                with ex -> Result.Error ex.Message)
+                with ex -> Result.Error (Alex.Text.exceptionMessage ex))
 
 // ═══════════════════════════════════════════════════════════
 // CATEGORY-SELECTIVE WITNESS (Private)
@@ -391,13 +391,13 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                         let bodyNodeKindStr =
                             match Revision.tryNode actualValueNode ctx.Graph with
                             | Some bodyNode ->
-                                let kindStr = sprintf "%A" bodyNode.Kind |> fun s -> s.Split('\n').[0]
+                                let kindStr = sprintf "%A" bodyNode.Kind |> Alex.Text.firstLine
                                 sprintf "Body node %d is %s" (NodeId.value actualValueNode) kindStr
                             | None ->
                                 sprintf "Body node %d not found in graph" (NodeId.value actualValueNode)
                         let hint =
                             match Revision.tryNode actualValueNode ctx.Graph with
-                            | Some bodyNode when bodyNode.Kind.ToString().StartsWith("Lambda") ->
+                            | Some { Kind = SemanticKind.Lambda _ } ->
                                 " [Nested callable return requires witnessed operands from its settled source carrier.]"
                             | _ -> ""
                         let err = Diagnostic.error (Some node.Id) (Some "Lambda") (Some (sprintf "%s return" funcName))

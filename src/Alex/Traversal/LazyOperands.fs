@@ -36,7 +36,7 @@ let project (ctx: WitnessContext) occurrence : Result<Shape, string> =
                 let results = if result = TVoid then [] else [result]
                 Result.Ok { Occurrence = occurrence; Layout = layout; EnvironmentType = environment
                             FunctionType = TFunc([environment], results) }
-            with ex -> Result.Error ex.Message
+            with ex -> Result.Error (Alex.Text.exceptionMessage ex)
         | _ -> Result.Error "Lazy occurrence has no source-published thunk boundary."
     else Result.Error "Lazy occurrence has no complete source layout and lifetime contract."
 

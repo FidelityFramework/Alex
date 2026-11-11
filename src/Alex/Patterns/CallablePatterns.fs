@@ -65,7 +65,7 @@ let pCallableValue occurrence (shape: Operands.Shape) symbol (environment: Val o
 /// actual source operands. Binding the result remains the traversal's job.
 let pCallableForward (ctx: WitnessContext) source : PSGParser<MLIROp list * TransferResult> = parser {
     let! state = getUserState
-    do! ensure (state.Current.Id = ctx.Zipper.Focus.Id && obj.ReferenceEquals(state.Zipper, ctx.Zipper))
+    do! ensure (state.Current.Id = ctx.Zipper.Focus.Id && (LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper)))
             "Callable forwarding requires the current Huet occurrence."
     match Operands.reproject ctx source state.Current.Id with
     | Result.Ok value -> return [], TRCallable value
@@ -79,7 +79,7 @@ let pCallableConditional (ctx: WitnessContext) (condition: Val)
                          thenId thenOps elseId elseOps : PSGParser<MLIROp list * TransferResult> = parser {
     let! state = getUserState
     let occurrence = state.Current.Id
-    do! ensure (occurrence = ctx.Zipper.Focus.Id && obj.ReferenceEquals(state.Zipper, ctx.Zipper))
+    do! ensure (occurrence = ctx.Zipper.Focus.Id && (LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper)))
             "Callable conditional requires its actual Huet occurrence."
     do! ensure (match state.Current.Kind with
                 | SemanticKind.IfThenElse(_, yes, Some no) -> yes = thenId && no = elseId
@@ -121,10 +121,10 @@ let pCallableConditional (ctx: WitnessContext) (condition: Val)
 
 let private pProgramInstance (ctx: WitnessContext) binding = parser {
     let! state = getUserState
-    do! ensure (obj.ReferenceEquals(state.Graph, ctx.Graph)
-                && obj.ReferenceEquals(ctx.Graph, ctx.Zipper.Graph)
+    do! ensure ((LanguagePrimitives.PhysicalEquality (state.Graph) (ctx.Graph))
+                && (LanguagePrimitives.PhysicalEquality (ctx.Graph) (ctx.Zipper.Graph))
                 && (ctx.Graph.Nodes.TryFind state.Current.Id
-                    |> Option.exists (fun current -> obj.ReferenceEquals(state.Current, current))))
+                    |> Option.exists (fun current -> (LanguagePrimitives.PhysicalEquality (state.Current) (current)))))
             "Program callable evidence must belong to the current graph occurrence."
     let! instance =
         match state.Graph.Emission.Callable.ProgramInstances.TryFind binding with
@@ -157,7 +157,7 @@ let pProgramCallableBinding (ctx: WitnessContext) source = parser {
 let pProgramCallableReference (ctx: WitnessContext) binding = parser {
     let! state = getUserState
     let occurrence = state.Current.Id
-    do! ensure (occurrence = ctx.Zipper.Focus.Id && obj.ReferenceEquals(state.Zipper, ctx.Zipper))
+    do! ensure (occurrence = ctx.Zipper.Focus.Id && (LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper)))
             "Program callable reference requires its actual Huet occurrence."
     do! ensure (match state.Current.Kind with SemanticKind.VarRef(_, Some source) -> source = binding | _ -> false)
             "Program callable reference lacks its actual source binding."
@@ -183,7 +183,7 @@ let pProgramCallableReference (ctx: WitnessContext) binding = parser {
 /// receives an ordinary func.constant with the settled physical signature.
 let pNamedCallable (ctx: WitnessContext) : PSGParser<MLIROp list * TransferResult> = parser {
     let! state = getUserState
-    do! ensure (state.Current.Id = ctx.Zipper.Focus.Id && obj.ReferenceEquals(state.Zipper, ctx.Zipper))
+    do! ensure (state.Current.Id = ctx.Zipper.Focus.Id && (LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper)))
             "Named callable requires the current Huet occurrence."
     let! shape =
         match Operands.project ctx state.Current.Id with

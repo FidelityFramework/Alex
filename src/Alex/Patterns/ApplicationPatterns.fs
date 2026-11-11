@@ -136,7 +136,7 @@ let pDirectCall (nodeId: NodeId) (funcName: string) (args: (SSA * MLIRType) list
                     fail (Message $"CCS source checking did not settle the declared port names for hw.instance of '{funcName}' at node {NodeId.value nodeId}")
             let inputs = List.map2 (fun pname (v: Val) -> (pname, v.SSA, v.Type)) names finalVals
             let outputs = [("result", retType)]
-            let instName = funcName.Replace(".", "_") + "_inst"
+            let instName = (funcName |> String.map (function '.' -> '_' | c -> c)) + "_inst"
             let! instanceOp = Alex.Elements.HWElements.pHWInstance resultSSA instName funcName inputs outputs
             return (castOps @ [instanceOp], TRValue { SSA = resultSSA; Type = retType })
         | _ ->

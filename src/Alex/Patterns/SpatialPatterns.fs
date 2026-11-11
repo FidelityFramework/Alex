@@ -12,7 +12,7 @@ open Fidelity.PSG
 
 let pPublishedSpatialModule : PSGParser<MLIROp list * TransferResult> = parser {
     let! state = getUserState
-    do! ensure (state.Current.Id=state.Zipper.Focus.Id && obj.ReferenceEquals(state.Graph,state.Zipper.Graph))
+    do! ensure (state.Current.Id=state.Zipper.Focus.Id && (LanguagePrimitives.PhysicalEquality (state.Graph) (state.Zipper.Graph)))
                "Spatial declaration witnessing requires the exact current source occurrence and Huet zipper."
     let projection = state.Graph.Emission.Spatial
     let plan =

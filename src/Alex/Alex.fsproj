@@ -17,7 +17,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="AssemblyInfo.fs" />
+    <InternalsVisibleTo Include="Alex.Tests" />
+    <Compile Include="Text.fs" />
     <Compile Include="Target.fs" />
     <Compile Include="Dialects/Core/Types.fs" />
     <Compile Include="Dialects/Core/Serialize.fs" />

@@ -449,7 +449,7 @@ let pDUCaseAt (nodeId: NodeId) (destination: Val) (identity: TypeIdentity) (tag:
 
         // Insert tag at byte offset 0 via reinterpret_cast (same element type: i8→i8)
         let tagTy = TInt (IntWidth 8)  // DU tags are always i8
-        let! tagConstOp = pConstI (s 1) (bigint tag) tagTy
+        let! tagConstOp = pConstI (s 1) ((NumericLiteralI.FromString (string tag))) tagTy
         let! insertTagOps = pTypedInsert destination.SSA (s 1) 0 (s 2) (s 3) tagTy ty
 
         // Insert payload fields at the settled payload offset (after the tag) via memref.view

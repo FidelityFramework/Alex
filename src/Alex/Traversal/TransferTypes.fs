@@ -77,22 +77,24 @@ module ExecutionTrace =
         sprintf "%s%s%s(%s)" indent nodeInfo trace.ComponentName trace.Parameters
 
 /// Trace collector - mutable accumulator for execution traces
-type TraceCollector = ResizeArray<ExecutionTrace>
+type TraceCollector = (int * ExecutionTrace list) ref
 
 module TraceCollector =
-    let create () : TraceCollector = ResizeArray<ExecutionTrace>()
+    let create () : TraceCollector = ref (0, [])
     
     let add (depth: int) (componentName: string) (nodeId: NodeId option) (parameters: string) (collector: TraceCollector) =
-        collector.Add({
+        let count, entries = collector.Value
+        let entry = {
             Depth = depth
             ComponentName = componentName
             NodeId = nodeId
             Parameters = parameters
-            Timestamp = collector.Count
-        })
+            Timestamp = count
+        }
+        collector.Value <- count + 1, entry :: entries
     
     let toList (collector: TraceCollector) : ExecutionTrace list =
-        collector |> Seq.toList
+        collector.Value |> snd |> List.rev
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STRUCTURED DIAGNOSTICS
@@ -506,8 +508,8 @@ module MLIRAccumulator =
 
     let completedVoid (position: PSGZipper) scope (acc: MLIRAccumulator) =
         acc.VoidAssoc.TryFind position.Focus.Id |> Option.exists (fun completion ->
-            obj.ReferenceEquals(completion.Graph, position.Graph) &&
-            obj.ReferenceEquals(completion.Scope, scope) &&
+            (LanguagePrimitives.PhysicalEquality (completion.Graph) (position.Graph)) &&
+            (LanguagePrimitives.PhysicalEquality (completion.Scope) (scope)) &&
             completion.Path = occurrencePath position)
 
     let snapshotOperands (acc: MLIRAccumulator) =
@@ -699,9 +701,9 @@ module EmissionCorrespondence =
                 { Scope = scope; Focus = ctx.Zipper.Focus
                   Anchor = ctx.Zipper.Path |> List.tryLast |> Option.map _.Parent |> Option.defaultValue ctx.Zipper.Focus.Id
                   Path = ctx.Zipper.Path }
-            if not (System.Object.ReferenceEquals(ctx.Graph, Alex.Correspondence.graph scope)) then
+            if not ((LanguagePrimitives.PhysicalEquality (ctx.Graph) (Alex.Correspondence.graph scope))) then
                 Result.Error "Witness result capture scope belongs to a different checked graph"
-            elif not (System.Object.ReferenceEquals(ctx.Graph, ctx.Zipper.Graph)) then
+            elif not ((LanguagePrimitives.PhysicalEquality (ctx.Graph) (ctx.Zipper.Graph))) then
                 Result.Error "Witness zipper and context refer to different checked graphs"
             else Alex.Correspondence.validateOccurrence scope at |> Result.map (fun () -> at)
 
@@ -747,7 +749,7 @@ module ModuleValues =
     let globalName (bindingName: string) (bindingId: NodeId) : string =
         let sanitized =
             bindingName
-            |> String.map (fun c -> if System.Char.IsLetterOrDigit c || c = '_' then c else '_')
+            |> String.map (fun c -> if (Alex.Text.isAsciiLetter c || Alex.Text.isAsciiDigit c) || c = '_' then c else '_')
         sprintf "__clef_module_value_%s_%d" sanitized (NodeId.value bindingId)
 
 // ═══════════════════════════════════════════════════════════════════════════

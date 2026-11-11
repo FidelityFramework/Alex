@@ -17,8 +17,8 @@ module Zipper = Alex.Traversal.PSGZipper
 
 let pEagerValue (ctx: WitnessContext) = parser {
     let! state = getUserState
-    do! ensure (obj.ReferenceEquals(state.Zipper, ctx.Zipper)
-                && obj.ReferenceEquals(ctx.Graph, ctx.Zipper.Graph)
+    do! ensure ((LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper))
+                && (LanguagePrimitives.PhysicalEquality (ctx.Graph) (ctx.Zipper.Graph))
                 && state.Current.Id = ctx.Zipper.Focus.Id)
             "Explicit demand must retain its actual zipper occurrence."
     let! operand =

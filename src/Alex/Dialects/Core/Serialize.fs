@@ -9,21 +9,55 @@ open Alex.Dialects.Core.Types
 
 /// Text escapes remain portable. Quoted data, symbols and comments are not
 /// dialect operations; a quoted generic operation is identified by its operands.
-let private portableTokens =
-    System.Text.RegularExpressions.Regex(
-        "(?<comment>//[^\\r\\n]*)|(?<symbol>@(?:\"(?:\\\\[\\s\\S]|[^\"])*\"|[A-Za-z_][A-Za-z0-9_$.]*))|(?<quoted>\"(?:\\\\[\\s\\S]|[^\"])*\")|(?<backend>!llvm(?=[.<])|(?<![\\w$.])llvm\\.[A-Za-z_][A-Za-z0-9_.]*)|(?<other>[^\\s])")
-
 let private portableText (text: string) =
     let refuse () = invalidArg "text" "ALEX004: LLVM dialect constructs belong to backend realization, never Alex portable output."
-    portableTokens.Matches text
-    |> Seq.cast<System.Text.RegularExpressions.Match>
-    |> Seq.fold (fun quotedOperation token ->
-        if token.Groups.["comment"].Success then quotedOperation
-        else
-            if token.Groups.["backend"].Success || (quotedOperation && token.Value = "(") then refuse ()
-            token.Groups.["quoted"].Success
-            && System.Text.RegularExpressions.Regex.IsMatch(token.Value, "^\"llvm\\.[A-Za-z_][A-Za-z0-9_.]*\"$")) false
-    |> ignore
+    let length = String.length text
+    let at position token =
+        position + String.length token <= length
+        && (token |> String.mapi (fun offset c -> if text[position + offset] = c then '1' else '0') |> String.forall ((=) '1'))
+    let identifier c = Alex.Text.isAsciiLetter c || Alex.Text.isAsciiDigit c || c = '_' || c = '.' || c = '$'
+    let rec skip predicate position =
+        if position < length && predicate text[position] then skip predicate (position + 1) else position
+    let hex c =
+        if '0' <= c && c <= '9' then Some(int c - int '0')
+        elif 'a' <= c && c <= 'f' then Some(int c - int 'a' + 10)
+        elif 'A' <= c && c <= 'F' then Some(int c - int 'A' + 10)
+        else None
+    let rec quoted position reversed =
+        if position >= length then invalidArg "text" "Unterminated quoted MLIR token."
+        match text[position] with
+        | '"' -> position + 1, reversed |> List.rev |> String.concat ""
+        | '\\' when position + 1 < length ->
+            match hex text[position + 1], (if position + 2 < length then hex text[position + 2] else None) with
+            | Some high, Some low -> quoted (position + 3) (string (char (high * 16 + low)) :: reversed)
+            | _ -> quoted (position + 2) (string text[position + 1] :: reversed)
+        | c -> quoted (position + 1) (string c :: reversed)
+    let backendOperation token =
+        Alex.Text.startsWith "llvm." token
+        && String.length token > 5
+        && (Alex.Text.isAsciiLetter token[5] || token[5] = '_')
+    let rec scan position quotedOperation =
+        if position < length then
+            if at position "//" then scan (skip (fun c -> c <> '\r' && c <> '\n') (position + 2)) quotedOperation
+            elif Alex.Text.isWhitespace text[position] then scan (position + 1) quotedOperation
+            elif at position "!llvm." || at position "!llvm<" then refuse ()
+            elif text[position] = '@' then
+                let finish =
+                    if position + 1 < length && text[position + 1] = '"' then quoted (position + 2) [] |> fst
+                    else skip identifier (position + 1)
+                scan finish false
+            elif text[position] = '"' then
+                let finish, token = quoted (position + 1) []
+                scan finish (backendOperation token)
+            elif identifier text[position] then
+                let finish = skip identifier position
+                let token = String.init (finish - position) (fun offset -> string text[position + offset])
+                if backendOperation token then refuse ()
+                scan finish false
+            else
+                if quotedOperation && text[position] = '(' then refuse ()
+                scan (position + 1) false
+    scan 0 false
     text
 
 exception private TargetRealizationRequired of string
@@ -32,12 +66,23 @@ exception private TargetRealizationRequired of string
 /// carry an apostrophe (`process'`), which is legal in F# and in the linked ELF symbol but not
 /// in a bare MLIR id; it is spelled `$` in the symbol (a character no Clef name contains).
 let symbolName (name: string) : string =
-    name |> String.map (fun c -> if c = '\'' then '$' elif System.Char.IsLetterOrDigit c || c = '_' || c = '.' || c = '$' then c else '_')
+    name |> String.map (fun c -> if c = '\'' then '$' elif (Alex.Text.isAsciiLetter c || Alex.Text.isAsciiDigit c) || c = '_' || c = '.' || c = '$' then c else '_')
 
 /// MLIR string attributes carry bytes. Escape non-printable and non-ASCII UTF8
 /// bytes as two hexadecimal digits, preserving embedded NUL and line breaks.
 let private stringAttributeValue (value: string) =
-    System.Text.UTF8Encoding(false, true).GetBytes(value)
+    let rec validate position =
+        if position < String.length value then
+            let c = int value[position]
+            if 0xD800 <= c && c <= 0xDBFF then
+                if position + 1 >= String.length value || int value[position + 1] < 0xDC00 || int value[position + 1] > 0xDFFF then
+                    invalidArg "value" "String attribute contains an unpaired UTF-16 surrogate."
+                validate (position + 2)
+            elif 0xDC00 <= c && c <= 0xDFFF then
+                invalidArg "value" "String attribute contains an unpaired UTF-16 surrogate."
+            else validate (position + 1)
+    validate 0
+    BAREWire.Encoding.Text.toUtf8 value
     |> Array.map (fun value ->
         if value >= 32uy && value <= 126uy && value <> 34uy && value <> 92uy then string (char value)
         else sprintf "\\%02X" value)
@@ -178,7 +223,7 @@ let fcmpPredToString (pred: FCmpPred) : string =
 let arithOpToString (pointer: Result<int, string>) (op: ArithOp) : string =
     match op with
     | ConstI (result, value, ty) ->
-        sprintf "%s = arith.constant %s : %s" (ssaToString result) (value.ToString(System.Globalization.CultureInfo.InvariantCulture)) (typeToString pointer ty)
+        sprintf "%s = arith.constant %s : %s" (ssaToString result) (string value) (typeToString pointer ty)
     | ConstF (result, value, ty) ->
         sprintf "%s = arith.constant %f : %s" (ssaToString result) value (typeToString pointer ty)
     | AddI (result, lhs, rhs, ty) ->
@@ -349,7 +394,7 @@ let smtOpToString (pointer: Result<int, string>) (inner: MLIROp -> string) (op: 
     | SMTIntConstant (result, value) ->
         sprintf "%s = smt.int.constant %d" (ssaToString result) value
     | SMTBigIntConstant (result, value) ->
-        sprintf "%s = smt.int.constant %s" (ssaToString result) (value.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        sprintf "%s = smt.int.constant %s" (ssaToString result) (string value)
     | SMTBVConstant (result, value, width) ->
         sprintf "%s = smt.bv.constant #smt.bv<%d> : !smt.bv<%d>" (ssaToString result) value width
     | SMTIntAdd (result, lhs, rhs) ->
@@ -513,7 +558,7 @@ type ContainerPart =
 
 let private withArgumentNames arguments text =
     arguments |> List.indexed |> List.rev
-    |> List.fold (fun (body: string) (index, name) -> body.Replace(sprintf "%%arg%d" index, sprintf "%%%s" name)) text
+    |> List.fold (fun body (index, name) -> Alex.Text.replace (sprintf "%%arg%d" index) (sprintf "%%%s" name) body) text
 
 let containerFrame pointer = function
     | MLIROp.HWOp(HWModule(name, inputs, outputs, body)) ->
@@ -624,7 +669,7 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
         // Emit memref.global (portable MLIR) with null sentinel byte for C interop.
         // Clef strings are (ptr, length) — the sentinel is a storage detail invisible
         // to the type system, ensuring .Pointer yields C-compatible null-terminated data.
-        let bytes = System.Text.Encoding.UTF8.GetBytes(content)
+        let bytes = BAREWire.Encoding.Text.toUtf8 content
         let bytesWithSentinel = Array.append bytes [| 0uy |]
         let denseStr = bytesWithSentinel |> Array.map (sprintf "%d") |> String.concat ", "
         // The obligations constraining this storage, reified on the op as a
@@ -709,9 +754,9 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
                 | Fidelity.PSG.NativeLiteral.UInt(value, _) -> string value
                 | Fidelity.PSG.NativeLiteral.Bool value -> if value then "true" else "false"
                 | Fidelity.PSG.NativeLiteral.Char value -> string (int value)
-                | Fidelity.PSG.NativeLiteral.Float(value, _) when System.Double.IsFinite value ->
-                    let text = value.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
-                    if text.Contains('.') || text.Contains('E') || text.Contains('e') then text else text + ".0"
+                | Fidelity.PSG.NativeLiteral.Float(value, _) when value > -infinity && value < infinity ->
+                    let text = sprintf "%.17g" value
+                    if text |> String.exists (fun c -> c = '.' || c = 'E' || c = 'e') then text else text + ".0"
                 | other -> invalidOp (sprintf "Unsupported published array initializer: %A" other))
         sprintf "memref.global \"private\" constant @%s : %s = dense<[%s]> {alignment = %d : i64}"
             name (typeToString pointer memrefType) (String.concat ", " values) authority.Alignment
@@ -788,10 +833,10 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
 /// stop says which value had no width rather than only that one did.
 let private opToStringNamed (pointer: Result<int, string>) (op: MLIROp) : string =
     try opToString pointer op |> portableText
-    with ex when ex.Message.StartsWith "Width inference failure" ->
+    with Failure message when Alex.Text.startsWith "Width inference failure" message ->
         let rendered = sprintf "%A" op
-        let shown = if rendered.Length > 400 then rendered.Substring(0, 400) + " ..." else rendered
-        failwith (ex.Message + "\nWhile serialising: " + shown)
+        let shown = if String.length rendered > 400 then String.init 400 (fun i -> string rendered[i]) + " ..." else rendered
+        failwith (message + "\nWhile serialising: " + shown)
 
 let opsToString (pointer: Result<int, string>) (ops: MLIROp list) (indent: string) : string =
     ops

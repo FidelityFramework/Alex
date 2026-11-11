@@ -312,7 +312,7 @@ let private pBuildMultipleMatchElimination
                             let cmpSSA = allSSAs.[1 + 2 * armIdx + 1]
                             parser {
                                 let! tagIndex = pArmDiscriminant arm.Pattern
-                                let! tagLitOp = pConstI tagLitSSA (bigint tagIndex) scrutineeType
+                                let! tagLitOp = pConstI tagLitSSA ((NumericLiteralI.FromString (string tagIndex))) scrutineeType
                                 let! cmpOp = pCombICmp cmpSSA ICmpPred.Eq scrutineeSSA tagLitSSA scrutineeType
                                 return! buildComparisons (armIdx + 1) ((tagLitOp, cmpOp, cmpSSA) :: acc)
                             }
@@ -451,7 +451,7 @@ let private pBuildMultipleMatchElimination
                         let cmpSSA = allSSAs.[ssaOffset + 1]
                         ssaOffset <- ssaOffset + 2
 
-                        let tagLitOp = MLIROp.ArithOp (ArithOp.ConstI (tagLitSSA, bigint tagIndex, tagTy))
+                        let tagLitOp = MLIROp.ArithOp (ArithOp.ConstI (tagLitSSA, (NumericLiteralI.FromString (string tagIndex)), tagTy))
                         let cmpOp = MLIROp.ArithOp (ArithOp.CmpI (cmpSSA, ICmpPred.Eq, tagSSA, tagLitSSA, tagTy))
 
                         let thenOps =

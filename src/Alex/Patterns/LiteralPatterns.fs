@@ -35,15 +35,15 @@ let pBuildLiteral (lit: NativeLiteral) (ssa: SSA) (_arch: Architecture) : PSGPar
             return ([op], TRValue { SSA = ssa; Type = ty })
 
         | NativeLiteral.Int (n, kind) ->
-            let! op = pConstI ssa (bigint n) ty
+            let! op = pConstI ssa ((NumericLiteralI.FromString (string n))) ty
             return ([op], TRValue { SSA = ssa; Type = ty })
 
         | NativeLiteral.UInt (n, kind) ->
-            let! op = pConstI ssa (bigint n) ty
+            let! op = pConstI ssa ((NumericLiteralI.FromString (string n))) ty
             return ([op], TRValue { SSA = ssa; Type = ty })
 
         | NativeLiteral.Char c ->
-            let! op = pConstI ssa (bigint (int c)) ty
+            let! op = pConstI ssa ((NumericLiteralI.FromString (string (int c)))) ty
             return ([op], TRValue { SSA = ssa; Type = ty })
 
         | NativeLiteral.Float (f, kind) ->
@@ -79,20 +79,6 @@ let pWithUnitResult (nodeId: NodeId) (body: PSGParser<MLIROp list * TransferResu
 // ═══════════════════════════════════════════════════════════
 // STRING PATTERNS
 // ═══════════════════════════════════════════════════════════
-
-/// Derive global reference name from string content (pure, deterministic)
-/// Uses FNV-1a hash — .NET String.GetHashCode() is randomized per-process.
-let deriveGlobalRef (content: string) : string =
-    let bytes = System.Text.Encoding.UTF8.GetBytes(content)
-    let mutable hash = 2166136261u  // FNV offset basis
-    for b in bytes do
-        hash <- hash ^^^ (uint32 b)
-        hash <- hash * 16777619u    // FNV prime
-    sprintf "str_%u" hash
-
-/// Derive byte length from string content (pure)
-let deriveByteLength (content: string) : int =
-    System.Text.Encoding.UTF8.GetByteCount(content)
 
 /// Read the settled pool and entry directly; no string encoding or placement occurs here.
 let stringPoolView (pool: Fidelity.PSG.StaticStringPool)

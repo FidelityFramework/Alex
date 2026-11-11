@@ -47,7 +47,7 @@ let private validateCoverageWith
         let message =
             match graph.Nodes.TryFind identity with
             | Some node ->
-                let kindSummary = node.Kind.ToString().Split('\n').[0]
+                let kindSummary = sprintf "%A" node.Kind |> Alex.Text.firstLine
                 sprintf "Alex traversal did not witness required PSG occurrence '%s' (ID %d): no declaration root or structural parent placed it, or no witness claims its kind." kindSummary (NodeId.value identity)
             | None ->
                 match graph.SourceReadings.ContextHeaders.TryFind identity with

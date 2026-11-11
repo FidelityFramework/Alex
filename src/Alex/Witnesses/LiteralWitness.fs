@@ -43,7 +43,7 @@ let private witnessLiteralNode (ctx: WitnessContext) (node: SemanticNode) : Witn
                     // literal bodies need not be resident to spell the shared allocation.
                     let anchors = ctx.Graph.Emission.Storage.LiteralPoolAnchors
                     if anchors.Length <> (Set.ofList anchors).Count ||
-                       (anchors |> List.exists System.String.IsNullOrWhiteSpace) ||
+                       (anchors |> List.exists Alex.Text.isBlank) ||
                        (node.ObligationAnchors |> List.exists (fun anchor -> not (List.contains anchor anchors))) then
                         WitnessOutput.errorDiag (Diagnostic.error (Some node.Id) (Some "Literal") (Some "StaticStringPool")
                             "PSG settlement (StaticStringPool) lacks the complete source-owned allocation obligation inventory for this literal.")
