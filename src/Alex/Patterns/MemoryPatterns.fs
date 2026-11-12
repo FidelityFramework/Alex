@@ -449,7 +449,7 @@ let pDUCaseAt (nodeId: NodeId) (destination: Val) (identity: TypeIdentity) (tag:
 
         // Insert tag at byte offset 0 via reinterpret_cast (same element type: i8→i8)
         let tagTy = TInt (IntWidth 8)  // DU tags are always i8
-        let! tagConstOp = pConstI (s 1) (bigint tag) tagTy
+        let! tagConstOp = pConstI (s 1) ((NumericLiteralI.FromString (string tag))) tagTy
         let! insertTagOps = pTypedInsert destination.SSA (s 1) 0 (s 2) (s 3) tagTy ty
 
         // Insert payload fields at the settled payload offset (after the tag) via memref.view
@@ -640,6 +640,21 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
     let memory = state.Graph.Emission.Memory
     match memory.Operations.TryFind state.Current.Id with
     | None -> return! fail (Message "Memory operation lacks its source-published contract.")
+    | Some (MemoryWitnessOperation.LocalScalar cell) ->
+        do! ensure (cell.Site=state.Current.Id && (match cell.Residence with MemoryResidence.Stack _ -> true | _ -> false))
+                "Local scalar lacks its exact source activation account."
+        let! element = pMemorySlot cell.Element
+        let! initial, initialType = pRecallNode cell.Initializer
+        let adaptation = state.Graph.Codata.Meets.TryFind cell.Site |> Option.defaultValue [] |> List.filter (fun meet -> meet.Operand=cell.Initializer)
+        let! meet = match adaptation with [] -> preturn None | [meet] -> preturn(Some meet) | _ -> fail(Message "Ambiguous local scalar initializer meet.")
+        let! conversions, value = pPublishedAdapt cell.Site cell.Initializer meet {SSA=initial;Type=initialType}
+        do! ensure (value.Type=element) "Local scalar initializer differs from its settled element."
+        let! ssas = getNodeSSAs cell.Site
+        do! ensure (ssas.Length>=2) "Local scalar lacks its source value names."
+        let! allocation = pAlloca ssas.[0] 1 element None
+        let! zero = pIndexConst ssas.[1] 0L
+        let! store = pStore value.SSA ssas.[0] [ssas.[1]] element (TMemRefStatic(1,element))
+        return conversions @ [allocation;zero;store],[],TRValue {SSA=ssas.[0];Type=TMemRef element}
     | Some (MemoryWitnessOperation.EmptySnapshot empty) ->
         do! ensure (empty.Site = state.Current.Id) "Empty snapshot names a different source producer."
         let! construction =

@@ -238,7 +238,7 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
                     elif account.IsProgramSlotIntent then
                         // Module-level value: reload from its slot (valid in any function)
                         // the slot's element type at the binding's range width on fabric
-                        let represented = try Result.Ok(mapTypeAt bindingId ctx) with ex -> Result.Error ex.Message
+                        let represented = try Result.Ok(mapTypeAt bindingId ctx) with ex -> Result.Error (Alex.Text.exceptionMessage ex)
                         match represented with
                         | Result.Error reason ->
                             WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "VarRef") (Some "program storage")

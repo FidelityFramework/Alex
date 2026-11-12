@@ -66,6 +66,18 @@ let private context graph position visited =
       GlobalVisited = visited; TraversalVisited = visited }
 
 [<Fact>]
+let ``witness scope requires both original run and original graph identities`` () =
+    let value = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
+    let graph = single value
+    let scope = Alex.Correspondence.beginWholeGraphWitness graph
+    Assert.True(Alex.Correspondence.sameScope scope scope)
+    for _ in 1 .. 100 do
+        Assert.False(Alex.Correspondence.sameScope scope (Alex.Correspondence.beginWholeGraphWitness graph))
+    let copy = { graph with Nodes = graph.Nodes }
+    let forged = Alex.Correspondence.WholeCheckedGraph(Alex.Correspondence.witnessRun scope, copy)
+    Assert.False(Alex.Correspondence.sameScope scope forged)
+
+[<Fact>]
 let ``witness result capture refuses a missing run scope without creating one`` () =
     let value = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
     let graph = single value

@@ -20,7 +20,7 @@ let isSequenceValue (ctx: WitnessContext) (node: SemanticNode) =
 
 let private atOccurrence (ctx: WitnessContext) = parser {
     let! state = getUserState
-    do! ensure (state.Current.Id = ctx.Zipper.Focus.Id && obj.ReferenceEquals(state.Zipper, ctx.Zipper))
+    do! ensure (state.Current.Id = ctx.Zipper.Focus.Id && (LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper)))
             "Sequence transport requires its actual Huet occurrence."
     return state.Current.Id
 }
@@ -35,8 +35,8 @@ let pSequenceForward (ctx: WitnessContext) source : PSGParser<MLIROp list * Tran
 let private pProgramInstance (ctx: WitnessContext) binding = parser {
     let! occurrence = atOccurrence ctx
     let! state = getUserState
-    do! ensure (obj.ReferenceEquals(state.Graph, ctx.Graph) && obj.ReferenceEquals(ctx.Graph, ctx.Zipper.Graph) &&
-                (ctx.Graph.Nodes.TryFind occurrence |> Option.exists (fun current -> obj.ReferenceEquals(current, state.Current))))
+    do! ensure ((LanguagePrimitives.PhysicalEquality (state.Graph) (ctx.Graph)) && (LanguagePrimitives.PhysicalEquality (ctx.Graph) (ctx.Zipper.Graph)) &&
+                (ctx.Graph.Nodes.TryFind occurrence |> Option.exists (fun current -> (LanguagePrimitives.PhysicalEquality (current) (state.Current)))))
             "Program sequence evidence belongs to a different graph occurrence."
     let! instance =
         match state.Graph.Emission.Storage.SequencePrograms.TryFind binding with

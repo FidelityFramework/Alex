@@ -94,7 +94,7 @@ let pLazyValue occurrence (shape: Operands.Shape) symbol (environment: Val) = pa
 
 let pLazyForward (ctx: WitnessContext) source = parser {
     let! state = getUserState
-    do! ensure (state.Current.Id = ctx.Zipper.Focus.Id && obj.ReferenceEquals(state.Zipper, ctx.Zipper))
+    do! ensure (state.Current.Id = ctx.Zipper.Focus.Id && (LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper)))
             "Lazy forwarding requires the current Huet occurrence."
     match Operands.reproject ctx source state.Current.Id with
     | Result.Ok value -> return [], TRLazy value
@@ -120,7 +120,7 @@ let pProgramLazyBinding (ctx: WitnessContext) source = parser {
 let pProgramLazyReference (ctx: WitnessContext) binding = parser {
     let! state = getUserState
     let occurrence = ctx.Zipper.Focus.Id
-    do! ensure (state.Current.Id = occurrence && obj.ReferenceEquals(state.Zipper, ctx.Zipper))
+    do! ensure (state.Current.Id = occurrence && (LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper)))
             "Program lazy reference requires its actual Huet occurrence."
     let! shape =
         match Operands.project ctx occurrence with
@@ -143,7 +143,7 @@ let pProgramLazyReference (ctx: WitnessContext) binding = parser {
 let private pLazySwitch (ctx: WitnessContext) selector cases otherwise = parser {
     let! state = getUserState
     let occurrence = state.Current.Id
-    do! ensure (occurrence = ctx.Zipper.Focus.Id && obj.ReferenceEquals(state.Zipper, ctx.Zipper))
+    do! ensure (occurrence = ctx.Zipper.Focus.Id && (LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper)))
             "Lazy control transport requires its actual Huet occurrence."
     let! shape =
         match Operands.project ctx occurrence with

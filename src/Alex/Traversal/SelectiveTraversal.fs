@@ -82,7 +82,7 @@ let private validateManifest (revision: Revision) (segmentation: WitnessSegmenta
     let membership = regions |> List.collect (fun region -> region.Members |> Set.toList)
     if segmentation.Version <> 1 then Result.Error "Unsupported published witness segmentation version"
     elif identities.Count <> regions.Length then Result.Error "Published witness segmentation has duplicate region identities"
-    elif regions |> List.exists (fun region -> System.String.IsNullOrWhiteSpace region.Identity || System.String.IsNullOrWhiteSpace region.Fingerprint) then
+    elif regions |> List.exists (fun region -> Alex.Text.isBlank region.Identity || Alex.Text.isBlank region.Fingerprint) then
         Result.Error "Published witness segmentation has an empty identity or fingerprint"
     elif common.Length <> 1 then Result.Error "Published witness segmentation must have exactly one common region"
     elif membership.Length <> (Set.ofList membership).Count then Result.Error "Published witness segmentation has overlapping members"
@@ -91,7 +91,7 @@ let private validateManifest (revision: Revision) (segmentation: WitnessSegmenta
         Result.Error "Published witness segmentation has absent dependency identities"
     elif regions |> List.exists (fun region ->
         match region.OwnerSupport with
-        | SupportKey.WholeOwningAnalysisRegion identity -> System.String.IsNullOrWhiteSpace identity
+        | SupportKey.WholeOwningAnalysisRegion identity -> Alex.Text.isBlank identity
         | _ -> true) then
         Result.Error "Published witness segmentation lacks its source owning-analysis support account"
     elif common |> List.exists (fun region -> region.Root.IsSome || region.Anchor.IsSome || not region.Path.IsEmpty) then
@@ -148,7 +148,7 @@ let private freshScalar registry revision coeffects scope (region: WitnessRegion
             else
                 match operations, List.rev accumulator.EmittedDefinitions with
                 | [operation], [definition] when retainable operation &&
-                      obj.ReferenceEquals(definition.Operation, operation) &&
+                      (LanguagePrimitives.PhysicalEquality (definition.Operation) (operation)) &&
                       definition.Occurrence.Focus.Id = at.Focus.Id &&
                       definition.Occurrence.Path = region.Path ->
                     Ok ({ Region = region; Operations = operations; Definitions = [definition]

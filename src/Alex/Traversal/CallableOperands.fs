@@ -101,7 +101,7 @@ let closedNativeDefinition (graph: Revision) implementation =
                 (entries |> List.forall (fun entry ->
                     (boundary.CallbackInvocations.TryFind entry.Invocation |> Option.exists (fun invocation ->
                         invocation.Contract.Signature.ReturnType = BAREWire.Descriptors.TypeRef.Void &&
-                        (not signature.Parameters.IsEmpty || invocation.Contract.Signature.Parameters.Length = 0) &&
+                        (not signature.Parameters.IsEmpty || Array.isEmpty invocation.Contract.Signature.Parameters) &&
                         invocation.Contract.Signature.CallingConvention = BAREWire.Descriptors.CallConv.CDecl)) &&
                     hasUnitResult graph entry.Body &&
                     (graph.Emission.Callable.Declarations.TryFind entry.Implementation |> Option.exists (fun declaration -> declaration.Result = entry.Body)) &&
@@ -111,7 +111,7 @@ let closedNativeDefinition (graph: Revision) implementation =
                 Result.Error "Closed native unit result lacks exact Void, unit-body and absent return-adaptation evidence."
             else
                 match graph.Emission.Callable.NativeEntries.TryFind implementation with
-                | Some symbol when not (System.String.IsNullOrWhiteSpace symbol) -> Result.Ok(Some(first, signature))
+                | Some symbol when not (Alex.Text.isBlank symbol) -> Result.Ok(Some(first, signature))
                 | _ -> Result.Error "Closed native implementation lacks its source-published code symbol."
         | _ -> Result.Error "Closed native implementation has absent or incompatible receiving signatures."
 
@@ -214,7 +214,7 @@ and private componentsSeen (ctx: WitnessContext) seen permitted value : Result<M
                 try
                     let ty = mapTypeAt id ctx
                     Result.Ok(if ty = TVoid then [] else [ty])
-                with ex -> Result.Error ex.Message
+                with ex -> Result.Error (Alex.Text.exceptionMessage ex)
 
 let project ctx occurrence = projectSeen ctx Set.empty occurrence
 let components ctx value = componentsSeen ctx Set.empty (fun _ -> false) value
@@ -227,7 +227,7 @@ let valueShape (ctx: WitnessContext) occurrence =
 /// Shared physical parameters retain their symbolic measure variables. Only
 /// the current source-owned call instance can authorize that signature here.
 let parametersAtCall (ctx: WitnessContext) site implementation parameters =
-    if ctx.Zipper.Focus.Id <> site || not (obj.ReferenceEquals(ctx.Zipper.Focus, ctx.Graph.Nodes[site])) then
+    if ctx.Zipper.Focus.Id <> site || not ((LanguagePrimitives.PhysicalEquality (ctx.Zipper.Focus) (ctx.Graph.Nodes[site]))) then
         Result.Error "Direct call signature projection requires its current Huet occurrence."
     else
     let projection = ctx.Graph.Emission.Callable

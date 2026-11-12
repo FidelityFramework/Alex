@@ -19,8 +19,8 @@ let pMmioIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
     let operation, args = declared.Operation, declared.Arguments
     let! ssas = getNodeSSAs node.Id
     let s i = ssas.[i]
-    let isReg = operation.StartsWith("reg") || operation.StartsWith("bind")
-    let isRead = operation.StartsWith("read")
+    let isReg = Alex.Text.startsWith "reg" operation || Alex.Text.startsWith "bind" operation
+    let isRead = Alex.Text.startsWith "read" operation
     let! evidence =
         match Map.tryFind node.Id state.Graph.Codata.Mmio with
         | Some evidence -> preturn evidence

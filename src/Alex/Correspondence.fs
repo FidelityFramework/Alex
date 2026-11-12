@@ -3,7 +3,6 @@
 /// revision; a backend partition is never authority to choose a source region.
 module Alex.Correspondence
 
-open System
 open Fidelity.PSG
 open Alex.Dialects.Core.Types
 
@@ -11,8 +10,11 @@ open Alex.Dialects.Core.Types
 /// witnessRun distinguishes emission bookkeeping, not an accepted source
 /// revision or temporal freshness.
 [<NoEquality; NoComparison>]
+type WitnessRun = private WitnessRun of unit
+
+[<NoEquality; NoComparison>]
 type SemanticScope =
-    | WholeCheckedGraph of witnessRun: Guid * graph: Revision
+    | WholeCheckedGraph of witnessRun: WitnessRun * graph: Revision
 
 [<NoEquality; NoComparison>]
 type Occurrence = {
@@ -43,15 +45,16 @@ type WitnessEmission<'result> = {
 
 let witnessRun (WholeCheckedGraph(id, _)) = id
 let graph (WholeCheckedGraph(_, graph)) = graph
-let beginWholeGraphWitness graph = WholeCheckedGraph(Guid.NewGuid(), graph)
+let beginWholeGraphWitness graph = WholeCheckedGraph(WitnessRun (), graph)
 
 let sameScope left right =
-    witnessRun left = witnessRun right && Object.ReferenceEquals(graph left, graph right)
+    LanguagePrimitives.PhysicalEquality (witnessRun left) (witnessRun right)
+    && LanguagePrimitives.PhysicalEquality (graph left) (graph right)
 
 let validateOccurrence scope (occurrence: Occurrence) =
     let nodes = (graph scope).Nodes
     let current (node: SemanticNode) =
-        nodes.TryFind node.Id |> Option.exists (fun actual -> Object.ReferenceEquals(actual, node))
+        nodes.TryFind node.Id |> Option.exists (fun actual -> LanguagePrimitives.PhysicalEquality actual node)
     if not (sameScope scope occurrence.Scope) then Error "Witness occurrence belongs to a different checked graph snapshot or witness run"
     elif not (current occurrence.Focus) then
         Error "Witness occurrence does not retain the actual current PSG focus and Huet path"

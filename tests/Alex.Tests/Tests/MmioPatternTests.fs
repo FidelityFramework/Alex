@@ -1046,6 +1046,8 @@ let ``integer literal transport retains unsigned maximum and signed negative val
 [<InlineData("\"llvm.mlir.zero\"() : () -> !llvm.ptr")>]
 [<InlineData("%p = custom.op : !llvm<\"ptr\">")>]
 [<InlineData("\"llvm.store\" // comment\n(%v, %p) : (i8, i64) -> ()")>]
+[<InlineData("\"\\6Clvm.store\"() : () -> ()")>]
+[<InlineData("\"llvm\\2Estore\" // retained comment\r\n () : () -> ()")>]
 let ``portable serialization refuses LLVM dialect escape fragments`` (text: string) =
     let error = Assert.Throws<System.ArgumentException>(fun () ->
         moduleText (Ok 64) (Some "portable") [MLIROp.RawMLIR text] |> ignore)

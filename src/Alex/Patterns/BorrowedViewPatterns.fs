@@ -46,7 +46,7 @@ let pBorrowedViewIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
         let beforeIndexCast =
             match indexTy with
             | TInt (IntWidth bits) when bits > span.PointerBits ->
-                [MLIROp.ArithOp (ArithOp.ConstI (s 23, bigint (int64 span.MaximumExtent), indexTy))
+                [MLIROp.ArithOp (ArithOp.ConstI (s 23, (NumericLiteralI.FromString (string (int64 span.MaximumExtent))), indexTy))
                  MLIROp.ArithOp (ArithOp.CmpI (s 24, ICmpPred.Ule, index, s 23, indexTy))
                  MLIROp.Assert (s 24, "BorrowedView index cannot be represented in the mapped address space")]
             | _ -> []
@@ -86,10 +86,10 @@ let pBorrowedViewIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
                 [MLIROp.ArithOp ((if unsigned then ArithOp.ExtUI else ArithOp.ExtSI) (s 8, value, valueTy, checkTy))]
             let checkedValue = if bits = checkBits then value else s 8
             let constant id temporary number =
-                if number <= bigint System.Int64.MaxValue then [MLIROp.ArithOp (ArithOp.ConstI (id, bigint (int64 number), checkTy))]
+                if number <= 9223372036854775807I then [MLIROp.ArithOp (ArithOp.ConstI (id, number, checkTy))]
                 else
                     let raw = int64 (number - (1I <<< 64))
-                    [MLIROp.ArithOp (ArithOp.ConstI (temporary, bigint raw, TInt (IntWidth 64)))
+                    [MLIROp.ArithOp (ArithOp.ConstI (temporary, (NumericLiteralI.FromString (string raw)), TInt (IntWidth 64)))
                      MLIROp.ArithOp (ArithOp.ExtUI (id, temporary, TInt (IntWidth 64), checkTy))]
             let predLow, predHigh = ICmpPred.Sge, ICmpPred.Sle
             let checks = constant (s 9) (s 15) lo @ constant (s 10) (s 16) hi @

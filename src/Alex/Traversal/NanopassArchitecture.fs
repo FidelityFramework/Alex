@@ -82,7 +82,7 @@ let private validateNumericResult (graph: Revision) nodeId result =
                     let expected = Alex.CodeGeneration.TypeMapping.scalarCarrierType carrier
                     if value.Type = expected then Result.Ok ()
                     else Result.Error (sprintf "Witness result at node %d has carrier %A; source Numeric publication requires %A" (NodeId.value nodeId) value.Type expected)
-                with error -> Result.Error error.Message
+                with error -> Result.Error (Alex.Text.exceptionMessage error)
         | _ -> Result.Error (sprintf "Witness result at node %d omitted its source-published scalar value" (NodeId.value nodeId))
     else Result.Ok ()
 
@@ -108,7 +108,7 @@ let rec visitAllNodes
         if Set.contains currentNode.Id !(visitedCtx.GlobalVisited) then definitionOnlyLambda currentNode visitedCtx.Graph
         else false
     if currentNode.Id <> visitedCtx.Zipper.Focus.Id
-       || not (obj.ReferenceEquals(visitedCtx.Graph, visitedCtx.Zipper.Graph)) then
+       || not ((LanguagePrimitives.PhysicalEquality (visitedCtx.Graph) (visitedCtx.Zipper.Graph))) then
         Diagnostic.error (Some currentNode.Id) (Some "Traversal") (Some "zipper occurrence")
             "The traversal node and zipper must identify the same occurrence in the current graph"
         |> fun diagnostic -> MLIRAccumulator.addError diagnostic visitedCtx.Accumulator
@@ -172,7 +172,7 @@ let rec visitAllNodes
 
         // THEN witness current node (after its structural children)
         let witnessed =
-            if obj.ReferenceEquals(priorErrors, visitedCtx.Accumulator.Errors) then
+            if (LanguagePrimitives.PhysicalEquality (priorErrors) (visitedCtx.Accumulator.Errors)) then
                 witness visitedCtx currentNode
             else
                 WitnessOutput.errorCoded AX4001 (Some currentNode.Id) (Some "Traversal") (Some "required child occurrence")
@@ -242,7 +242,7 @@ let rec visitAllNodes
             | Result.Error reason ->
                 Diagnostic.error (Some currentNode.Id) (Some "Lazy") (Some "operand transport") reason
                 |> fun diagnostic -> MLIRAccumulator.addError diagnostic visitedCtx.Accumulator
-        | TRVoid when obj.ReferenceEquals(priorErrors, visitedCtx.Accumulator.Errors) ->
+        | TRVoid when (LanguagePrimitives.PhysicalEquality (priorErrors) (visitedCtx.Accumulator.Errors)) ->
             MLIRAccumulator.completeVoid visitedCtx.Zipper visitedCtx.ScopeContext visitedCtx.Accumulator
         | TRVoid -> ()
         | TRError diag ->
@@ -256,7 +256,7 @@ let rec visitAllNodes
 
         // Capture the actual successful occurrence before the enclosing control
         // witness restores branch-local operand maps.
-        if obj.ReferenceEquals(priorErrors, visitedCtx.Accumulator.Errors) then
+        if (LanguagePrimitives.PhysicalEquality (priorErrors) (visitedCtx.Accumulator.Errors)) then
             EmissionCorrespondence.recordWitness visitedCtx output pendingStaticGlobals
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -312,7 +312,7 @@ let combineWitnesses (nanopasses: Nanopass list) : (WitnessContext -> SemanticNo
                         | Some _ ->
                             sprintf "VarRef '%s' -> Binding %d (source binding-use account disagrees). Type: %s" name (NodeId.value bindingId) typeStr
                     | _ ->
-                        sprintf "Kind: %s. Type: %s" (kindStr.Split('\n').[0]) typeStr
+                        sprintf "Kind: %s. Type: %s" (Alex.Text.firstLine kindStr) typeStr
                 WitnessOutput.error (sprintf "No witness handled node %A — %s" node.Id contextInfo)
             | nanopass :: rest ->
                 let result = nanopass.Witness ctx node

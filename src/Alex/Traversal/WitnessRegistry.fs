@@ -149,13 +149,13 @@ let createRegistry (targetPlatform: TargetPlatform) =
                         // leaves the node's value unbound; the enclosing Lambda then either
                         // fails later with a confusing message or fabricates a result. Report
                         // the coverage gap here, exactly as the top-level combiner does.
-                        let kindLine = (sprintf "%A" node.Kind).Split('\n').[0]
+                        let kindLine = sprintf "%A" node.Kind |> Alex.Text.firstLine
                         WitnessOutput.error (sprintf "No witness handled node %d — Kind: %s. Type: %A" (NodeId.value node.Id) kindLine node.Type)
                     | nanopass :: rest ->
                         match nanopass.Witness ctx node with
                         | output when output.Result = TRSkip -> tryWitnesses rest
                         | output -> output
-                tryWitnesses allNanopasses.Value
+                tryWitnesses (allNanopasses.Force())
         )
 
     // Build nanopass list with thunks that access the lazy combinator
@@ -165,14 +165,14 @@ let createRegistry (targetPlatform: TargetPlatform) =
             // (both match Binding nodes — HW witness is more specific)
             let hwNanopass =
                 if not isCPULike && not isNPU then
-                    [ HardwareModuleWitness.createNanopass (fun () -> lazyCombinator.Value) ]
+                    [ HardwareModuleWitness.createNanopass (fun () -> lazyCombinator.Force()) ]
                 else []
 
             // NPU-only: KernelModuleWitness must run BEFORE BindingWitness
             // (both match Binding nodes — Kernel witness is more specific)
             let kernelNanopass =
                 if isNPU then
-                    [ KernelModuleWitness.createNanopass (fun () -> lazyCombinator.Value) ]
+                    [ KernelModuleWitness.createNanopass (fun () -> lazyCombinator.Force()) ]
                 else []
 
             // Insert HW/Kernel witness before BindingWitness in the leaf list
@@ -185,10 +185,10 @@ let createRegistry (targetPlatform: TargetPlatform) =
             // Append scope witnesses (receive combinator thunk for recursion)
             leaves @
             [
-                LambdaWitness.createNanopass (fun () -> lazyCombinator.Value)
-                ControlFlowWitness.createNanopass (fun () -> lazyCombinator.Value)
-                MatchWitness.createNanopass (fun () -> lazyCombinator.Value)
+                LambdaWitness.createNanopass (fun () -> lazyCombinator.Force())
+                ControlFlowWitness.createNanopass (fun () -> lazyCombinator.Force())
+                MatchWitness.createNanopass (fun () -> lazyCombinator.Force())
             ]
         )
 
-    { leafRegistry with Nanopasses = allNanopasses.Value }
+    { leafRegistry with Nanopasses = allNanopasses.Force() }

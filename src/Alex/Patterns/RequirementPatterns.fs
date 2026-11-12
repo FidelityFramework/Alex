@@ -13,8 +13,8 @@ open Alex.Patterns.LiteralPatterns
 
 let pRequirement (ctx: WitnessContext) = parser {
     let! state = getUserState
-    do! ensure (obj.ReferenceEquals(state.Zipper, ctx.Zipper)
-                && obj.ReferenceEquals(ctx.Graph, ctx.Zipper.Graph)
+    do! ensure ((LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper))
+                && (LanguagePrimitives.PhysicalEquality (ctx.Graph) (ctx.Zipper.Graph))
                 && state.Current.Id = ctx.Zipper.Focus.Id)
             "Requirement must be witnessed at its actual zipper occurrence."
     let! contract =
@@ -24,12 +24,12 @@ let pRequirement (ctx: WitnessContext) = parser {
     do! ensure (match ctx.Zipper.Path with
                 | step :: _ -> step.Parent = contract.Frontier
                                && step.Port = Fidelity.PSG.OccurrencePort.StructuralChild
-                               && step.Ordinal = 0 && step.Extent = 2
+                               && step.Extent >= 2 && step.Ordinal = step.Extent - 2
                                && (ctx.Graph.SourceReadings.Ports.TryFind (step.Parent, step.Port)
                                    |> Option.exists (fun account ->
                                        account.Stamp = step.Stamp && account.Extent = step.Extent
-                                       && account.Positions.TryFind 0 = Some contract.Site
-                                       && account.Positions.TryFind 1 = Some contract.Continuation))
+                                       && account.Positions.TryFind step.Ordinal = Some contract.Site
+                                       && account.Positions.TryFind (step.Ordinal + 1) = Some contract.Continuation))
                 | [] -> false)
             "Requirement is outside its admitted source frontier."
     let! condition, conditionType = pRecallNode contract.Condition

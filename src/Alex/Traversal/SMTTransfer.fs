@@ -52,14 +52,14 @@ let private scope (ob: ObligationInfo) : MLIROp list =
     // products of integer constants rather than evaluating the comparison;
     // this preserves the source QF_LRA claim in a QF_LIA solver scope.
     let rationalComparisons (pairs: (ExactRational * ExactRational) list) : MLIROp list =
-        let statements = ResizeArray<MLIROp>()
+        let mutable statements: MLIROp list = []
         let constant value =
             let ssa = v ()
-            statements.Add(smt (SMTBigIntConstant(ssa, value)))
+            statements <- (smt (SMTBigIntConstant(ssa, value))) :: statements
             ssa
         let product numerator denominator =
             let a, b, output = constant numerator, constant denominator, v ()
-            statements.Add(smt (SMTIntMul(output, a, b)))
+            statements <- (smt (SMTIntMul(output, a, b))) :: statements
             output
         let clauses = pairs |> List.map (fun (left, right) ->
             if left.Denominator <= 0I || right.Denominator <= 0I then
@@ -67,23 +67,23 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let l = product left.Numerator right.Denominator
             let r = product right.Numerator left.Denominator
             let clause = v ()
-            statements.Add(smt (SMTIntCmp(clause, SmtLe, l, r)))
+            statements <- (smt (SMTIntCmp(clause, SmtLe, l, r))) :: statements
             clause)
         let conjunction = v ()
-        statements.Add(smt (SMTAnd(conjunction, clauses)))
-        anchor conjunction (List.ofSeq statements)
+        statements <- (smt (SMTAnd(conjunction, clauses))) :: statements
+        anchor conjunction (List.rev statements)
 
     let integerComparisons (pairs: (bigint * bigint) list) : MLIROp list =
-        let statements = ResizeArray<MLIROp>()
+        let mutable statements: MLIROp list = []
         let clauses = pairs |> List.map (fun (left, right) ->
             let l, r, comparison = v (), v (), v ()
-            statements.Add(smt (SMTBigIntConstant(l, left)))
-            statements.Add(smt (SMTBigIntConstant(r, right)))
-            statements.Add(smt (SMTIntCmp(comparison, SmtLe, l, r)))
+            statements <- (smt (SMTBigIntConstant(l, left))) :: statements
+            statements <- (smt (SMTBigIntConstant(r, right))) :: statements
+            statements <- (smt (SMTIntCmp(comparison, SmtLe, l, r))) :: statements
             comparison)
         let conjunction = v ()
-        statements.Add(smt (SMTAnd(conjunction, clauses)))
-        anchor conjunction (List.ofSeq statements)
+        statements <- (smt (SMTAnd(conjunction, clauses))) :: statements
+        anchor conjunction (List.rev statements)
 
     // A finite postorder fold formats the canonical logical expression. It
     // never traverses the program graph or re-enters an elaboration pass.
@@ -219,7 +219,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
         | ObligationBody.ProgramInitializationOrder(initializerOrdinal, initializerCount, useOrdinals) ->
             let constant (value: int) =
                 let name = v ()
-                name, [smt (SMTBigIntConstant(name, bigint value))]
+                name, [smt (SMTBigIntConstant(name, (NumericLiteralI.FromString (string value))))]
             let ordinal, ordinalOps = constant initializerOrdinal
             let count, countOps = constant initializerCount
             let zero, zeroOps = constant 0
@@ -238,25 +238,25 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                  (uses |> List.collect snd) @
                  [smt (SMTAnd(conclusion, nonnegative :: inPlan :: (uses |> List.collect fst)))])
         | ObligationBody.FiniteLoopTrip model ->
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let constant value =
                 let output = v ()
-                statements.Add(smt (SMTBigIntConstant(output, value)))
+                statements <- (smt (SMTBigIntConstant(output, value))) :: statements
                 output
             let cmp pred left right =
                 let output = v ()
-                statements.Add(smt (SMTIntCmp(output, pred, left, right)))
+                statements <- (smt (SMTIntCmp(output, pred, left, right))) :: statements
                 output
             let start, limit = constant model.InitialLower, constant model.LimitUpper
             let step, count, zero = constant model.MinimumStep, constant model.MaximumIterations, constant 0I
             let distance, ending = v (), v ()
-            statements.Add(smt (SMTIntMul(distance, count, step)))
-            statements.Add(smt (SMTIntAdd(ending, start, distance)))
+            statements <- (smt (SMTIntMul(distance, count, step))) :: statements
+            statements <- (smt (SMTIntAdd(ending, start, distance))) :: statements
             let clauses = [cmp SmtGt step zero; cmp SmtGe count zero
                            cmp (if model.Inclusive then SmtGt else SmtGe) ending limit]
             let conclusion = v ()
-            statements.Add(smt (SMTAnd(conclusion, clauses)))
-            anchor conclusion (List.ofSeq statements)
+            statements <- (smt (SMTAnd(conclusion, clauses))) :: statements
+            anchor conclusion (List.rev statements)
         | ObligationBody.FiniteSequencePull model ->
             let steps = model.Steps |> List.map (fun step -> step.Label, step) |> Map.ofList
             let wellShaped =
@@ -290,31 +290,31 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 let conclusion = v ()
                 anchor conclusion ((clauses |> List.collect snd) @ [smt (SMTAnd(conclusion, List.map fst clauses))])
         | ObligationBody.AdditiveLoopInvariant model ->
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let constant value =
                 let output = v ()
-                statements.Add(smt (SMTBigIntConstant(output, value)))
+                statements <- (smt (SMTBigIntConstant(output, value))) :: statements
                 output
             let declare name =
                 let output = v ()
-                statements.Add(smt (SMTDeclareFun(output, name, SMTInt)))
+                statements <- (smt (SMTDeclareFun(output, name, SMTInt))) :: statements
                 output
             let binary make left right =
                 let output = v ()
-                statements.Add(smt (make (output, left, right)))
+                statements <- (smt (make (output, left, right))) :: statements
                 output
             let cmp pred left right =
                 let output = v ()
-                statements.Add(smt (SMTIntCmp(output, pred, left, right)))
+                statements <- (smt (SMTIntCmp(output, pred, left, right))) :: statements
                 output
             let conjunction clauses =
                 let output = v ()
-                statements.Add(smt (SMTAnd(output, clauses)))
+                statements <- (smt (SMTAnd(output, clauses))) :: statements
                 output
             let implies premise conclusion =
                 let negated, output = v (), v ()
-                statements.Add(smt (SMTNot(negated, premise)))
-                statements.Add(smt (SMTOr(output, [negated; conclusion])))
+                statements <- (smt (SMTNot(negated, premise))) :: statements
+                statements <- (smt (SMTOr(output, [negated; conclusion]))) :: statements
                 output
             let lo, hi = constant model.InitialLower, constant model.InitialUpper
             let dlo, dhi = constant model.DeltaLower, constant model.DeltaUpper
@@ -337,24 +337,24 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let conclusion = conjunction [cmp SmtGe count zero; cmp SmtLe lo hi; cmp SmtLe dlo dhi
                                           cmp SmtLe lower upper; cmp SmtLe lower lo; cmp SmtLe hi upper
                                           implies domain enclosed; implies stepDomain preserved]
-            anchor conclusion (List.ofSeq statements)
+            anchor conclusion (List.rev statements)
         | ObligationBody.FiniteAdditiveEffects(initial, contributions, lower, upper) ->
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let constant value =
                 let output = v ()
-                statements.Add(smt (SMTBigIntConstant(output, value)))
+                statements <- (smt (SMTBigIntConstant(output, value))) :: statements
                 output
             let binary make left right =
                 let output = v ()
-                statements.Add(smt (make(output, left, right)))
+                statements <- (smt (make(output, left, right))) :: statements
                 output
             let cmp predicate left right =
                 let output = v ()
-                statements.Add(smt (SMTIntCmp(output, predicate, left, right)))
+                statements <- (smt (SMTIntCmp(output, predicate, left, right))) :: statements
                 output
             let conjunction values =
                 let output = v ()
-                statements.Add(smt (SMTAnd(output, values)))
+                statements <- (smt (SMTAnd(output, values))) :: statements
                 output
             let zero = constant 0I
             let mutable total = constant initial
@@ -362,7 +362,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let mutable counts = []
             for index, (maximum, delta) in List.indexed contributions do
                 let actual = v ()
-                statements.Add(smt (SMTDeclareFun(actual, sprintf "effect_count_%d" index, SMTInt)))
+                statements <- (smt (SMTDeclareFun(actual, sprintf "effect_count_%d" index, SMTInt))) :: statements
                 let maximum, delta = constant maximum, constant delta
                 counts <- cmp SmtGe maximum zero :: counts
                 domain <- cmp SmtLe zero actual :: cmp SmtLe actual maximum :: domain
@@ -370,10 +370,10 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let enclosed = conjunction [cmp SmtLe (constant lower) total; cmp SmtLe total (constant upper)]
             let premise = conjunction domain
             let negated, implication = v (), v ()
-            statements.Add(smt (SMTNot(negated, premise)))
-            statements.Add(smt (SMTOr(implication, [negated; enclosed])))
+            statements <- (smt (SMTNot(negated, premise))) :: statements
+            statements <- (smt (SMTOr(implication, [negated; enclosed]))) :: statements
             let conclusion = conjunction (implication :: counts)
-            anchor conclusion (List.ofSeq statements)
+            anchor conclusion (List.rev statements)
         | ObligationBody.FiniteLinearRecurrence model ->
             let dimension = model.InitialLower.Length
             let vectorShape values = List.length values = dimension
@@ -385,22 +385,22 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 (model.Powers |> List.forall (fun step -> matrixShape step.Matrix))
             if not wellShaped then integerComparisons [1I, 0I]
             else
-                let statements = ResizeArray<MLIROp>()
+                let mutable statements: MLIROp list = []
                 let constant value =
                     let output = v ()
-                    statements.Add(smt (SMTBigIntConstant(output, value)))
+                    statements <- (smt (SMTBigIntConstant(output, value))) :: statements
                     output
                 let binary make left right =
                     let output = v ()
-                    statements.Add(smt (make (output, left, right)))
+                    statements <- (smt (make (output, left, right))) :: statements
                     output
                 let compare pred left right =
                     let output = v ()
-                    statements.Add(smt (SMTIntCmp(output, pred, left, right)))
+                    statements <- (smt (SMTIntCmp(output, pred, left, right))) :: statements
                     output
                 let equal left right =
                     let output = v ()
-                    statements.Add(smt (SMTEq(output, left, right, SMTInt)))
+                    statements <- (smt (SMTEq(output, left, right, SMTInt))) :: statements
                     output
                 let vector values = values |> List.map constant |> List.toArray
                 let matrix rows = rows |> List.map vector |> List.toArray
@@ -415,16 +415,16 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 let initialLo, initialHi = vector model.InitialLower, vector model.InitialUpper
                 let coefficientLo, coefficientHi = matrix model.CoefficientLower, matrix model.CoefficientUpper
                 let lower, upper = vector model.Lower, vector model.Upper
-                let clauses = ResizeArray<SSA>()
-                clauses.Add(compare SmtGe count zero)
+                let mutable clauses: SSA list = []
+                clauses <- (compare SmtGe count zero) :: clauses
                 for row in 0 .. dimension - 1 do
-                    clauses.Add(compare SmtLe zero initialLo.[row])
-                    clauses.Add(compare SmtLe initialLo.[row] initialHi.[row])
-                    clauses.Add(compare SmtLe lower.[row] zero)
-                    clauses.Add(compare SmtLe initialHi.[row] (dot coefficientHi.[row] initialHi))
+                    clauses <- (compare SmtLe zero initialLo.[row]) :: clauses
+                    clauses <- (compare SmtLe initialLo.[row] initialHi.[row]) :: clauses
+                    clauses <- (compare SmtLe lower.[row] zero) :: clauses
+                    clauses <- (compare SmtLe initialHi.[row] (dot coefficientHi.[row] initialHi)) :: clauses
                     for column in 0 .. dimension - 1 do
-                        clauses.Add(compare SmtLe zero coefficientLo.[row].[column])
-                        clauses.Add(compare SmtLe coefficientLo.[row].[column] coefficientHi.[row].[column])
+                        clauses <- (compare SmtLe zero coefficientLo.[row].[column]) :: clauses
+                        clauses <- (compare SmtLe coefficientLo.[row].[column] coefficientHi.[row].[column]) :: clauses
                 let mutable previousExponent = zero
                 let mutable previousMatrix =
                     Array.init dimension (fun row -> Array.init dimension (fun column -> if row = column then one else zero))
@@ -433,46 +433,46 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     let expected = if step.Odd then multiply squared coefficientHi else squared
                     let supplied = matrix step.Matrix
                     let exponent = constant step.Exponent
-                    clauses.Add(equal exponent (binary SMTIntAdd (binary SMTIntMul two previousExponent) (if step.Odd then one else zero)))
+                    clauses <- (equal exponent (binary SMTIntAdd (binary SMTIntMul two previousExponent) (if step.Odd then one else zero))) :: clauses
                     for row in 0 .. dimension - 1 do
                         for column in 0 .. dimension - 1 do
-                            clauses.Add(equal supplied.[row].[column] expected.[row].[column])
+                            clauses <- (equal supplied.[row].[column] expected.[row].[column]) :: clauses
                     previousExponent <- exponent
                     previousMatrix <- supplied
-                clauses.Add(equal previousExponent count)
+                clauses <- (equal previousExponent count) :: clauses
                 for row in 0 .. dimension - 1 do
-                    clauses.Add(compare SmtLe (dot previousMatrix.[row] initialHi) upper.[row])
+                    clauses <- (compare SmtLe (dot previousMatrix.[row] initialHi) upper.[row]) :: clauses
                 let conclusion = v ()
-                statements.Add(smt (SMTAnd(conclusion, List.ofSeq clauses)))
+                statements <- (smt (SMTAnd(conclusion, List.rev clauses))) :: statements
                 // Malformed or false supplied certificates remain refutable;
                 // no global assumption can conceal an inconsistent premise.
-                anchor conclusion (List.ofSeq statements)
+                anchor conclusion (List.rev statements)
         | ObligationBody.MappedElementSpan model ->
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let declare name =
                 let output = v ()
-                statements.Add(smt (SMTDeclareFun(output, name, SMTInt)))
+                statements <- (smt (SMTDeclareFun(output, name, SMTInt))) :: statements
                 output
             let constant value =
                 let output = v ()
-                statements.Add(smt (SMTBigIntConstant(output, value)))
+                statements <- (smt (SMTBigIntConstant(output, value))) :: statements
                 output
             let binary make left right =
                 let output = v ()
-                statements.Add(smt (make (output, left, right)))
+                statements <- (smt (make (output, left, right))) :: statements
                 output
             let cmp pred left right =
                 let output = v ()
-                statements.Add(smt (SMTIntCmp(output, pred, left, right)))
+                statements <- (smt (SMTIntCmp(output, pred, left, right))) :: statements
                 output
             let equal left right =
                 let output = v ()
-                statements.Add(smt (SMTEq(output, left, right, SMTInt)))
+                statements <- (smt (SMTEq(output, left, right, SMTInt))) :: statements
                 output
-            let assume value = statements.Add(smt (SMTAssert value))
+            let assume value = statements <- (smt (SMTAssert value)) :: statements
             let baseAddress, bytes, index = declare "mapped_base", declare "mapped_bytes", declare "mapped_index"
             let zero, maximum = constant 0I, constant model.MaximumExtent
-            let elementBytes, baseAlignment, elementAlignment = constant (bigint model.ElementBytes), constant (bigint model.BaseAlignment), constant (bigint model.ElementAlignment)
+            let elementBytes, baseAlignment, elementAlignment = constant ((NumericLiteralI.FromString (string model.ElementBytes))), constant ((NumericLiteralI.FromString (string model.BaseAlignment))), constant ((NumericLiteralI.FromString (string model.ElementAlignment)))
             cmp SmtGt baseAddress zero |> assume
             cmp SmtGt bytes zero |> assume
             cmp SmtLe bytes maximum |> assume
@@ -486,8 +486,8 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let clauses = [cmp SmtLe baseAddress start; cmp SmtLe ending (binary SMTIntAdd baseAddress bytes)
                            cmp SmtLe ending maximum; equal (binary SMTIntMod start elementAlignment) zero]
             let conclusion = v ()
-            statements.Add(smt (SMTAnd(conclusion, clauses)))
-            anchor conclusion (List.ofSeq statements)
+            statements <- (smt (SMTAnd(conclusion, clauses))) :: statements
+            anchor conclusion (List.rev statements)
         | ObligationBody.IntegerLiteralRange (value, lower, upper) ->
             integerComparisons [ lower, value; value, upper ]
         | ObligationBody.IntegerRepresentationCoverage (lower, upper, minimum, maximum) ->
@@ -506,29 +506,29 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let positive, nonnegative, ordered, belowWidth, conclusion = v (), v (), v (), v (), v ()
             anchor conclusion
                 [ smt (SMTBigIntConstant(lo, lower)); smt (SMTBigIntConstant(hi, upper))
-                  smt (SMTBigIntConstant(zero, 0I)); smt (SMTBigIntConstant(width, bigint bits))
+                  smt (SMTBigIntConstant(zero, 0I)); smt (SMTBigIntConstant(width, (NumericLiteralI.FromString (string bits))))
                   smt (SMTIntCmp(positive, SmtGt, width, zero)); smt (SMTIntCmp(nonnegative, SmtLe, zero, lo))
                   smt (SMTIntCmp(ordered, SmtLe, lo, hi)); smt (SMTIntCmp(belowWidth, SmtLt, hi, width))
                   smt (SMTAnd(conclusion, [positive; nonnegative; ordered; belowWidth])) ]
         | ObligationBody.SpatialKernelPartition(elements, grain, columns, slices, depth, iterations) ->
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let constant value =
                 let result = v ()
-                statements.Add(smt (SMTBigIntConstant(result, value)))
+                statements <- (smt (SMTBigIntConstant(result, value))) :: statements
                 result
             let cmp predicate left right =
                 let result = v ()
-                statements.Add(smt (SMTIntCmp(result, predicate, left, right)))
+                statements <- (smt (SMTIntCmp(result, predicate, left, right))) :: statements
                 result
             let binary operation left right =
                 let result = v ()
-                statements.Add(smt (operation(result, left, right)))
+                statements <- (smt (operation(result, left, right))) :: statements
                 result
             let equal = binary (fun (result, left, right) -> SMTEq(result, left, right, SMTInt))
             let zero, extent, grain = constant 0I, constant elements, constant grain
-            let columns, depth, iterations = constant(bigint columns), constant(bigint depth), constant iterations
-            let count = constant(bigint slices.Length)
-            let terms = slices |> List.map (fun (column, offset, count) -> constant(bigint column), constant offset, constant count)
+            let columns, depth, iterations = constant((NumericLiteralI.FromString (string columns))), constant((NumericLiteralI.FromString (string depth))), constant iterations
+            let count = constant((NumericLiteralI.FromString (string slices.Length)))
+            let terms = slices |> List.map (fun (column, offset, count) -> constant((NumericLiteralI.FromString (string column))), constant offset, constant count)
             let ends = terms |> List.map (fun (_, offset, count) -> binary SMTIntAdd offset count)
             let clauses =
                 [ yield cmp SmtGt extent zero; yield cmp SmtGt grain zero; yield cmp SmtGt columns zero
@@ -541,46 +541,46 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                       yield cmp SmtLe ends[ordinal] extent
                       for other, _, _ in terms |> List.take ordinal do
                           let same, different = equal column other, v ()
-                          statements.Add(smt (SMTNot(different, same)))
+                          statements <- (smt (SMTNot(different, same))) :: statements
                           yield different
                   yield equal (List.tryLast ends |> Option.defaultValue zero) extent ]
             let conclusion = v ()
-            statements.Add(smt (SMTAnd(conclusion, clauses)))
-            anchor conclusion (List.ofSeq statements)
+            statements <- (smt (SMTAnd(conclusion, clauses))) :: statements
+            anchor conclusion (List.rev statements)
         | ObligationBody.StringBorrowBound origins ->
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let constant value =
                 let output = v ()
-                statements.Add(smt (SMTBigIntConstant(output, value)))
+                statements <- (smt (SMTBigIntConstant(output, value))) :: statements
                 output
             let comparison predicate left right =
                 let output = v ()
-                statements.Add(smt (SMTIntCmp(output, predicate, left, right)))
+                statements <- (smt (SMTIntCmp(output, predicate, left, right))) :: statements
                 output
             let zero = constant 0I
             // A missing origin domain is a false claim, not a vacuous proof.
-            let nonempty = comparison SmtGt (constant (bigint origins.Length)) zero
+            let nonempty = comparison SmtGt (constant ((NumericLiteralI.FromString (string origins.Length)))) zero
             let clauses = origins |> List.collect (fun (count, extent, storage) ->
                 let count, extent, storage = constant count, constant extent, constant storage
                 let sameExtent = v ()
-                statements.Add(smt (SMTEq(sameExtent, count, extent, SMTInt)))
+                statements <- (smt (SMTEq(sameExtent, count, extent, SMTInt))) :: statements
                 [comparison SmtLe zero count; sameExtent; comparison SmtLt extent storage])
             let conclusion = v ()
-            statements.Add(smt (SMTAnd(conclusion, nonempty :: clauses)))
-            anchor conclusion (List.ofSeq statements)
+            statements <- (smt (SMTAnd(conclusion, nonempty :: clauses))) :: statements
+            anchor conclusion (List.rev statements)
         | ObligationBody.RealLiteralRange (value, lower, upper) ->
             rationalComparisons [ lower, value; value, upper ]
         | ObligationBody.RealRepresentationCoverage (lower, upper, minimum, maximum) ->
             rationalComparisons [ minimum, lower; lower, upper; upper, maximum ]
         | ObligationBody.ApplicationDimensions comparisons ->
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let constant value =
                 let ssa = v ()
-                statements.Add(smt (SMTIntConstant(ssa, int64 value)))
+                statements <- (smt (SMTIntConstant(ssa, int64 value))) :: statements
                 ssa
             let equation left right =
                 let l, r, output = constant left, constant right, v ()
-                statements.Add(smt (SMTEq(output, l, r, SMTInt)))
+                statements <- (smt (SMTEq(output, l, r, SMTInt))) :: statements
                 output
             let clauses =
                 [ for _, expected, actual in comparisons do
@@ -606,9 +606,9 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 | [single] -> single
                 | _ ->
                     let conjunction = v ()
-                    statements.Add(smt (SMTAnd(conjunction, clauses)))
+                    statements <- (smt (SMTAnd(conjunction, clauses))) :: statements
                     conjunction
-            anchor definition (List.ofSeq statements)
+            anchor definition (List.rev statements)
         | ObligationBody.DimensionalRelation (rule, left, right, result) ->
             let dimensions = left :: right :: Option.toList result
             let coordinates project =
@@ -618,14 +618,14 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     let exponent dim = project dim |> Map.tryFind axis |> Option.defaultValue 0
                     exponent left, exponent right, Option.map exponent result)
             let axes = coordinates (fun d -> d.Bases) @ coordinates (fun d -> d.Vars)
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let constant value =
                 let ssa = v ()
-                statements.Add(smt (SMTIntConstant(ssa, int64 value)))
+                statements <- (smt (SMTIntConstant(ssa, int64 value))) :: statements
                 ssa
             let equation left right =
                 let ssa = v ()
-                statements.Add(smt (SMTEq(ssa, left, right, SMTInt)))
+                statements <- (smt (SMTEq(ssa, left, right, SMTInt))) :: statements
                 ssa
             let clauses =
                 [ for left, right, output in axes do
@@ -634,7 +634,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     | DimensionalRule.Product, Some output
                     | DimensionalRule.Quotient, Some output ->
                         let expected = v ()
-                        statements.Add(smt (if rule = DimensionalRule.Product then SMTIntAdd(expected, l, r) else SMTIntSub(expected, l, r)))
+                        statements <- (smt (if rule = DimensionalRule.Product then SMTIntAdd(expected, l, r) else SMTIntSub(expected, l, r))) :: statements
                         yield equation (constant output) expected
                     | DimensionalRule.SameDimension, Some output ->
                         yield equation l r
@@ -650,9 +650,9 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     | [single] -> single
                     | _ ->
                         let conjunction = v ()
-                        statements.Add(smt (SMTAnd(conjunction, clauses)))
+                        statements <- (smt (SMTAnd(conjunction, clauses))) :: statements
                         conjunction
-            anchor definition (List.ofSeq statements)
+            anchor definition (List.rev statements)
         | ObligationBody.StorageReservation (len, storage) ->
             let s = v ()
             let l = v ()
@@ -690,89 +690,89 @@ let private scope (ob: ObligationInfo) : MLIROp list =
         | ObligationBody.StaticStorageLayout (slots, usedSize, allocationSize, poolAlignment, capacity, spaceAlignment, granularity) ->
             // Every placement is a concrete compiler fact. No adjacency premise
             // assumes the layout that this claim is meant to establish.
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let constant (value: bigint) =
                 let result = v ()
-                statements.Add(smt (SMTBigIntConstant(result, value)))
+                statements <- (smt (SMTBigIntConstant(result, value))) :: statements
                 result
             let cmp pred a b =
                 let result = v ()
-                statements.Add(smt (SMTIntCmp(result, pred, a, b)))
+                statements <- (smt (SMTIntCmp(result, pred, a, b))) :: statements
                 result
             let equal a b =
                 let result = v ()
-                statements.Add(smt (SMTEq(result, a, b, SMTInt)))
+                statements <- (smt (SMTEq(result, a, b, SMTInt))) :: statements
                 result
             let any clauses =
                 match clauses with
                 | [only] -> only
                 | _ ->
                     let result = v ()
-                    statements.Add(smt (SMTOr(result, clauses)))
+                    statements <- (smt (SMTOr(result, clauses))) :: statements
                     result
             let zero = constant 0I
             let divisible value divisor =
                 // Invalid zero/negative alignments fail a separate conjunct;
                 // use a defined modulus so they cannot introduce vacuity.
-                let denominator = constant (bigint (max 1 divisor))
+                let denominator = constant ((NumericLiteralI.FromString (string (max 1 divisor))))
                 let remainder = v ()
-                statements.Add(smt (SMTIntMod(remainder, value, denominator)))
+                statements <- (smt (SMTIntMod(remainder, value, denominator))) :: statements
                 equal remainder zero
-            let used, allocation = constant (bigint usedSize), constant (bigint allocationSize)
-            let pool, space, grain, cap = constant (bigint poolAlignment), constant (bigint spaceAlignment), constant (bigint granularity), constant (bigint capacity)
-            let clauses = ResizeArray<SSA>()
-            for term in [pool; space; grain] do clauses.Add(cmp SmtGt term zero)
-            clauses.Add(cmp SmtGe used zero)
-            clauses.Add(cmp SmtGe cap zero)
-            clauses.Add(cmp SmtLe used allocation)
-            clauses.Add(cmp SmtLe allocation cap)
-            clauses.Add(cmp SmtGe pool space)
-            clauses.Add(divisible allocation granularity)
-            clauses.Add(divisible pool spaceAlignment)
+            let used, allocation = constant ((NumericLiteralI.FromString (string usedSize))), constant ((NumericLiteralI.FromString (string allocationSize)))
+            let pool, space, grain, cap = constant ((NumericLiteralI.FromString (string poolAlignment))), constant ((NumericLiteralI.FromString (string spaceAlignment))), constant ((NumericLiteralI.FromString (string granularity))), constant ((NumericLiteralI.FromString (string capacity)))
+            let mutable clauses: SSA list = []
+            for term in [pool; space; grain] do clauses <- (cmp SmtGt term zero) :: clauses
+            clauses <- (cmp SmtGe used zero) :: clauses
+            clauses <- (cmp SmtGe cap zero) :: clauses
+            clauses <- (cmp SmtLe used allocation) :: clauses
+            clauses <- (cmp SmtLe allocation cap) :: clauses
+            clauses <- (cmp SmtGe pool space) :: clauses
+            clauses <- (divisible allocation granularity) :: clauses
+            clauses <- (divisible pool spaceAlignment) :: clauses
             let placements = slots |> List.map (fun (offset, length, alignment) ->
-                let beginAt = constant (bigint offset)
-                let lengthTerm = constant (bigint length)
-                let align = constant (bigint alignment)
+                let beginAt = constant ((NumericLiteralI.FromString (string offset)))
+                let lengthTerm = constant ((NumericLiteralI.FromString (string length)))
+                let align = constant ((NumericLiteralI.FromString (string alignment)))
                 let endAt = v ()
-                statements.Add(smt (SMTIntAdd(endAt, beginAt, lengthTerm)))
-                clauses.Add(cmp SmtGe beginAt zero)
-                clauses.Add(cmp SmtGt lengthTerm zero)
-                clauses.Add(cmp SmtGt align zero)
-                clauses.Add(divisible beginAt alignment)
-                clauses.Add(divisible pool alignment)
-                clauses.Add(cmp SmtLe endAt allocation)
-                clauses.Add(cmp SmtLe endAt used)
+                statements <- (smt (SMTIntAdd(endAt, beginAt, lengthTerm))) :: statements
+                clauses <- (cmp SmtGe beginAt zero) :: clauses
+                clauses <- (cmp SmtGt lengthTerm zero) :: clauses
+                clauses <- (cmp SmtGt align zero) :: clauses
+                clauses <- (divisible beginAt alignment) :: clauses
+                clauses <- (divisible pool alignment) :: clauses
+                clauses <- (cmp SmtLe endAt allocation) :: clauses
+                clauses <- (cmp SmtLe endAt used) :: clauses
                 beginAt, endAt)
             match placements with
-            | [] -> clauses.Add(equal used zero)
-            | _ -> clauses.Add(placements |> List.map (fun (_, ending) -> equal ending used) |> any)
+            | [] -> clauses <- (equal used zero) :: clauses
+            | _ -> clauses <- (placements |> List.map (fun (_, ending) -> equal ending used) |> any) :: clauses
             for i, (leftBegin, leftEnd) in List.indexed placements do
                 for rightBegin, rightEnd in List.skip (i + 1) placements do
-                    clauses.Add(any [cmp SmtLe leftEnd rightBegin; cmp SmtLe rightEnd leftBegin])
+                    clauses <- (any [cmp SmtLe leftEnd rightBegin; cmp SmtLe rightEnd leftBegin]) :: clauses
             let definition = v ()
-            statements.Add(smt (SMTAnd(definition, List.ofSeq clauses)))
-            anchor definition (List.ofSeq statements)
+            statements <- (smt (SMTAnd(definition, List.rev clauses))) :: statements
+            anchor definition (List.rev statements)
         | ObligationBody.ContinuationLayout (slots, extent, alignment) ->
-            let statements = ResizeArray<MLIROp>()
+            let mutable statements: MLIROp list = []
             let constant value =
                 let result = v ()
-                statements.Add(smt (SMTBigIntConstant(result, value)))
+                statements <- (smt (SMTBigIntConstant(result, value))) :: statements
                 result
             let binary make left right =
                 let result = v ()
-                statements.Add(smt (make (result, left, right)))
+                statements <- (smt (make (result, left, right))) :: statements
                 result
             let cmp predicate left right =
                 let result = v ()
-                statements.Add(smt (SMTIntCmp(result, predicate, left, right)))
+                statements <- (smt (SMTIntCmp(result, predicate, left, right))) :: statements
                 result
             let equal left right =
                 let result = v ()
-                statements.Add(smt (SMTEq(result, left, right, SMTInt)))
+                statements <- (smt (SMTEq(result, left, right, SMTInt))) :: statements
                 result
             let any values =
                 let result = v ()
-                statements.Add(smt (SMTOr(result, values)))
+                statements <- (smt (SMTOr(result, values))) :: statements
                 result
             let zero, one = constant 0I, constant 1I
             let powerOfTwo value =
@@ -780,53 +780,53 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let aligned endpoint required =
                 // Nonpositive alignments fail their own clause; use a defined
                 // divisor while transcribing the exact rounding equation.
-                let divisor = constant (bigint (max 1 required))
+                let divisor = constant ((NumericLiteralI.FromString (string (max 1 required))))
                 let adjustment = binary SMTIntSub divisor one
                 let rounded = binary SMTIntDiv (binary SMTIntAdd endpoint adjustment) divisor
                 binary SMTIntMul rounded divisor
-            let extentTerm, alignmentTerm = constant (bigint extent), constant (bigint alignment)
-            let clauses = ResizeArray<SSA>()
-            clauses.Add(cmp SmtGe extentTerm zero)
-            clauses.Add(powerOfTwo alignmentTerm)
-            clauses.Add(cmp SmtGe alignmentTerm one)
+            let extentTerm, alignmentTerm = constant ((NumericLiteralI.FromString (string extent))), constant ((NumericLiteralI.FromString (string alignment)))
+            let mutable clauses: SSA list = []
+            clauses <- (cmp SmtGe extentTerm zero) :: clauses
+            clauses <- (powerOfTwo alignmentTerm) :: clauses
+            clauses <- (cmp SmtGe alignmentTerm one) :: clauses
             let mutable previous = zero
             let placements = slots |> List.map (fun (offset, bytes, alignment) ->
-                let beginAt, length, required = constant (bigint offset), constant (bigint bytes), constant (bigint alignment)
+                let beginAt, length, required = constant ((NumericLiteralI.FromString (string offset))), constant ((NumericLiteralI.FromString (string bytes))), constant ((NumericLiteralI.FromString (string alignment)))
                 let endAt = binary SMTIntAdd beginAt length
-                clauses.Add(cmp SmtGe beginAt zero)
-                clauses.Add(cmp SmtGt length zero)
-                clauses.Add(powerOfTwo required)
-                clauses.Add(cmp SmtGe alignmentTerm required)
-                let divisor = constant (bigint (max 1 alignment))
-                clauses.Add(equal (binary SMTIntMod beginAt divisor) zero)
-                clauses.Add(equal (binary SMTIntMod alignmentTerm divisor) zero)
-                clauses.Add(equal beginAt (aligned previous alignment))
-                clauses.Add(cmp SmtLe endAt extentTerm)
+                clauses <- (cmp SmtGe beginAt zero) :: clauses
+                clauses <- (cmp SmtGt length zero) :: clauses
+                clauses <- (powerOfTwo required) :: clauses
+                clauses <- (cmp SmtGe alignmentTerm required) :: clauses
+                let divisor = constant ((NumericLiteralI.FromString (string (max 1 alignment))))
+                clauses <- (equal (binary SMTIntMod beginAt divisor) zero) :: clauses
+                clauses <- (equal (binary SMTIntMod alignmentTerm divisor) zero) :: clauses
+                clauses <- (equal beginAt (aligned previous alignment)) :: clauses
+                clauses <- (cmp SmtLe endAt extentTerm) :: clauses
                 previous <- endAt
                 beginAt, endAt, required)
-            clauses.Add(any (equal alignmentTerm one :: (placements |> List.map (fun (_, _, required) -> equal alignmentTerm required))))
-            clauses.Add(equal extentTerm (aligned previous alignment))
+            clauses <- (any (equal alignmentTerm one :: (placements |> List.map (fun (_, _, required) -> equal alignmentTerm required)))) :: clauses
+            clauses <- (equal extentTerm (aligned previous alignment)) :: clauses
             for index, (leftBegin, leftEnd, _) in List.indexed placements do
                 for rightBegin, rightEnd, _ in List.skip (index + 1) placements do
-                    clauses.Add(any [cmp SmtLe leftEnd rightBegin; cmp SmtLe rightEnd leftBegin])
+                    clauses <- (any [cmp SmtLe leftEnd rightBegin; cmp SmtLe rightEnd leftBegin]) :: clauses
             let definition = v ()
-            statements.Add(smt (SMTAnd(definition, List.ofSeq clauses)))
-            anchor definition (List.ofSeq statements)
+            statements <- (smt (SMTAnd(definition, List.rev clauses))) :: statements
+            anchor definition (List.rev statements)
         | ObligationBody.EnvironmentStorageReservation (extent, alignment, capacity, spaceAlignment, granularity) ->
             match extent, alignment, capacity, spaceAlignment, granularity with
             | Some extent, Some alignment, Some capacity, Some spaceAlignment, Some granularity ->
                 let constant value =
                     let name = v ()
                     name, [smt (SMTBigIntConstant(name, value))]
-                let bytes, bytesOps = constant (bigint extent)
-                let align, alignOps = constant (bigint alignment)
-                let spaceAlign, spaceOps = constant (bigint spaceAlignment)
-                let grain, grainOps = constant (bigint granularity)
-                let limit, limitOps = constant (bigint capacity)
+                let bytes, bytesOps = constant ((NumericLiteralI.FromString (string extent)))
+                let align, alignOps = constant ((NumericLiteralI.FromString (string alignment)))
+                let spaceAlign, spaceOps = constant ((NumericLiteralI.FromString (string spaceAlignment)))
+                let grain, grainOps = constant ((NumericLiteralI.FromString (string granularity)))
+                let limit, limitOps = constant ((NumericLiteralI.FromString (string capacity)))
                 let zero, zeroOps = constant 0I
                 let one, oneOps = constant 1I
-                let divisor, divisorOps = constant (bigint (max 1 granularity))
-                let alignDivisor, alignDivisorOps = constant (bigint (max 1 alignment))
+                let divisor, divisorOps = constant ((NumericLiteralI.FromString (string (max 1 granularity))))
+                let alignDivisor, alignDivisorOps = constant ((NumericLiteralI.FromString (string (max 1 alignment))))
                 let powers value =
                     let choices = [0 .. 30] |> List.map (fun exponent ->
                         let power, ops = constant (1I <<< exponent)
@@ -854,7 +854,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             | _ -> integerComparisons [1I, 0I]
         | ObligationBody.ConsecutiveLayout (storages, span, capacity) ->
             let sizes = List.toArray storages
-            let n' = sizes.Length
+            let n' = Array.length sizes
             let bases = [ for i in 0 .. n' - 1 -> v (), sprintf "b%d" i ]
             let baseSSA i = fst bases[i]
             let declOps =
