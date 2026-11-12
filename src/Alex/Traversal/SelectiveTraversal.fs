@@ -1,5 +1,5 @@
-/// Selective witnessing of Baker's published regions. Region membership,
-/// fingerprints and dependency edges are observations, never discovered here.
+/// Selective witnessing of published regions. Region membership, digests and
+/// dependency edges are observations, never discovered here.
 module Alex.Traversal.SelectiveTraversal
 
 open Fidelity.PSG
@@ -12,7 +12,8 @@ open Alex.Traversal.PSGZipper
 open Alex.Traversal.MLIRTransfer
 
 type private HeldRegion = {
-    Fingerprint: string
+    CallableInterfaceDigest: CallableInterfaceDigest
+    SemanticRealizationDigest: SemanticRealizationDigest
     Dependencies: Set<string>
     Operation: MLIROp
 }
@@ -22,7 +23,7 @@ type private HeldRegion = {
 [<NoEquality; NoComparison>]
 type State = private {
     Coeffects: TransferCoeffects
-    Fingerprints: Map<string, string>
+    Interfaces: Map<string, CallableInterfaceDigest>
     Held: Map<string, HeldRegion>
 }
 
@@ -75,15 +76,28 @@ let private occurrence scope (region: WitnessRegion) =
     | _ -> Result.Error (sprintf "Scalar region '%s' lacks its root or anchor occurrence" region.Identity)
 
 let private validateManifest (revision: Revision) (segmentation: WitnessSegmentation) =
+    let invalidDigest (prefix: string) (value: string) =
+        Alex.Text.isBlank value ||
+        not (Alex.Text.startsWith prefix value) ||
+        (value |> Seq.skip (String.length prefix) |> Seq.forall Alex.Text.isWhitespace)
     let regions = segmentation.Regions
+    let invalidRegion =
+        regions |> List.tryPick (fun region ->
+            [ "CallableInterfaceDigest", CallableInterfaceDigest.DomainPrefix, CallableInterfaceDigest.value region.CallableInterfaceDigest
+              "SemanticRealizationDigest", SemanticRealizationDigest.DomainPrefix, SemanticRealizationDigest.value region.SemanticRealizationDigest
+              "CanonicalProofSupportDigest", CanonicalProofSupportDigest.DomainPrefix, CanonicalProofSupportDigest.value region.CanonicalProofSupportDigest ]
+            |> List.tryPick (fun (name, prefix, value) ->
+                if invalidDigest prefix value then Some (sprintf "Region '%s' at node %A has an empty or malformed %s" region.Identity region.Root name)
+                else None))
     let identities = regions |> List.map _.Identity |> Set.ofList
     let nodeIds = revision.Nodes.Keys |> Set.ofSeq
     let common = regions |> List.filter (fun region -> region.Flavor = WitnessRegionKind.Common)
     let membership = regions |> List.collect (fun region -> region.Members |> Set.toList)
     if segmentation.Version <> 1 then Result.Error "Unsupported published witness segmentation version"
     elif identities.Count <> regions.Length then Result.Error "Published witness segmentation has duplicate region identities"
-    elif regions |> List.exists (fun region -> Alex.Text.isBlank region.Identity || Alex.Text.isBlank region.Fingerprint) then
-        Result.Error "Published witness segmentation has an empty identity or fingerprint"
+    elif regions |> List.exists (fun region -> Alex.Text.isBlank region.Identity) then
+        Result.Error "Published witness segmentation has an empty identity"
+    elif invalidRegion.IsSome then Result.Error invalidRegion.Value
     elif common.Length <> 1 then Result.Error "Published witness segmentation must have exactly one common region"
     elif membership.Length <> (Set.ofList membership).Count then Result.Error "Published witness segmentation has overlapping members"
     elif Set.ofList membership <> nodeIds then Result.Error "Published witness segmentation does not exactly cover the current graph"
@@ -178,33 +192,27 @@ let private freshCommon registry revision coeffects scope scalarMembers (region:
 /// values. Production supplies its ordinary target registry, unchanged.
 let internal transferWithRegistry registry revision coeffects (prior: State option) : Result<Output, TransferRefusal> =
     match revision.Codata.WitnessSegmentation with
-    | None -> refusal "Revision lacks Baker's published witness segmentation"
+    | None -> refusal "Revision lacks published witness segmentation"
     | Some segmentation ->
         validateManifest revision segmentation |> Result.mapError (fun reason -> { Reason = reason; Witnessed = [] })
         |> Result.bind (fun () ->
             if registry.Nanopasses.IsEmpty then refusal "Alex witness registry is empty for selective witnessing"
             else
                 let scope = beginWholeGraphWitness revision
-                let fingerprints = segmentation.Regions |> List.map (fun region -> region.Identity, region.Fingerprint) |> Map.ofList
+                let interfaces = segmentation.Regions |> List.map (fun region -> region.Identity, region.CallableInterfaceDigest) |> Map.ofList
                 let compatible = prior |> Option.filter (fun held -> held.Coeffects = coeffects)
-                let initiallyChanged =
-                    segmentation.Regions |> List.filter (fun region ->
-                        match compatible |> Option.bind (fun held -> held.Fingerprints.TryFind region.Identity),
-                              compatible |> Option.bind (fun held -> held.Held.TryFind region.Identity) with
-                        | Some fingerprint, _ when region.Flavor = WitnessRegionKind.Common && fingerprint = region.Fingerprint -> false
-                        | Some fingerprint, Some held when fingerprint = region.Fingerprint && held.Dependencies = region.Dependencies -> false
-                        | _ -> true)
-                    |> List.map _.Identity |> Set.ofList
-                let rec dependentClosure changed =
-                    let next = segmentation.Regions |> List.fold (fun dirty region ->
-                        if not (Set.intersect region.Dependencies dirty).IsEmpty then dirty.Add region.Identity else dirty) changed
-                    if next = changed then changed else dependentClosure next
-                let changed = dependentClosure initiallyChanged
+                let canReuse (region: WitnessRegion) (state: State) (held: HeldRegion) =
+                    held.SemanticRealizationDigest = region.SemanticRealizationDigest &&
+                    held.CallableInterfaceDigest = region.CallableInterfaceDigest &&
+                    held.Dependencies = region.Dependencies &&
+                    (region.Dependencies |> Set.forall (fun identity ->
+                        state.Interfaces.TryFind identity = interfaces.TryFind identity))
                 let scalars = segmentation.Regions |> List.filter (fun region -> region.Flavor = WitnessRegionKind.ScalarCallable)
                 let scalarResults =
                     scalars |> List.map (fun region ->
-                        match compatible |> Option.bind (fun state -> state.Held.TryFind region.Identity) with
-                        | Some held when not (changed.Contains region.Identity) ->
+                        match compatible with
+                        | Some state when state.Held.ContainsKey region.Identity && canReuse region state state.Held[region.Identity] ->
+                            let held = state.Held[region.Identity]
                             occurrence scope region |> Result.map (fun at ->
                                 { Region = region; Operations = [held.Operation]
                                   Definitions = [{ Operation = held.Operation; Occurrence = at }]
@@ -221,16 +229,17 @@ let internal transferWithRegistry registry revision coeffects (prior: State opti
                         let held =
                             scalarResults |> List.map (fun (output, _) ->
                                 output.Region.Identity,
-                                { Fingerprint = output.Region.Fingerprint; Dependencies = output.Region.Dependencies
+                                { CallableInterfaceDigest = output.Region.CallableInterfaceDigest; SemanticRealizationDigest = output.Region.SemanticRealizationDigest
+                                  Dependencies = output.Region.Dependencies
                                   Operation = List.exactlyOne output.Operations }) |> Map.ofList
                         { Scope = scope; Operations = regions |> List.collect _.Operations
                           Definitions = regions |> List.collect _.Definitions
                           Emissions = regions |> List.collect _.Emissions; Regions = regions
-                          State = { Coeffects = coeffects; Fingerprints = fingerprints; Held = held }
+                          State = { Coeffects = coeffects; Interfaces = interfaces; Held = held }
                           Statistics =
                             { Changed = regions |> List.filter (fun output -> not output.Reused) |> List.map _.Region.Identity
                               Retained = regions |> List.filter _.Reused |> List.map _.Region.Identity
-                              Retired = prior |> Option.map (fun state -> Set.difference (state.Fingerprints.Keys |> Set.ofSeq) (fingerprints.Keys |> Set.ofSeq) |> Set.toList) |> Option.defaultValue []
+                              Retired = prior |> Option.map (fun state -> Set.difference (state.Interfaces.Keys |> Set.ofSeq) (interfaces.Keys |> Set.ofSeq) |> Set.toList) |> Option.defaultValue []
                               WitnessedNodes = results |> List.map (fun (output, count) -> output.Region.Identity, count) |> Map.ofList } }))
                 |> Result.mapError (fun reason -> { Reason = reason; Witnessed = [] }))
 

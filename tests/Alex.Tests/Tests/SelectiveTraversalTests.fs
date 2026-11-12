@@ -24,7 +24,10 @@ let private fixture offset firstFingerprint secondFingerprint dependencies =
                         Stamp = sprintf "fixture:structural:%d:%A" (NodeId.value binding.Id) binding.Children }]
               Members = Set.ofList [lambda.Id; body.Id]
               OwnerSupport = SupportKey.WholeOwningAnalysisRegion "fixture-owner"
-              Supports = Set.singleton binding.Id; Fingerprint = fingerprint; Dependencies = dependencies }
+              Supports = Set.singleton binding.Id; CallableInterfaceDigest = CallableInterfaceDigest ("callable-interface:" + name)
+              SemanticRealizationDigest = SemanticRealizationDigest ("semantic-realization:" + fingerprint)
+              CanonicalProofSupportDigest = CanonicalProofSupportDigest ("proof-support:" + name)
+              ProofSupportCoverage = ProofSupportCoverage.Local([], []); Dependencies = dependencies }
         [body; lambda; binding], binding, region
     let firstNodes, first, firstRegion = functionNodes 0 "first"
     let secondNodes, second, secondRegion = functionNodes 3 "second"
@@ -32,7 +35,10 @@ let private fixture offset firstFingerprint secondFingerprint dependencies =
         { Identity = "common"; Flavor = WitnessRegionKind.Common; Root = None; Anchor = None; Path = []
           OwnerSupport = SupportKey.WholeOwningAnalysisRegion "fixture-owner"
           Members = Set.ofList [first.Id; second.Id]; Supports = Set.empty
-          Fingerprint = "common-contract"; Dependencies = Set.empty }
+          CallableInterfaceDigest = CallableInterfaceDigest "callable-interface:common"
+          SemanticRealizationDigest = SemanticRealizationDigest "semantic-realization:common"
+          CanonicalProofSupportDigest = CanonicalProofSupportDigest "proof-support:common"
+          ProofSupportCoverage = ProofSupportCoverage.Local([], []); Dependencies = Set.empty }
     { revision (firstNodes @ secondNodes) with
         DeclarationRoots = [first.Id, DeclRoot.EntryPoint; second.Id, DeclRoot.EntryPoint]
         Codata =
@@ -140,9 +146,12 @@ let ``unchanged function bypasses witnesses and rebinds exact current occurrence
     | Ok () -> failwith "Old occurrence was accepted"
 
 [<Fact>]
-let ``changed source dependency invalidates unchanged dependent fingerprint`` () =
+let ``changed dependency interface invalidates unchanged dependent`` () =
     let first = fixture 0 "first-v1" "second-v1" (Set.singleton "first") |> fun graph -> run graph None Set.empty |> accepted
-    let second = fixture 100 "first-v2" "second-v1" (Set.singleton "first") |> fun graph -> run graph (Some first.State) Set.empty |> accepted
+    let graph = fixture 100 "first-v2" "second-v1" (Set.singleton "first")
+    let regions = (segmentation graph).Regions |> List.map (fun region ->
+        if region.Identity = "first" then { region with CallableInterfaceDigest = CallableInterfaceDigest "callable-interface:first-v2" } else region)
+    let second = run (replaceRegions graph regions) (Some first.State) Set.empty |> accepted
     Assert.Empty second.Statistics.Retained
     Assert.Equal(2, second.Statistics.WitnessedNodes["second"])
 
@@ -179,7 +188,7 @@ let ``retired region is absent from assembled operations and reported`` () =
                      DeclarationRoots = graph.DeclarationRoots |> List.take 1 }
         |> declareTraversalReadings
     let regions = (segmentation graph).Regions |> List.filter (fun region -> region.Identity <> "second") |> List.map (fun region ->
-        if region.Identity = "common" then { region with Members = Set.singleton(NodeId 2); Fingerprint = "common-retired" } else region)
+        if region.Identity = "common" then { region with Members = Set.singleton(NodeId 2) } else region)
     let current = run (replaceRegions next regions) (Some previous.State) (Set.ofList [NodeId 0; NodeId 1]) |> accepted
     Assert.Equal<string list>(["second"], current.Statistics.Retired)
     Assert.Equal<string list>(["first"], current.Definitions |> List.choose (fun definition -> Alex.Correspondence.definitionSymbol definition.Operation))
@@ -190,3 +199,44 @@ let ``changed target coeffects prevent retained operation reuse`` () =
     let previous = run graph None Set.empty |> accepted
     let current = transferWithRegistry (registry Set.empty) graph (coeffects 32) (Some previous.State) |> accepted
     Assert.Empty current.Statistics.Retained
+
+[<Fact>]
+let ``proof support changes retain scalar operation`` () =
+    let graph = fixture 0 "first" "second" Set.empty
+    let initial = run graph None Set.empty |> accepted
+    let regions = (segmentation graph).Regions |> List.map (fun region ->
+        if region.Identity = "first" then
+            { region with CanonicalProofSupportDigest = CanonicalProofSupportDigest "proof-support:changed"
+                          ProofSupportCoverage = ProofSupportCoverage.Unclassified("changed", Set.singleton "support") }
+        else region)
+    let current = run (replaceRegions graph regions) (Some initial.State) (Set.ofList [NodeId 0; NodeId 1]) |> accepted
+    let before = initial.Regions |> List.find (fun output -> output.Region.Identity = "first")
+    let after = current.Regions |> List.find (fun output -> output.Region.Identity = "first")
+    Assert.True(after.Reused)
+    Assert.Same(List.exactlyOne before.Operations, List.exactlyOne after.Operations)
+
+[<Fact>]
+let ``semantic realization changes re-witness scalar operation`` () =
+    let initial = fixture 0 "first-v1" "second" Set.empty |> fun graph -> run graph None Set.empty |> accepted
+    let current = fixture 0 "first-v2" "second" Set.empty |> fun graph -> run graph (Some initial.State) Set.empty |> accepted
+    Assert.False((current.Regions |> List.find (fun output -> output.Region.Identity = "first")).Reused)
+
+[<Fact>]
+let ``dependency realization changes retain dependent with stable interface`` () =
+    let initial = fixture 0 "first-v1" "second" (Set.singleton "first") |> fun graph -> run graph None Set.empty |> accepted
+    let current = fixture 0 "first-v2" "second" (Set.singleton "first") |> fun graph -> run graph (Some initial.State) (Set.ofList [NodeId 3; NodeId 4]) |> accepted
+    Assert.True((current.Regions |> List.find (fun output -> output.Region.Identity = "second")).Reused)
+
+[<Fact>]
+let ``malformed published digests refuse before witnessing`` () =
+    let graph = fixture 0 "first" "second" Set.empty
+    let cases : (string * (WitnessRegion -> WitnessRegion)) list =
+        [ for raw in [""; "wrong"; "callable-interface:"] do
+              yield "CallableInterfaceDigest", (fun region -> { region with CallableInterfaceDigest = CallableInterfaceDigest raw })
+          for raw in [""; "wrong"; "semantic-realization: "] do
+              yield "SemanticRealizationDigest", (fun region -> { region with SemanticRealizationDigest = SemanticRealizationDigest raw })
+          for raw in [""; "wrong"; "proof-support:"] do
+              yield "CanonicalProofSupportDigest", (fun region -> { region with CanonicalProofSupportDigest = CanonicalProofSupportDigest raw }) ]
+    for expected, change in cases do
+        let regions = (segmentation graph).Regions |> List.map (fun region -> if region.Identity = "first" then change region else region)
+        run (replaceRegions graph regions) None (graph.Nodes.Keys |> Set.ofSeq) |> refused expected
