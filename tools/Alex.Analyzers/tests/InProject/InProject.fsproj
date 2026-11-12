@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Alex</AssemblyName></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../ContractFixture/ContractFixture.fsproj" /></ItemGroup>
+  <ItemGroup><Compile Include="Ensure.fs" /><Compile Include="Cases.fs" /></ItemGroup>
+</Project>

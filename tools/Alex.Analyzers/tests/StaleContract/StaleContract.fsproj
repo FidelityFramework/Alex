@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Fidelity.PSG</AssemblyName></PropertyGroup>
+  <ItemGroup><Compile Include="Contract.fs" /></ItemGroup>
+</Project>

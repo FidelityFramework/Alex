@@ -76,4 +76,13 @@
                           Permitted="$(AlexBoundaryPermitted)"
                           Scope="$(AlexBoundaryScope)" />
   </Target>
+  <Target Name="RunAlexBoundaryAnalyzer"
+          AfterTargets="Build"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(AlexBoundaryScope)' == 'library' and '$(SkipAlexBoundaryAnalyzer)' != 'true'">
+    <PropertyGroup>
+      <_AlexAnalyzersDir>$(MSBuildThisFileDirectory)../tools/Alex.Analyzers</_AlexAnalyzersDir>
+    </PropertyGroup>
+    <Exec WorkingDirectory="$(_AlexAnalyzersDir)"
+          Command="dotnet tool restore &amp;&amp; dotnet build &quot;$(_AlexAnalyzersDir)/Alex.Analyzers.fsproj&quot; --nologo -v:q &amp;&amp; dotnet fsharp-analyzers --project &quot;$(MSBuildProjectFullPath)&quot; --analyzers-path &quot;$(_AlexAnalyzersDir)/bin/Debug/net10.0&quot; --include-analyzers &quot;Alex published boundary&quot; --fail-on-type-errors" />
+  </Target>
 </Project>

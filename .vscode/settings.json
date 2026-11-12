@@ -1,0 +1,6 @@
+{
+  "FSharp.enableAnalyzers": true,
+  "FSharp.analyzersPath": [
+    "tools/Alex.Analyzers/bin/Debug/net10.0"
+  ]
+}

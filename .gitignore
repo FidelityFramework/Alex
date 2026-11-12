@@ -36,6 +36,7 @@ ScaffoldingReadMe.txt
 *.nupkg
 # NuGet Symbol Packages
 *.snupkg
+packages/
 
 # Others
 ~$*
@@ -62,7 +63,6 @@ src/directory_structure.txt
 
 .fake
 src/file_sizes.csv
-.vscode/settings.json
 src/nul
 src/.claude/settings.local.json
 # Local assistant/IDE metadata
@@ -70,8 +70,10 @@ src/.claude/settings.local.json
 .gemini/
 .serena/
 .azuredevops/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 .config/
+!/tools/Alex.Analyzers/.config/
 .devcontainer/
 # Fidelity/Clef local compiler assets
 # Multi-target projects should use `targets/` (plural) at the project level.
