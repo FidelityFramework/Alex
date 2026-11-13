@@ -45,7 +45,7 @@ let ``Pending obligation emits no solver operation or placeholder and retains re
 let ``optional Some call intent requires selected target realization and retains explicit slots`` () =
   let original = { SSA = Arg 0; Type = TMemRefStatic(1, TInt(IntWidth 8)) }
   let code = { SSA = Arg 1; Type = TFunc([], []) }
-  let slot = { Ordinal = 0; CaseOrdinal = 1; Claim = NodeId 3; Code = Some code }
+  let slot = { Ordinal = 0; Choice = OptionalEntrySlotChoice.Direct { CaseOrdinal = 1; Claim = NodeId 3; Code = Some code } }
   let operation = OptionalEntryCall(NodeId 2, [original], [slot], [])
   Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
   let error = Assert.ThrowsAny<System.Exception>(fun () ->
@@ -56,24 +56,60 @@ let ``optional Some call intent requires selected target realization and retains
     Assert.Equal(NodeId 2, site)
     Assert.Equal<Val list>([original], arguments)
     Assert.Equal(0, actual.Ordinal)
-    Assert.Equal(1, actual.CaseOrdinal)
-    Assert.Equal(NodeId 3, actual.Claim)
-    Assert.Equal(Some code, actual.Code)
+    match actual.Choice with
+    | OptionalEntrySlotChoice.Direct arm ->
+      Assert.Equal(1, arm.CaseOrdinal)
+      Assert.Equal(NodeId 3, arm.Claim)
+      Assert.Equal(Some code, arm.Code)
+    | other -> failwithf "Expected direct optional slot choice: %A" other
     Assert.Empty results
   | other -> failwithf "Optional conversion lost its explicit source incidence: %A" other
 
 [<Fact>]
 let ``optional None call intent retains the original Option without a code value`` () =
   let original = { SSA = Arg 0; Type = TMemRefStatic(1, TInt(IntWidth 8)) }
-  let slot = { Ordinal = 0; CaseOrdinal = 0; Claim = NodeId 3; Code = None }
+  let slot = { Ordinal = 0; Choice = OptionalEntrySlotChoice.Direct { CaseOrdinal = 0; Claim = NodeId 3; Code = None } }
   let operation = OptionalEntryCall(NodeId 2, [original], [slot], [])
   Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
   match OperationStructure.flatten [operation] with
   | [OptionalEntryCall(_, [actual], [slot], [])] ->
     Assert.Equal(original, actual)
-    Assert.Equal(0, slot.CaseOrdinal)
-    Assert.True(slot.Code.IsNone)
+    match slot.Choice with
+    | OptionalEntrySlotChoice.Direct arm ->
+      Assert.Equal(0, arm.CaseOrdinal)
+      Assert.True(arm.Code.IsNone)
+    | other -> failwithf "Expected direct optional absence choice: %A" other
   | other -> failwithf "None lost its original optional intent: %A" other
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``conditional optional call intent requires target realization and preserves forward and reversed arm order`` reversed =
+  let original = { SSA = Arg 0; Type = TMemRefStatic(1, TInt(IntWidth 8)) }
+  let tag = { SSA = V(5, 0); Type = TInt(IntWidth 64) }
+  let code = { SSA = Arg 1; Type = TFunc([], []) }
+  let presentArm = { CaseOrdinal = 1; Claim = NodeId 3; Code = Some code }
+  let absentArm = { CaseOrdinal = 0; Claim = NodeId 4; Code = None }
+  let whenTrue, whenFalse = if reversed then absentArm, presentArm else presentArm, absentArm
+  let slot = { Ordinal = 0; Choice = OptionalEntrySlotChoice.Conditional(NodeId 6, tag, whenTrue, whenFalse) }
+  let operation = OptionalEntryCall(NodeId 2, [original], [slot], [])
+  Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
+  let error = Assert.ThrowsAny<System.Exception>(fun () ->
+    Alex.Dialects.Core.Serialize.opToString (Ok 64) operation |> ignore)
+  Assert.Contains("exact source conversion accounts", error.Message)
+  match OperationStructure.flatten [operation] with
+  | [OptionalEntryCall(site, [actual], [held], [])] ->
+    Assert.Equal(NodeId 2, site)
+    Assert.Equal(original, actual)
+    Assert.Equal(0, held.Ordinal)
+    match held.Choice with
+    | OptionalEntrySlotChoice.Conditional(selection, heldTag, heldTrue, heldFalse) ->
+      Assert.Equal(NodeId 6, selection)
+      Assert.Equal(tag, heldTag)
+      Assert.Equal(whenTrue, heldTrue)
+      Assert.Equal(whenFalse, heldFalse)
+    | other -> failwithf "Expected conditional optional slot choice: %A" other
+  | other -> failwithf "Conditional optional intent lost its explicit source incidence: %A" other
 
 type private Callable = { Binding: NodeId; Lambda: NodeId; Argument: NodeId; Reference: NodeId; Call: NodeId }
 
@@ -812,29 +848,561 @@ let ``optional native entry boundary refuses Some and None before operand loweri
   Assert.Null(MLIRAccumulator.recallNode operand.Actual accumulator)
   Assert.Null(MLIRAccumulator.recallNode call.Site accumulator)
 
-[<Fact>]
-let ``conditional optional entry refuses without assigned tag projection`` () =
-  let graph = importedFixture ()
-  let boundary = graph.Emission.Boundary
-  let call = boundary.Calls[NodeId 34]
-  let present: BoundaryOptionalEntry =
-    { Construction = NodeId 33; CaseOrdinal = 1; Payload = Some(NodeId 31); Formation = Some(NodeId 31)
-      Transport = Set.singleton(NodeId 33); Obligation = NodeId 70 }
-  let absent = {present with Construction = NodeId 35; CaseOrdinal = 0; Payload = None; Formation = None; Obligation = NodeId 73}
-  let operand: BoundaryOperand =
-    { Actual = NodeId 33; Formal = NodeId 71; Abi = BoundaryScalar.Entry(NodeId 72); Adaptation = None
-      OptionalEntry = Some (BoundaryOptionalEntryChoice.Conditional(NodeId 36, NodeId 37, present, absent)) }
-  let changed = {boundary with Calls=boundary.Calls.Add(call.Site, {call with Arguments=[operand]})}
-  let graph = {graph with Emission={graph.Emission with Boundary=changed}}
+let private conditionalOptionalBoundaryFixture reversed =
+  let ordinarySig = functionFrom intType intType
+  let fnPtrType =
+    TypeIdentity.Application(
+      { Declaration = { Module = []; Name = "FnPtr" }; Parameters = [TypeParamKind.Type]; NativeKind = Some NTUKind.NTUfnptr },
+      [ordinarySig])
+  let optionType = optionOf fnPtrType
+  let consumerSig = functionFrom optionType unitType
+  let callerSig = functionFrom boolType unitType
+  let cbFormal = node 10 (SemanticKind.PatternBinding "x") intType [] (Some 12)
+  let cbBody = node 11 (SemanticKind.VarRef("x", Some(NodeId 10))) intType [] (Some 12)
+  let cbLambda = node 12 (SemanticKind.Lambda(["x", intType, NodeId 10], NodeId 11, [], None, LambdaContext.RegularClosure)) ordinarySig [10; 11] (Some 20)
+  let cbBinding = node 20 (SemanticKind.Binding("callback", false, false, None)) ordinarySig [12] (Some 50)
+  let ofFunctionNode =
+    node 21
+      (SemanticKind.Intrinsic { Module = IntrinsicModule.FnPtr; Operation = "ofFunction"; Category = IntrinsicCategory.Pure; FullName = "FnPtr.ofFunction" })
+      (functionFrom ordinarySig fnPtrType) [] (Some 23)
+  let cbRef = node 22 (SemanticKind.VarRef("callback", Some(NodeId 20))) ordinarySig [] (Some 23)
+  let formation = node 23 (SemanticKind.Application(NodeId 21, [NodeId 22])) fnPtrType [21; 22] (Some 25)
+  let condRef = node 24 (SemanticKind.VarRef("pred", Some(NodeId 31))) boolType [] (Some 27)
+  let someNode = node 25 (SemanticKind.DUConstruct("Some", 1, Some(NodeId 23), None)) optionType [23] (Some 27)
+  let noneNode = node 26 (SemanticKind.DUConstruct("None", 0, None, None)) optionType [] (Some 27)
+  let whenTrueNode, whenFalseNode = if reversed then noneNode, someNode else someNode, noneNode
+  let selectNode =
+    node 27 (SemanticKind.IfThenElse(condRef.Id, whenTrueNode.Id, Some whenFalseNode.Id)) optionType
+      [NodeId.value condRef.Id; NodeId.value whenTrueNode.Id; NodeId.value whenFalseNode.Id] (Some 30)
+  let tagNode =
+    { node 28 (SemanticKind.DUGetTag(selectNode.Id, optionType)) intType [27] (Some 30) with
+        ValueRange = Some(ValueRange.Bounded(0I, 1I)) }
+  let calleeLeaf = node 29 (SemanticKind.PatternBinding "consume_callback") consumerSig [] (Some 30)
+  let callNode = node 30 (SemanticKind.Application(calleeLeaf.Id, [selectNode.Id])) unitType [29; 27; 28] (Some 32)
+  let predFormal = node 31 (SemanticKind.PatternBinding "pred") boolType [] (Some 32)
+  let callerLambda = node 32 (SemanticKind.Lambda(["pred", boolType, NodeId 31], NodeId 30, [], None, LambdaContext.RegularClosure)) callerSig [31; 30] (Some 33)
+  let callerBinding = node 33 (SemanticKind.Binding("dispatch", false, false, None)) callerSig [32] (Some 34)
+  let rootSeq = node 34 (SemanticKind.Sequential [NodeId 20; NodeId 33]) unitType [20; 33] None
+  let moduleScope = { node 50 (SemanticKind.ModuleDef("Native", [NodeId 20])) unitType [] None with IsReachable = false }
+  let liveNodes =
+    [ cbFormal; cbBody; cbLambda; cbBinding; ofFunctionNode; cbRef; formation
+      condRef; someNode; noneNode; selectNode; tagNode; calleeLeaf; callNode
+      predFormal; callerLambda; callerBinding; rootSeq; moduleScope ]
+  let participant role ordinal group identity : Participant =
+    { Role = role; Ordinal = ordinal; Group = group; Node = identity }
+  let rowParticipants (row: CallableAggregateValue) =
+    [ yield participant ParticipantRole.AggregateValue 0 row.Occurrence row.Occurrence
+      yield participant ParticipantRole.AggregateSource 0 row.Occurrence row.Aggregate
+      yield participant ParticipantRole.AggregateSlot 0 row.Occurrence row.Slot
+      for ordinal, input in List.indexed row.FormationInputs do
+        yield participant ParticipantRole.AggregateInput ordinal row.Occurrence input
+      for actual in Option.toList row.Value do
+        yield participant ParticipantRole.AggregateWrite 0 row.Occurrence actual
+      for alt in row.Alternatives do
+        yield participant ParticipantRole.CallableCarrier alt.Ordinal row.Occurrence alt.Carrier
+        yield participant ParticipantRole.CallableFormation alt.Ordinal row.Occurrence alt.Formation
+        yield participant ParticipantRole.CallableContract alt.Ordinal row.Occurrence alt.Contract ]
+  let intSlot = SettledSlot.Integer(64, Some "int")
+  let intScalar = ValueRepresentation.Scalar intSlot
+  let lifetime : ProgramImageCodeLifetime = { Module = moduleScope.Id; Binding = cbBinding.Id; Implementation = cbLambda.Id }
+  let lifetimeParticipants =
+    [moduleScope.Id; cbBinding.Id; cbLambda.Id]
+    |> List.mapi (fun ordinal id -> participant ParticipantRole.CallableLifetime ordinal cbLambda.Id id)
+  let sourcePremiseParticipants =
+    [moduleScope.Id; cbBinding.Id; cbLambda.Id]
+    |> List.mapi (fun ordinal id -> participant ParticipantRole.Source ordinal cbLambda.Id id)
+  let premise form text numbers references children parent sourceType embedded reachable : BoundarySourcePremise =
+    { Shape = { Form = form; Text = text; Numbers = numbers; References = references
+                Children = children; Parent = parent; SourceType = sourceType }
+      EmbeddedTypes = embedded; ConstructorFacts = []; Reachable = reachable; Range = None
+      ExternLibrary = None; ExternSymbol = None; HasExtern = false; Metadata = Map.empty }
+  let premises =
+    Map.ofList [
+      moduleScope.Id, premise "module" ["Native"] [] [cbBinding.Id] [] None unitType [] false
+      cbBinding.Id, premise "binding" ["callback"; "no-declaration-root"] [0I; 0I] [cbLambda.Id] [cbLambda.Id] (Some moduleScope.Id) ordinarySig [] true
+      cbLambda.Id, premise "lambda" ["RegularClosure"; "x"] [1I; 0I; 0I] [cbFormal.Id; cbBody.Id] [cbFormal.Id; cbBody.Id] (Some cbBinding.Id) ordinarySig [intType] true ]
+  let target : BoundaryPlatformPremise =
+    { Id = "alex-conditional-optional-entry"; Description = None; LibraryPath = None; Loading = None; SourcePaths = Set.singleton range.File
+      Architecture = Some "x86_64"; OS = Some "linux"; RuntimeClaim = Some RuntimeModel.Libc; Substrate = Some SubstrateKind.CPU
+      Dimensions = Map.ofList ["Pointer", 64; "Register", 64]; Representations = Map.empty; EndpointReturns = Map.empty }
+  let contract : CallableContract =
+    { Identity = cbLambda.Id; Kind = CallableKind.NativeEntry
+      Convention = CallableConvention.CompilerOwnedPortable {
+        Target = target
+        ParameterConversions = [0, CallableConversion.Identity intScalar]
+        ResultConversion = CallableConversion.Identity intScalar
+        CodeLifetime = lifetime }
+      ParameterTypes = [intType]; OmittedParameters = []
+      ParameterRepresentations = [0, intScalar]
+      ResultType = intType; ResultRepresentation = intScalar
+      EnvironmentBytes = None; SourcePremises = premises
+      Participants =
+        [ participant ParticipantRole.CallableContract 0 cbLambda.Id cbLambda.Id
+          participant ParticipantRole.CallableImplementation 0 cbLambda.Id cbLambda.Id
+          participant ParticipantRole.CalleeParameter 0 cbLambda.Id cbFormal.Id
+          participant ParticipantRole.CalleeBody 0 cbLambda.Id cbBody.Id ]
+        @ lifetimeParticipants @ sourcePremiseParticipants }
+  let nativeCarrier : CallableCarrier =
+    { Occurrence = formation.Id; Kind = CallableKind.NativeEntry; Formation = formation.Id
+      EnvironmentValue = None; Contract = Result.Ok contract.Identity; Lifetime = lifetimeParticipants
+      SourceType = fnPtrType; Implementation = cbLambda.Id
+      Parameters = ["x", intType, cbFormal.Id]; ParameterShapes = [CallableValueShape.Data cbFormal.Id]
+      OmittedParameters = Set.empty; Result = cbBody.Id; ResultShape = CallableValueShape.Data cbBody.Id
+      Environment = None }
+  let cbDeclaration : CallableEmissionDeclaration =
+    { Lookup = cbLambda.Id; Implementation = cbLambda.Id
+      Parameters = ["x", intType, cbFormal.Id]; Result = cbBody.Id; Context = LambdaContext.RegularClosure
+      Captures = []; Name = CallableSymbolName.ModuleBinding("Native", "callback"); Parent = Some cbBinding.Id
+      Participants = Set.ofList [cbFormal.Id; cbBody.Id; cbLambda.Id] }
+  let slotId = NodeId 99
+  let slot : CallableAggregateSlot =
+    { Identity = slotId; AggregateType = optionType; Declaration = None; DeclarationFacts = []
+      Path = [CallableAggregatePathStep.UnionPayload(1, 0)]; SourceType = fnPtrType
+      Contract = Result.Ok contract.Identity
+      Participants = [ participant ParticipantRole.AggregateSlot 0 slotId slotId
+                       participant ParticipantRole.CallableContract 0 slotId contract.Identity ] }
+  let alternative : CallableAggregateAlternative =
+    { Ordinal = 0; Carrier = formation.Id; Formation = formation.Id; EnvironmentValue = None
+      Contract = contract.Identity; Adapter = None; EnvironmentPlacement = None }
+  let selector : CallableAggregateSelector =
+    { Lower = 0; UpperExclusive = 1; Storage = None; Slot = None; ByteOffset = None }
+  let someRow : CallableAggregateValue =
+    { Occurrence = someNode.Id; Aggregate = someNode.Id; Slot = slotId
+      Alternatives = [alternative]; Selector = Some selector
+      FormationInputs = [formation.Id]; Value = Some formation.Id; SelectedAlternative = Some 0
+      Operation = CallableAggregateOperation.Construct; Frontier = None
+      Tag = Some { Constructor = someNode.Id; TagRead = None; CaseOrdinal = 1; PayloadOrdinal = Some 0; Payload = Some formation.Id
+                   Participants = [ participant ParticipantRole.AggregateConstructor 0 someNode.Id someNode.Id
+                                    participant ParticipantRole.AggregatePayload 0 someNode.Id formation.Id ] }
+      Selection = None; Bytes = 0; Alignment = 1; Participants = []; ResultRetirement = None }
+    |> fun row -> { row with Participants = rowParticipants row }
+  let noneRow : CallableAggregateValue =
+    { Occurrence = noneNode.Id; Aggregate = noneNode.Id; Slot = slotId
+      Alternatives = []; Selector = None
+      FormationInputs = []; Value = None; SelectedAlternative = None
+      Operation = CallableAggregateOperation.Construct; Frontier = None
+      Tag = Some { Constructor = noneNode.Id; TagRead = None; CaseOrdinal = 0; PayloadOrdinal = None; Payload = None
+                   Participants = [ participant ParticipantRole.AggregateConstructor 0 noneNode.Id noneNode.Id ] }
+      Selection = None; Bytes = 0; Alignment = 1; Participants = []; ResultRetirement = None }
+    |> fun row -> { row with Participants = rowParticipants row }
+  let selectRow : CallableAggregateValue =
+    { Occurrence = selectNode.Id; Aggregate = selectNode.Id; Slot = slotId
+      Alternatives = [alternative]; Selector = Some selector
+      FormationInputs = [condRef.Id; whenTrueNode.Id; whenFalseNode.Id]; Value = None; SelectedAlternative = None
+      Operation = CallableAggregateOperation.Select; Frontier = None; Tag = None
+      Selection = Some { Condition = condRef.Id; WhenTrue = whenTrueNode.Id; WhenFalse = whenFalseNode.Id }
+      Bytes = 0; Alignment = 1; Participants = []; ResultRetirement = None }
+    |> fun row ->
+      { row with
+          Participants =
+            rowParticipants row
+            @ [ participant ParticipantRole.Source 0 selectNode.Id predFormal.Id
+                participant ParticipantRole.Source 1 selectNode.Id callerLambda.Id ] }
+  let aggregateValues =
+    Map.ofList [
+      someNode.Id, [someRow]
+      noneNode.Id, [noneRow]
+      selectNode.Id, [selectRow] ]
+  let invocationId, invocationScope, invocationRecord = NodeId 700, NodeId 701, NodeId 702
+  let importId, importBinding, formalParam = NodeId 703, NodeId 704, NodeId 705
+  let scopedDescriptorType =
+    TypeIdentity.Application(
+      { Declaration = { Module = ["BAREWire"; "Descriptors"]; Name = "Descriptors.ScopedCallbackDescriptor" }
+        Parameters = []; NativeKind = None }, [])
+  let importFacts =
+    Map.ofList [
+      importBinding, { Form = "binding"; Text = ["consume_callback"]; Numbers = [0I; 0I]; References = []; Children = []; Parent = Some moduleScope.Id; SourceType = consumerSig }
+      formalParam, { Form = "pattern-binding"; Text = ["cb"]; Numbers = []; References = []; Children = []; Parent = Some importBinding; SourceType = optionType }
+      invocationId, { Form = "quotation"; Text = []; Numbers = []; References = []; Children = []; Parent = None; SourceType = unitType }
+      invocationScope, { Form = "quotation"; Text = []; Numbers = []; References = [invocationRecord]; Children = [invocationRecord]; Parent = None; SourceType = scopedDescriptorType }
+      invocationRecord, { Form = "record"; Text = []; Numbers = []; References = []; Children = []; Parent = Some invocationScope; SourceType = scopedDescriptorType } ]
+  let imported : BoundaryImport =
+    { Identity = importId; Binding = importBinding; Scope = moduleScope.Id
+      Library = "c"; Symbol = "consume_callback"; CallingConvention = "CDecl"
+      DeclarationPath = [importBinding]
+      Parameters = [formalParam, BoundaryScalar.Entry invocationId]
+      Result = None
+      Participants = Set.ofList [importId; importBinding; formalParam; invocationId; invocationScope; invocationRecord; moduleScope.Id]
+      SourceTypes = Map.ofList [formalParam, optionType]
+      DeclarationFacts = importFacts }
+  let invocation : BoundaryCallbackInvocation =
+    { Identity = invocationId; Import = importId; Parameter = 0; Formal = formalParam; Scope = invocationScope
+      Contract =
+        { Binding = "Native.consume_callback"; Parameter = 0; Scope = "during_call"
+          Signature =
+            { Parameters = [| { Name = "x"; Type = BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Signed, 64); PassBy = BAREWire.Descriptors.PassBy.Value } |]
+              ReturnType = BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Signed, 64)
+              CallingConvention = BAREWire.Descriptors.CallConv.CDecl }
+          Hypothesis = { Identity = "callback-during-call"; Version = "1"; Source = "fixture" } }
+      Signature = { Parameters = [BoundaryScalar.Integer(64, true)]; Result = Some(BoundaryScalar.Integer(64, true)); CallingConvention = "CDecl" }
+      Extent = BoundaryCallbackExtent.DuringCall
+      Participants = Set.ofList [invocationId; invocationScope; importId; formalParam] }
+  let closedEntry : BoundaryClosedEntry =
+    { Formation = formation.Id; Operand = cbRef.Id; Declaration = cbBinding.Id; Implementation = cbLambda.Id
+      Formals = [cbFormal.Id]; Body = cbBody.Id; Lifetime = lifetime; Invocation = invocationId
+      ParameterAdaptations = [None]; ResultAdaptation = None; Registrations = Map.empty
+      Transport = Set.ofList [cbRef.Id; formation.Id; someNode.Id; selectNode.Id]
+      Participants =
+        Set.ofList [
+          cbFormal.Id; cbBody.Id; cbLambda.Id; cbBinding.Id; ofFunctionNode.Id; cbRef.Id
+          formation.Id; someNode.Id; selectNode.Id; callNode.Id; moduleScope.Id; invocationId ] }
+  let absenceQuote, absenceBinding, absenceRecord = NodeId 710, NodeId 711, NodeId 712
+  let absFieldBinding, absFieldParam, absFieldHyp = NodeId 713, NodeId 714, NodeId 715
+  let absHypId, absHypVer, absHypSrc = NodeId 716, NodeId 717, NodeId 718
+  let absenceRecordType =
+    TypeIdentity.Application(
+      { Declaration = { Module = ["BAREWire"; "Descriptors"]; Name = "Descriptors.CallbackAbsenceContract" }
+        Parameters = []; NativeKind = None }, [])
+  let absenceContract : BAREWire.Descriptors.CallbackAbsenceContract =
+    { Binding = "Native.consume_callback"; Parameter = 0
+      Hypothesis = { Identity = "callback-absence-ok"; Version = "1"; Source = "fixture" } }
+  let absenceFacts =
+    Map.ofList [
+      absenceBinding, { Form = "binding"; Text = ["consumeAbsence"]; Numbers = [0I; 0I]; References = [absenceQuote]; Children = [absenceQuote]; Parent = Some moduleScope.Id; SourceType = absenceRecordType }
+      absenceQuote, { Form = "quotation"; Text = []; Numbers = []; References = [absenceRecord]; Children = [absenceRecord]; Parent = Some absenceBinding; SourceType = absenceRecordType }
+      absenceRecord, { Form = "record"; Text = ["Binding"; "Parameter"; "Hypothesis"]; Numbers = []; References = [absFieldBinding; absFieldParam; absFieldHyp]; Children = [absFieldBinding; absFieldParam; absFieldHyp]; Parent = Some absenceQuote; SourceType = absenceRecordType }
+      absFieldBinding, { Form = "string"; Text = ["Native.consume_callback"]; Numbers = []; References = []; Children = []; Parent = Some absenceRecord; SourceType = stringType }
+      absFieldParam, { Form = "integer"; Text = []; Numbers = [0I]; References = []; Children = []; Parent = Some absenceRecord; SourceType = intType }
+      absFieldHyp, { Form = "record"; Text = ["Identity"; "Version"; "Source"]; Numbers = []; References = [absHypId; absHypVer; absHypSrc]; Children = [absHypId; absHypVer; absHypSrc]; Parent = Some absenceRecord; SourceType = unitType }
+      absHypId, { Form = "string"; Text = ["callback-absence-ok"]; Numbers = []; References = []; Children = []; Parent = Some absFieldHyp; SourceType = stringType }
+      absHypVer, { Form = "string"; Text = ["1"]; Numbers = []; References = []; Children = []; Parent = Some absFieldHyp; SourceType = stringType }
+      absHypSrc, { Form = "string"; Text = ["fixture"]; Numbers = []; References = []; Children = []; Parent = Some absFieldHyp; SourceType = stringType } ]
+  let absence : BoundaryCallbackAbsence =
+    { Quote = absenceQuote; DescriptorBinding = absenceBinding; Record = absenceRecord
+      Import = importId; Parameter = 0; Formal = formalParam; Invocation = invocationId
+      Contract = absenceContract
+      SourcePath = [absenceQuote; absenceRecord]
+      Inputs =
+        [ CallbackAbsenceInputRole.Binding, [absFieldBinding]
+          CallbackAbsenceInputRole.Parameter, [absFieldParam]
+          CallbackAbsenceInputRole.Hypothesis, [absFieldHyp]
+          CallbackAbsenceInputRole.HypothesisIdentity, [absHypId]
+          CallbackAbsenceInputRole.HypothesisVersion, [absHypVer]
+          CallbackAbsenceInputRole.HypothesisSource, [absHypSrc] ]
+      DeclarationFacts = absenceFacts }
+  let presentClaimId, absentClaimId = NodeId 720, NodeId 721
+  let presentArm : BoundaryOptionalEntry =
+    { Construction = someNode.Id; CaseOrdinal = 1; Payload = Some formation.Id; Formation = Some formation.Id
+      Transport = Set.ofList [someNode.Id; selectNode.Id]; Obligation = presentClaimId }
+  let absentArm : BoundaryOptionalEntry =
+    { Construction = noneNode.Id; CaseOrdinal = 0; Payload = None; Formation = None
+      Transport = Set.ofList [noneNode.Id; selectNode.Id]; Obligation = absentClaimId }
+  let whenTrueArm, whenFalseArm = if reversed then absentArm, presentArm else presentArm, absentArm
+  let presentClaim : ObligationInfo =
+    { Id = "opt_present_720"; Kind = "foreign-optional-entry-conversion-0"; Logic = "QF_LIA"
+      Statement = "The exact source Some selection has complete finite native-choice plan correspondence; target realization remains an artifact obligation."
+      Source = "alex-test.clef:1"; Refs = []
+      Body =
+        ObligationBody.OptionalEntryArgumentConversion {
+          Call = callNode.Id; Parameter = 0; Actual = selectNode.Id; Construction = someNode.Id
+          SourceCase = 1; Payload = formation.Id; Formation = formation.Id; Invocation = invocationId
+          Arms =
+            [ { CaseOrdinal = 0; Choice = OptionalEntryPlanChoice.PendingAbsence; Formation = None }
+              { CaseOrdinal = 1; Choice = OptionalEntryPlanChoice.ClosedEntry; Formation = Some formation.Id } ]
+          ResultRetirement = None } }
+  let absentClaim : ObligationInfo =
+    { Id = "opt_absent_721"; Kind = "foreign-optional-entry-conversion-0"; Logic = "QF_LIA"
+      Statement = "The exact source None selection has complete finite absence-choice correspondence under its external binding hypothesis; target realization remains an artifact obligation."
+      Source = "alex-test.clef:1"; Refs = []
+      Body =
+        ObligationBody.OptionalEntryAbsenceArgumentConversion {
+          Call = callNode.Id; Parameter = 0; Actual = selectNode.Id; Construction = noneNode.Id
+          SourceCase = 0; Absence = absenceQuote
+          Arms =
+            [ { CaseOrdinal = 0; Choice = OptionalEntryAbsencePlanChoice.AbsentEntry }
+              { CaseOrdinal = 1; Choice = OptionalEntryAbsencePlanChoice.RequiresClosedEntry } ]
+          ResultRetirement = None } }
+  let buildDependencyAccounts (graph: Revision) =
+    let c = graph.Emission.Callable
+    let account occurrence =
+      let rec closure seen pending values =
+        match pending with
+        | [] -> values
+        | site :: rest when Set.contains site seen -> closure seen rest values
+        | site :: rest ->
+          let rows = c.AggregateValues.TryFind site |> Option.defaultValue []
+          closure (Set.add site seen) (rest @ (rows |> List.collect _.FormationInputs)) (values @ rows)
+      let values = closure Set.empty [occurrence] []
+      let slots = values |> List.map _.Slot |> List.distinct |> List.map (fun id -> c.AggregateSlots[id])
+      let carriers = values |> List.collect _.Alternatives |> List.map _.Carrier |> List.distinct |> List.map (fun id -> c.Carriers[id])
+      let contracts = [contract]
+      let participants =
+        (slots |> List.collect _.Participants)
+        @ (values |> List.collect (fun row -> row.Participants @ (row.Tag |> Option.map _.Participants |> Option.defaultValue [])))
+        @ (carriers |> List.collect _.Lifetime)
+        @ (contracts |> List.collect _.Participants)
+      let ids = participants |> List.map _.Node |> List.distinct
+      let premiseIds = contracts |> List.collect (fun row -> row.SourcePremises.Keys |> Seq.toList) |> Set.ofList
+      let sources =
+        ids |> List.choose (fun id ->
+          (if premiseIds.Contains id then None else graph.Nodes.TryFind id)
+          |> Option.map (fun n -> { Node = id; Kind = n.Kind; Type = n.Type; Children = n.Children; Anchors = n.ObligationAnchors }))
+      { Occurrence = occurrence; Slots = slots; Values = values; Carriers = carriers; Contracts = contracts
+        Flows = []; Joins = []; Participants = participants; Sources = sources
+        Claims = ids |> List.choose (fun id -> graph.CurrentClaims.TryFind id |> Option.map (fun row -> id, row))
+        Symbols = [cbLambda.Id, cbDeclaration.Name]; Inactivity = []; MemoryPolicy = None }
+    c.AggregateValues |> Map.map (fun occurrence _ -> account occurrence)
+  let optionComponent = ValueRepresentation.CallableComponent(slotId, ValueRepresentation.Record([], Some([], 0, 1)))
+  let optionRep = ValueRepresentation.Union(["None", []; "Some", [optionComponent]], Some(1, 1, 1))
+  let unitRep = ValueRepresentation.Scalar SettledSlot.Unit
+  let boolRep = ValueRepresentation.Scalar SettledSlot.Bool
+  let tagRepresentation : NumericRepresentation =
+    { Name = "int"; Capability = "native"; Family = "int"; Bits = 64
+      MinMagnitude = "-9223372036854775808"; MaxMagnitude = "9223372036854775807"; Boundary = "checked" }
+  let tagCarrier : ScalarCarrier =
+    { Site = tagNode.Id; SourceType = intType; Representation = Some tagRepresentation
+      Declaration = None; Slot = intSlot; Range = ValueRange.Bounded(0I, 1I)
+      Participants = Set.ofList [tagNode.Id; selectNode.Id]; Obligations = [] }
+  let baseGraph = revision liveNodes |> declareBindingReadings
+  let shapes =
+    baseGraph.Nodes
+    |> Map.remove moduleScope.Id
+    |> Map.map (fun id _ ->
+      if id = formation.Id then CallableValueShape.Callable id else CallableValueShape.Data id)
+    |> Map.add formalParam (CallableValueShape.Data formalParam)
+  let nonExecutableMeta = [formalParam]
+  let aliasTargets =
+    (baseGraph.Nodes |> Map.remove moduleScope.Id |> Map.map (fun id _ -> id))
+    |> Map.add formalParam formalParam
+  let closedData =
+    shapes |> Map.toSeq |> Seq.choose (fun (id, s) -> match s with CallableValueShape.Data d -> Some d | _ -> None) |> Set.ofSeq
+  let allSupportSet =
+    Set.union ((baseGraph.Nodes |> Map.remove moduleScope.Id).Keys |> Set.ofSeq) (Set.ofList nonExecutableMeta)
+  let supports =
+    allSupportSet |> Seq.map (fun id -> id, allSupportSet) |> Map.ofSeq
+  let sourceTypes =
+    (baseGraph.Nodes |> Map.remove moduleScope.Id |> Map.map (fun _ n -> n.Type))
+    |> Map.add formalParam optionType
+  let representations =
+    baseGraph.Nodes
+    |> Map.remove moduleScope.Id
+    |> Map.map (fun id n ->
+      if id = formation.Id then
+        Result.Error "A callable remains a function value and has no numeric data representation."
+      elif id = someNode.Id || id = noneNode.Id || id = selectNode.Id then
+        Result.Ok optionRep
+      elif n.Type = intType then
+        Result.Ok intScalar
+      elif n.Type = boolType then
+        Result.Ok boolRep
+      else
+        Result.Ok unitRep)
+    |> Map.add formalParam (Result.Ok optionRep)
+  let preAccountGraph =
+    { baseGraph with
+        Nodes = baseGraph.Nodes.Remove moduleScope.Id
+        Platform = { Register = Ok 64; Pointer = Ok 64 }
+        CurrentClaims = Map.ofList [presentClaimId, presentClaim; absentClaimId, absentClaim]
+        Obligations = [presentClaim; absentClaim]
+        Codata =
+          { baseGraph.Codata with
+              FunctionPointers = Map.ofList [formation.Id, FunctionPointerPlan.Address("Native.callback", cbLambda.Id)] }
+        Emission =
+          { baseGraph.Emission with
+              Callable =
+                { baseGraph.Emission.Callable with
+                    Contracts = Map.ofList [contract.Identity, contract]
+                    Carriers = Map.ofList [formation.Id, nativeCarrier]
+                    Declarations = Map.ofList [cbLambda.Id, cbDeclaration]
+                    Symbols = Map.ofList [cbLambda.Id, cbDeclaration.Name]
+                    NativeEntries = Map.ofList [cbLambda.Id, "Native.callback"]
+                    DefinitionOnlyBindings = Set.singleton cbBinding.Id
+                    UnitNodes = Set.ofList [callNode.Id; rootSeq.Id]
+                    AggregateSlots = Map.ofList [slotId, slot]
+                    AggregateValues = aggregateValues
+                    ValueShapes = shapes
+                    AliasTargets = aliasTargets
+                    Supports = supports
+                    ClosedData = closedData }
+              Numeric =
+                { baseGraph.Emission.Numeric with
+                    SourceTypes = sourceTypes
+                    OccurrenceRepresentations = representations
+                    Values = Map.ofList [tagNode.Id, tagCarrier] } } }
+  let dependencies = buildDependencyAccounts preAccountGraph
+  let ownSources = dependencies[selectNode.Id].Sources |> List.map _.Node |> Set.ofList
+  let presentSupport =
+    Set.unionMany [
+      ownSources
+      presentArm.Transport
+      Set.ofList [callNode.Id; importId; calleeLeaf.Id; selectNode.Id; formalParam; someNode.Id]
+      imported.Participants
+      invocation.Participants ]
+  let absentExtra = absence.DeclarationFacts |> Map.keys |> Set.ofSeq
+  let absentSupport =
+    Set.unionMany [
+      ownSources
+      absentArm.Transport
+      Set.ofList [callNode.Id; importId; calleeLeaf.Id; selectNode.Id; formalParam; noneNode.Id]
+      imported.Participants
+      invocation.Participants
+      absentExtra ]
+  let callParticipants =
+    Set.unionMany [
+      presentSupport
+      absentSupport
+      Set.ofList [tagNode.Id; presentClaimId; absentClaimId; formation.Id] ]
+  let choice = BoundaryOptionalEntryChoice.Conditional(selectNode.Id, tagNode.Id, whenTrueArm, whenFalseArm)
+  let operand : BoundaryOperand =
+    { Actual = selectNode.Id; Formal = formalParam; Abi = BoundaryScalar.Entry invocationId
+      Adaptation = None; OptionalEntry = Some choice }
+  let boundaryCall : BoundaryCall =
+    { Site = callNode.Id; Import = importId; Resource = None; Callee = calleeLeaf.Id; Entry = None
+      Arguments = [operand]; ErasedUnitArguments = []; Result = None; ResultAdaptation = None
+      Participants = callParticipants; SourceTypes = Map.ofList [formalParam, optionType; selectNode.Id, optionType] }
+  let callable = { preAccountGraph.Emission.Callable with AggregateDependencies = dependencies }
+  { preAccountGraph with
+      ObligationSources =
+        Map.ofList [
+          presentClaimId, [List.distinct (callNode.Id :: Set.toList presentSupport)]
+          absentClaimId, [List.distinct (callNode.Id :: Set.toList absentSupport)] ]
+      Codata =
+        { preAccountGraph.Codata with
+            CallableContracts = callable.Contracts
+            CallableCarriers = callable.Carriers
+            CallableFlows = callable.Flows
+            CallableAggregateSlots = callable.AggregateSlots
+            CallableAggregateValues = callable.AggregateValues
+            CallableAggregateDependencies = callable.AggregateDependencies }
+      Emission =
+        { preAccountGraph.Emission with
+            Callable = callable
+            Boundary =
+              { preAccountGraph.Emission.Boundary with
+                  Imports = Map.ofList [importId, imported]
+                  ByScope = Map.ofList [moduleScope.Id, [importId]]
+                  CallbackInvocations = Map.ofList [invocationId, invocation]
+                  ClosedEntries = Map.ofList [formation.Id, closedEntry]
+                  CallbackAbsences = Map.ofList [absenceQuote, absence]
+                  Calls = Map.ofList [callNode.Id, boundaryCall] } } }
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``conditional optional boundary call witnesses assigned tag projection and arm conversion citizens`` reversed =
+  let graph = conditionalOptionalBoundaryFixture reversed
+  let violations = Integrity.check graph
+  Assert.True(violations.IsEmpty, sprintf "Expected valid conditional optional-entry revision, found: %A" violations)
+  let validatedSome =
+    Alex.Patterns.CallableAggregatePatterns.validateOperation
+      graph (NodeId 25) graph.Nodes[NodeId 25].Kind
+  Assert.True(Result.isOk validatedSome, sprintf "Expected Some construction to validate under Conditional choice: %A" validatedSome)
+  let call = graph.Emission.Boundary.Calls[NodeId 30]
+  let operand = call.Arguments.Head
+  Assert.Equal(
+    Result.Error "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it.",
+    BoundaryAbi.optionalEntryConversionAt graph call 0 operand)
+  Assert.Equal(
+    Result.Error "Optional native-entry absence conversion lacks its exact current source account.",
+    BoundaryAbi.optionalEntryAbsenceConversionAt graph call 0 operand)
   let accumulator = MLIRAccumulator.empty ()
-  let ctx = context graph call.Site accumulator
-  match Alex.XParsec.PSGCombinators.tryMatchWithDiagnostics
-          Alex.Patterns.PlatformPatterns.pBoundaryCall graph graph.Nodes[call.Site]
-          ctx.Zipper ctx.Coeffects accumulator with
-  | Result.Error reason -> Assert.Equal("Conditional optional-entry conversion requires source-authored assigned tag projection and both arm conversions.", reason)
-  | Result.Ok result -> failwithf "Unassigned conditional entry was lowered: %A" result
+  let optionCarrier = TMemRefStatic(1, TInt(IntWidth 8))
+  let tagCarrier = TInt(IntWidth 64)
+  MLIRAccumulator.bindNode (NodeId 27) (Arg 0) optionCarrier accumulator
+  MLIRAccumulator.bindNode (NodeId 28) (V(28, 0)) tagCarrier accumulator
+  match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus graph graph.Nodes[NodeId 30]) 64 accumulator with
+  | Result.Ok((operations, TRVoid), _) ->
+    Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None operations)
+    match operations with
+    | [ FuncOp(FuncConstant(codeSSA, "Native.callback", sigType))
+        OptionalEntryCall(site, [actual], [slot], results) ] ->
+      let expectedSig = TFunc([TInt(IntWidth 64)], [TInt(IntWidth 64)])
+      Assert.Equal(expectedSig, sigType)
+      Assert.Equal(NodeId 30, site)
+      Assert.Equal({ SSA = Arg 0; Type = optionCarrier }, actual)
+      Assert.Equal(0, slot.Ordinal)
+      Assert.Empty results
+      match slot.Choice with
+      | OptionalEntrySlotChoice.Conditional(selection, heldTag, heldTrue, heldFalse) ->
+        Assert.Equal(NodeId 27, selection)
+        Assert.Equal({ SSA = V(28, 0); Type = tagCarrier }, heldTag)
+        let expectedPresent = { CaseOrdinal = 1; Claim = NodeId 720; Code = Some { SSA = codeSSA; Type = expectedSig } }
+        let expectedAbsent = { CaseOrdinal = 0; Claim = NodeId 721; Code = None }
+        if reversed then
+          Assert.Equal(expectedAbsent, heldTrue)
+          Assert.Equal(expectedPresent, heldFalse)
+        else
+          Assert.Equal(expectedPresent, heldTrue)
+          Assert.Equal(expectedAbsent, heldFalse)
+      | other -> failwithf "Expected conditional optional slot choice: %A" other
+    | other -> failwithf "Unexpected witnessed operations for conditional optional boundary call: %A" other
+  | other -> failwithf "Valid conditional optional boundary call was refused: %A" other
+
+[<Theory>]
+[<InlineData("missing-tag", false)>]
+[<InlineData("missing-tag", true)>]
+[<InlineData("wrong-tag-target", false)>]
+[<InlineData("duplicate-case", false)>]
+[<InlineData("shared-obligation", true)>]
+[<InlineData("missing-select", false)>]
+[<InlineData("missing-absence-account", true)>]
+[<InlineData("unwitnessed-tag", false)>]
+[<InlineData("unwitnessed-tag", true)>]
+let ``conditional optional entry refuses malformed tag projection or arm conversion accounts`` defect reversed =
+  let baseGraph = conditionalOptionalBoundaryFixture reversed
+  Assert.Empty(Integrity.check baseGraph)
+  let boundary = baseGraph.Emission.Boundary
+  let call = boundary.Calls[NodeId 30]
+  let operand = call.Arguments.Head
+  let whenTrue, whenFalse =
+    match operand.OptionalEntry with
+    | Some(BoundaryOptionalEntryChoice.Conditional(_, _, t, f)) -> t, f
+    | other -> failwithf "Expected conditional choice in base fixture: %A" other
+  let mutateChoice choice =
+    let changedOperand = { operand with OptionalEntry = Some choice }
+    let changedCall = { call with Arguments = [changedOperand] }
+    let changedBoundary = { boundary with Calls = boundary.Calls.Add(call.Site, changedCall) }
+    { baseGraph with Emission = { baseGraph.Emission with Boundary = changedBoundary } }
+  let graph =
+    match defect with
+    | "missing-tag" ->
+      { baseGraph with Nodes = baseGraph.Nodes.Remove(NodeId 28) }
+    | "wrong-tag-target" ->
+      let wrongTag = { baseGraph.Nodes[NodeId 28] with Kind = SemanticKind.DUGetTag(NodeId 26, baseGraph.Nodes[NodeId 27].Type) }
+      { baseGraph with Nodes = baseGraph.Nodes.Add(NodeId 28, wrongTag) }
+    | "duplicate-case" ->
+      let dupTrue = { whenTrue with CaseOrdinal = 1 }
+      let dupFalse = { whenFalse with CaseOrdinal = 1 }
+      mutateChoice (BoundaryOptionalEntryChoice.Conditional(NodeId 27, NodeId 28, dupTrue, dupFalse))
+    | "shared-obligation" ->
+      let sharedFalse = { whenFalse with Obligation = whenTrue.Obligation }
+      mutateChoice (BoundaryOptionalEntryChoice.Conditional(NodeId 27, NodeId 28, whenTrue, sharedFalse))
+    | "missing-select" ->
+      let callable =
+        { baseGraph.Emission.Callable with
+            AggregateValues = baseGraph.Emission.Callable.AggregateValues.Remove(NodeId 27) }
+      { baseGraph with Emission = { baseGraph.Emission with Callable = callable } }
+    | "missing-absence-account" ->
+      let changedBoundary = { boundary with CallbackAbsences = Map.empty }
+      { baseGraph with Emission = { baseGraph.Emission with Boundary = changedBoundary } }
+    | "unwitnessed-tag" ->
+      baseGraph
+    | other -> failwithf "Unknown conditional optional defect: %s" other
+  let mutatedCall = graph.Emission.Boundary.Calls[NodeId 30]
+  let mutatedOperand = mutatedCall.Arguments.Head
+  Assert.Equal(
+    Result.Error "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it.",
+    BoundaryAbi.optionalEntryConversionAt graph mutatedCall 0 mutatedOperand)
+  Assert.Equal(
+    Result.Error "Optional native-entry absence conversion lacks its exact current source account.",
+    BoundaryAbi.optionalEntryAbsenceConversionAt graph mutatedCall 0 mutatedOperand)
+  let accumulator = MLIRAccumulator.empty ()
+  if defect = "unwitnessed-tag" then
+    let optionCarrier = TMemRefStatic(1, TInt(IntWidth 8))
+    MLIRAccumulator.bindNode mutatedOperand.Actual (Arg 0) optionCarrier accumulator
+  match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus graph graph.Nodes[NodeId 30]) 64 accumulator with
+  | Result.Error reason ->
+    let expectedReason =
+      if defect = "unwitnessed-tag" then
+        "Conditional optional entry at boundary call 30 operand 0 has unwitnessed tag projection 28."
+      else
+        "Conditional optional-entry conversion at boundary call 30 operand 0 requires source-authored assigned tag projection and both arm conversions."
+    Assert.Equal(expectedReason, reason)
+  | Result.Ok result -> failwithf "Malformed conditional entry (%s) was lowered: %A" defect result
   Assert.Empty accumulator.AllOps
-  Assert.Null(MLIRAccumulator.recallNode operand.Actual accumulator)
+  if defect <> "unwitnessed-tag" then
+    Assert.Null(MLIRAccumulator.recallNode mutatedOperand.Actual accumulator)
+  Assert.Null(MLIRAccumulator.recallNode (NodeId 28) accumulator)
   Assert.Null(MLIRAccumulator.recallNode call.Site accumulator)
 
 /// The imported operand is the declaration reference from the real source

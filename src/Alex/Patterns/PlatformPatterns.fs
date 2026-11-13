@@ -386,7 +386,9 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                             | Result.Ok _ -> return ()
                             | Result.Error reason -> return! fail (Message reason)
                         | Some (BoundaryOptionalEntryChoice.Conditional _) ->
-                            return! fail (Message "Conditional optional-entry conversion requires source-authored assigned tag projection and both arm conversions.")
+                            match BoundaryAbi.optionalEntryConditionalAt state.Graph call ordinal operand with
+                            | Result.Ok _ -> return ()
+                            | Result.Error reason -> return! fail (Message reason)
                     }) |> Alex.XParsec.Extensions.sequence
                 return ()
             }
@@ -429,8 +431,8 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                 do! ensure (operand.Adaptation.IsNone
                                             && raw.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual)
                                         "Optional absence intent differs from its original Option operand."
-                                return [], raw, Some { Ordinal = ordinal; CaseOrdinal = selected.CaseOrdinal
-                                                       Claim = selected.Obligation; Code = None }
+                                let arm = { CaseOrdinal = selected.CaseOrdinal; Claim = selected.Obligation; Code = None }
+                                return [], raw, Some { Ordinal = ordinal; Choice = OptionalEntrySlotChoice.Direct arm }
                             | Some (BoundaryOptionalEntryChoice.Direct _) ->
                                 let! selected, _, model =
                                     match BoundaryAbi.optionalEntryConversionAt state.Graph call ordinal operand with
@@ -461,11 +463,39 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                 do! ensure (operand.Adaptation.IsNone && codeType = signature
                                             && raw.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual)
                                         "Optional entry intent differs from its original Option operand or retained closed code."
-                                return codeOps, raw,
-                                       Some { Ordinal = ordinal; CaseOrdinal = selected.CaseOrdinal
-                                              Claim = selected.Obligation; Code = Some {SSA = code; Type = codeType} }
+                                let arm = { CaseOrdinal = selected.CaseOrdinal; Claim = selected.Obligation; Code = Some { SSA = code; Type = codeType } }
+                                return codeOps, raw, Some { Ordinal = ordinal; Choice = OptionalEntrySlotChoice.Direct arm }
                             | Some (BoundaryOptionalEntryChoice.Conditional _) ->
-                                return! fail (Message "Conditional optional-entry conversion requires source-authored assigned tag projection and both arm conversions.")
+                                let (NodeId siteId) = call.Site
+                                let! selection, tagProjection, selectedRow, whenTrueIsSome, (presentSelected, _, presentModel), (absentSelected, _, absentModel, _) =
+                                    match BoundaryAbi.optionalEntryConditionalAt state.Graph call ordinal operand with
+                                    | Result.Ok row -> preturn row
+                                    | Result.Error reason -> fail (Message reason)
+                                let (NodeId tagId) = tagProjection
+                                let! tagSSA, tagType =
+                                    match Alex.Traversal.TransferTypes.MLIRAccumulator.recallNode tagProjection state.Accumulator with
+                                    | Some (ssa, ty) -> preturn (ssa, ty)
+                                    | None -> fail (Message $"Conditional optional entry at boundary call {siteId} operand {ordinal} has unwitnessed tag projection {tagId}.")
+                                let! _, symbol, signature =
+                                    match FunctionPointerPatterns.closedFunctionAddress state.Graph presentModel.Formation with
+                                    | Result.Ok row -> preturn row
+                                    | Result.Error reason -> fail (Message $"Conditional optional entry at boundary call {siteId} operand {ordinal}: {reason}")
+                                do! ensure (operand.Adaptation.IsNone
+                                            && presentModel.ResultRetirement.IsNone
+                                            && absentModel.ResultRetirement.IsNone
+                                            && tagType = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph tagProjection
+                                            && raw.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual)
+                                        $"Conditional optional entry intent at boundary call {siteId} operand {ordinal} differs from its published Option operand, tag projection or closed code."
+                                let code = Alex.Traversal.Values.aggregateComponent node.Id selectedRow.Slot ordinal 14
+                                let! operation = pFuncConstant code symbol signature
+                                let presentArm = { CaseOrdinal = 1; Claim = presentSelected.Obligation; Code = Some { SSA = code; Type = signature } }
+                                let absentArm = { CaseOrdinal = 0; Claim = absentSelected.Obligation; Code = None }
+                                let whenTrueArm, whenFalseArm =
+                                    if whenTrueIsSome then presentArm, absentArm
+                                    else absentArm, presentArm
+                                return [operation], raw,
+                                       Some { Ordinal = ordinal
+                                              Choice = OptionalEntrySlotChoice.Conditional(selection, { SSA = tagSSA; Type = tagType }, whenTrueArm, whenFalseArm) }
                             | None ->
                                 let! operations, value =
                                     match witnessed.TryFind operand.Actual with

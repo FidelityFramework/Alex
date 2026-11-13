@@ -68,12 +68,16 @@ let private nativeAlternative (graph: Revision) (row: CallableAggregateValue)
             |> Seq.exists (fun call ->
                 call.Arguments |> List.mapi (fun ordinal operand -> ordinal, operand)
                 |> List.exists (fun (ordinal, operand) ->
-                    match BoundaryAbi.optionalEntryConversionAt graph call ordinal operand with
-                    | Result.Ok(selected, _, model) ->
+                    let matches (selected: BoundaryOptionalEntry) (model: OptionalEntryArgumentConversionModel) =
                         model.Construction = row.Occurrence && row.Aggregate = row.Occurrence &&
                         model.Payload = carrier.Occurrence && model.Formation = arm.Formation &&
                         selected.Transport.Contains row.Occurrence && selected.Transport.Contains model.Actual
-                    | Result.Error _ -> false))
+                    match BoundaryAbi.optionalEntryConversionAt graph call ordinal operand with
+                    | Result.Ok(selected, _, model) -> matches selected model
+                    | Result.Error _ ->
+                        match BoundaryAbi.optionalEntryConditionalAt graph call ordinal operand with
+                        | Result.Ok(_, _, _, _, (selected, _, model), _) -> matches selected model
+                        | Result.Error _ -> false))
         | _ -> false
     let singleton =
         row.Alternatives = [arm] && arm.Ordinal = 0 && row.Bytes = 0 &&

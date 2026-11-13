@@ -373,13 +373,23 @@ type ModuleText =
     | Available of string
     | NeedsTargetRealization
 
-/// One source-selected optional entry position. The original Option operand
-/// stays in the call vector; this code value is its retained closed formation.
-type OptionalEntrySlot = {
-    Ordinal: int
+/// One source-selected optional entry arm. Absence supplies no code value.
+type OptionalEntryArm = {
     CaseOrdinal: int
     Claim: Fidelity.PSG.NodeId
     Code: Val option
+}
+
+[<RequireQualifiedAccess>]
+type OptionalEntrySlotChoice =
+    | Direct of OptionalEntryArm
+    | Conditional of selection: Fidelity.PSG.NodeId * tag: Val * whenTrue: OptionalEntryArm * whenFalse: OptionalEntryArm
+
+/// One source-selected optional entry position. The original Option operand
+/// stays in the call vector; any retained closed formation stays typed until target realization.
+type OptionalEntrySlot = {
+    Ordinal: int
+    Choice: OptionalEntrySlotChoice
 }
 
 /// Top-level portable operation. Target dialects belong to backend realization.
@@ -530,40 +540,37 @@ and SMTOp =
     | SMTCheck                                      // smt.check sat {} unknown {} unsat {}
 
 module BoundaryAbi =
-    /// Read the current per-use source plan. This does not realize a native
-    /// address or treat the source solver receipt as target discharge.
-    let optionalEntryConversionAt (revision: Fidelity.PSG.Revision)
-                                  (call: Fidelity.PSG.BoundaryCall) ordinal
-                                  (operand: Fidelity.PSG.BoundaryOperand) =
-        let missing () = Error "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it."
-        match operand.OptionalEntry with
-        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Direct selected) ->
-            match selected.Payload, selected.Formation, operand.Abi,
-                  revision.CurrentClaims.TryFind selected.Obligation with
-            | Some payload, Some formation, Fidelity.PSG.BoundaryScalar.Entry invocation, Some claim
-                when List.contains claim revision.Obligations ->
-                match claim.Body with
-                | Fidelity.PSG.ObligationBody.OptionalEntryArgumentConversion model when
-                    revision.Emission.Boundary.Calls.TryFind call.Site = Some call
-                    && List.tryItem ordinal call.Arguments = Some operand
-                    && claim.Kind = sprintf "foreign-optional-entry-conversion-%d" ordinal
-                    && selected.CaseOrdinal = 1 && model.SourceCase = selected.CaseOrdinal
-                    && model.Call = call.Site && model.Parameter = ordinal
-                    && model.Actual = operand.Actual && model.Construction = selected.Construction
-                    && model.Payload = payload && model.Formation = formation && model.Invocation = invocation ->
-                    Ok(selected, claim, model)
-                | _ -> missing ()
-            | _ -> missing ()
-        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Conditional _) | None -> missing ()
+    let private optionalEntryPresentArmAt (revision: Fidelity.PSG.Revision)
+                                          (call: Fidelity.PSG.BoundaryCall) ordinal
+                                          (operand: Fidelity.PSG.BoundaryOperand)
+                                          (selected: Fidelity.PSG.BoundaryOptionalEntry)
+                                          missing =
+        match selected.Payload, selected.Formation, operand.Abi,
+              revision.CurrentClaims.TryFind selected.Obligation with
+        | Some payload, Some formation, Fidelity.PSG.BoundaryScalar.Entry invocation, Some claim
+            when List.contains claim revision.Obligations ->
+            match claim.Body with
+            | Fidelity.PSG.ObligationBody.OptionalEntryArgumentConversion model when
+                revision.Emission.Boundary.Calls.TryFind call.Site = Some call
+                && List.tryItem ordinal call.Arguments = Some operand
+                && claim.Kind = sprintf "foreign-optional-entry-conversion-%d" ordinal
+                && selected.CaseOrdinal = 1 && model.SourceCase = selected.CaseOrdinal
+                && model.Call = call.Site && model.Parameter = ordinal
+                && model.Actual = operand.Actual && model.Construction = selected.Construction
+                && model.Payload = payload && model.Formation = formation && model.Invocation = invocation ->
+                Ok(selected, claim, model)
+            | _ -> Error missing
+        | _ -> Error missing
 
-    /// Absence has its own current per-use account. It supplies no callable
-    /// formation, payload or native null value to the portable witness.
-    let optionalEntryAbsenceConversionAt (revision: Fidelity.PSG.Revision)
+    let private optionalEntryAbsentArmAt (revision: Fidelity.PSG.Revision)
                                          (call: Fidelity.PSG.BoundaryCall) ordinal
-                                         (operand: Fidelity.PSG.BoundaryOperand) =
-        let missing () = Error "Optional native-entry absence conversion lacks its exact current source account."
-        match operand.OptionalEntry with
-        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Direct selected) when selected.CaseOrdinal = 0 && selected.Payload.IsNone && selected.Formation.IsNone ->
+                                         (operand: Fidelity.PSG.BoundaryOperand)
+                                         (selected: Fidelity.PSG.BoundaryOptionalEntry)
+                                         missing
+                                         stalePrefix =
+        if selected.CaseOrdinal <> 0 || selected.Payload.IsSome || selected.Formation.IsSome then
+            Error missing
+        else
             match operand.Abi, revision.CurrentClaims.TryFind selected.Obligation with
             | Fidelity.PSG.BoundaryScalar.Entry invocation, Some claim when List.contains claim revision.Obligations ->
                 match claim.Body with
@@ -581,12 +588,93 @@ module BoundaryAbi =
                         | [] ->
                             Fidelity.PSG.OptionalEntryArgumentProof.projectAbsence model
                             |> Result.map (fun _ -> selected, claim, model, absence)
-                        | violations -> Error ("Optional native-entry absence conversion has stale published source facts: "
-                                               + Fidelity.PSG.Integrity.describe violations)
-                    | _ -> missing ()
-                | _ -> missing ()
-            | _ -> missing ()
-        | _ -> missing ()
+                        | violations -> Error (stalePrefix + Fidelity.PSG.Integrity.describe violations)
+                    | _ -> Error missing
+                | _ -> Error missing
+            | _ -> Error missing
+
+    /// Read the current per-use source plan. This does not realize a native
+    /// address or treat the source solver receipt as target discharge.
+    let optionalEntryConversionAt (revision: Fidelity.PSG.Revision)
+                                  (call: Fidelity.PSG.BoundaryCall) ordinal
+                                  (operand: Fidelity.PSG.BoundaryOperand) =
+        let missing = "Optional native-entry boundary conversion requires target-pathway authority; this consumer does not admit it."
+        match operand.OptionalEntry with
+        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Direct selected) ->
+            optionalEntryPresentArmAt revision call ordinal operand selected missing
+        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Conditional _) | None -> Error missing
+
+    /// Absence has its own current per-use account. It supplies no callable
+    /// formation, payload or native null value to the portable witness.
+    let optionalEntryAbsenceConversionAt (revision: Fidelity.PSG.Revision)
+                                         (call: Fidelity.PSG.BoundaryCall) ordinal
+                                         (operand: Fidelity.PSG.BoundaryOperand) =
+        let missing = "Optional native-entry absence conversion lacks its exact current source account."
+        match operand.OptionalEntry with
+        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Direct selected) ->
+            optionalEntryAbsentArmAt
+                revision call ordinal operand selected missing
+                "Optional native-entry absence conversion has stale published source facts: "
+        | _ -> Error missing
+
+    /// Read the source-published conditional optional-entry account: assigned tag
+    /// projection, unique callable Select row, and both arm conversion citizens.
+    let optionalEntryConditionalAt (revision: Fidelity.PSG.Revision)
+                                   (call: Fidelity.PSG.BoundaryCall) ordinal
+                                   (operand: Fidelity.PSG.BoundaryOperand) =
+        let (Fidelity.PSG.NodeId siteId) = call.Site
+        let missing =
+            $"Conditional optional-entry conversion at boundary call {siteId} operand {ordinal} requires source-authored assigned tag projection and both arm conversions."
+        let stalePrefix =
+            $"Conditional optional native-entry conversion at boundary call {siteId} operand {ordinal} has stale published source facts: "
+        match operand.OptionalEntry with
+        | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Conditional(selection, tagProjection, whenTrue, whenFalse)) ->
+            let tagCurrent =
+                match revision.Nodes.TryFind tagProjection, revision.Nodes.TryFind operand.Actual with
+                | Some { Kind = Fidelity.PSG.SemanticKind.DUGetTag(tagTarget, unionType); Children = [tagChild]; Type = tagType; ValueRange = tagRange },
+                  Some actualNode ->
+                    tagTarget = operand.Actual
+                    && tagChild = operand.Actual
+                    && unionType = actualNode.Type
+                    && tagRange = Some(Fidelity.PSG.ValueRange.Bounded(0I, 1I))
+                    && call.Participants.Contains tagProjection
+                    && (revision.Nodes.TryFind call.Site |> Option.exists (fun siteNode -> List.contains tagProjection siteNode.Children))
+                    && (revision.Emission.Numeric.Values.TryFind tagProjection
+                        |> Option.exists (fun carrier ->
+                            carrier.Site = tagProjection
+                            && carrier.SourceType = tagType
+                            && carrier.Range = Fidelity.PSG.ValueRange.Bounded(0I, 1I)
+                            && carrier.Participants.Contains operand.Actual))
+                | _ -> false
+            let selections =
+                revision.Emission.Callable.AggregateValues.TryFind selection
+                |> Option.defaultValue []
+                |> List.filter (fun row -> row.Operation = Fidelity.PSG.CallableAggregateOperation.Select)
+            match selections with
+            | [selectedRow] when
+                tagCurrent
+                && operand.Adaptation.IsNone
+                && selectedRow.Occurrence = selection
+                && selectedRow.Aggregate = selection
+                && whenTrue.Construction <> whenFalse.Construction
+                && whenTrue.Obligation <> whenFalse.Obligation
+                && Set.ofList [whenTrue.CaseOrdinal; whenFalse.CaseOrdinal] = Set.ofList [0; 1]
+                && (selectedRow.Selection |> Option.exists (fun held ->
+                    held.WhenTrue = whenTrue.Construction && held.WhenFalse = whenFalse.Construction)) ->
+                let whenTrueIsSome = whenTrue.CaseOrdinal = 1
+                let presentCandidate, absentCandidate =
+                    if whenTrueIsSome then whenTrue, whenFalse
+                    else whenFalse, whenTrue
+                match optionalEntryPresentArmAt revision call ordinal operand presentCandidate missing,
+                      optionalEntryAbsentArmAt revision call ordinal operand absentCandidate missing stalePrefix with
+                | Ok presentArm, Ok absentArm ->
+                    match Fidelity.PSG.Integrity.check revision with
+                    | [] -> Ok(selection, tagProjection, selectedRow, whenTrueIsSome, presentArm, absentArm)
+                    | violations -> Error (stalePrefix + Fidelity.PSG.Integrity.describe violations)
+                | Error reason, _
+                | _, Error reason -> Error reason
+            | _ -> Error missing
+        | _ -> Error missing
 
     /// Read existing published lineage without classifying branch semantics or
     /// granting proof authority. Both the witness and target use these same rows.
