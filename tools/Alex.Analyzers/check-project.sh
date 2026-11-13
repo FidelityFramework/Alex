@@ -16,7 +16,7 @@ case "$mode" in
   alex|alex-boundary)
     alex_project=$(realpath "${ALEX_ANALYZER_PROJECT:-$repo_dir/src/Alex/Alex.fsproj}")
     [[ "$project" == "$alex_project" ]] || { printf 'Alex rules require the configured Alex production project.\n' >&2; exit 2; }
-    if [[ "$mode" == alex ]]; then analyzers=("Clef production baseline" "Alex published boundary"); else analyzers=("Alex published boundary"); fi
+    if [[ "$mode" == alex ]]; then analyzers=("Clef production baseline" "Alex published boundary" "Alex dependency context"); else analyzers=("Alex published boundary"); fi
     ;;
   clef) printf 'Clef mode is suspended pending an owner convention for permitted dependency sets (P-dep4).\n' >&2; exit 2 ;;
   *) printf 'Expected alex, alex-boundary or clef mode.\n' >&2; exit 2 ;;
@@ -52,7 +52,7 @@ if [[ "$mode" == alex ]]; then
   "$host" fsi "$tool_dir/ProjectInputs.fsx" --compare-preprocess "$scratch/preprocess-before.xml" "$scratch/preprocess-scrubbed.xml"
   "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -target:GenerateRestoreGraphFile "-property:RestoreGraphOutputPath=$scratch/restore-graph.json" > "$scratch/restore-graph.log"
   "${scrub[@]}" "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -target:GenerateRestoreGraphFile "-property:RestoreGraphOutputPath=$scratch/restore-graph-scrubbed.json" > "$scratch/restore-graph-scrubbed.log"
-  properties=AlexBoundaryPermitted,AlexBoundaryAlsoPermitted,AlexPermittedPackages,PsgContractProject,PsgContractLibrary,Configuration,Platform,NetCoreTargetingPackRoot,NETCoreSdkVersion,NetCoreRoot,MSBuildExtensionsPath
+  properties=AlexBoundaryPermitted,AlexBoundaryAlsoPermitted,AlexPermittedPackages,PsgContractProject,PsgContractLibrary,Configuration,Platform,NetCoreTargetingPackRoot,NETCoreSdkVersion,NetCoreRoot,MSBuildExtensionsPath,IntermediateOutputPath,GeneratedAssemblyInfoFile,TargetFrameworkMonikerAssemblyAttributesPath,GenerateAssemblyInfo,GenerateTargetFrameworkAttribute,TargetFrameworkMoniker
   "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -target:ResolveReferences -getItem:ResolvedTargetingPack,ReferencePath "-getProperty:$properties" > "$scratch/references.json"
   "${scrub[@]}" "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -target:ResolveReferences -getItem:ResolvedTargetingPack,ReferencePath "-getProperty:$properties" > "$scratch/references-scrubbed.json"
   "$host" fsi "$tool_dir/ProjectInputs.fsx" --check-owner-properties "$scratch/references.json"
@@ -76,9 +76,10 @@ set -e
 if [[ $status -ne 0 ]]; then printf 'Analyzer exited %s; see %s.\n' "$status" "$scratch/analysis.log" >&2; fi
 "$host" fsi "$tool_dir/VerifyProjectLog.fsx" "$scratch/inputs.txt" "$scratch/analysis.log" "$mode"
 if [[ "$mode" == alex ]]; then
+  "$host" fsi "$tool_dir/ProjectInputs.fsx" --compare-project-context "$scratch/report.sarif" "$scratch/references.json" "$scratch/dependencies.txt" "$scratch/inputs.txt" "$scratch/restore-graph.json" > "$scratch/loader-context.txt"
   "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU "-preprocess:$scratch/preprocess-after-analysis.xml" > "$scratch/preprocess-after-analysis.log"
   "$host" fsi "$tool_dir/ProjectInputs.fsx" --compare-preprocess "$scratch/preprocess-before.xml" "$scratch/preprocess-after-analysis.xml"
-  sha256sum "$scratch/preprocess-after-analysis.xml" >> "$scratch/dependencies.sha256"
+  sha256sum "$scratch/preprocess-after-analysis.xml" "$scratch/items.json" "$scratch/inputs.txt" "$scratch/report.sarif" "$scratch/analysis.log" "$scratch/loader-context.txt" >> "$scratch/dependencies.sha256"
 fi
 printf 'Evidence: %s\n' "$scratch"
 exit "$status"

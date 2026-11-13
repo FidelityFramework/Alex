@@ -193,6 +193,7 @@ let validateDependencies project graphPath referencePath manifestPath =
         let digest = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(output)) |> Convert.ToHexString
         evidence <- ("project-evaluation=" + path + ":" + digest) :: evidence
       let output = text (field "outputPath" restore)
+      evidence <- ("project-output-path=" + path + ":" + canonical output) :: evidence
       let assetsPath = Path.Combine(output, "project.assets.json")
       let assets = readJson assetsPath
       if not (JsonNode.DeepEquals(spec, field "project" assets)) then fail ("stale restore graph: " + path)
@@ -263,6 +264,7 @@ let validateDependencies project graphPath referencePath manifestPath =
       let target, reference, assembly = match Map.tryFind owner projectOutputs with Some value -> value | None -> fail ("missing referenced project evaluation: " + owner)
       let referenceAssembly = text (field "ReferenceAssembly" row) |> canonical
       if canonical identity <> target || referenceAssembly <> reference then fail ("project output identity mismatch: " + owner)
+      evidence <- ("project-reference-assembly=" + referenceAssembly + ":" + fileDigest referenceAssembly) :: evidence
       if AssemblyName.GetAssemblyName(identity).Name <> assembly then fail ("project assembly identity mismatch: " + owner)
     elif not (String.IsNullOrWhiteSpace framework) then
       if not (Set.contains framework activeFrameworks) then fail ("inactive framework reference: " + framework)
@@ -355,8 +357,119 @@ let validateDependencies project graphPath referencePath manifestPath =
   File.WriteAllLines(manifestPath, [ "project=" + project; "projects=" + string visited.Count; "references=" + string rows.Length; "packages=" + String.Join(";", allowedPackages); "configuration=" + configuration; "platform=" + platform; "sdk-version=" + sdkVersion; "targeting-pack-root=" + targetingPackRoot ] @ List.rev evidence)
   printfn "Dependency closure verified: %d projects, %d references." visited.Count rows.Length
 
+// Compare only project-reference evidence here; the dependency-closure check remains
+// the authority for the rest of the dependency graph. FCS may already have mapped bytes earlier.
+let compareProjectContext reportPath referencesPath manifestPath inputsPath graphPath =
+  let references = readJson referencesPath
+  let properties = field "Properties" references
+  let manifest = File.ReadAllLines(manifestPath)
+  let report = readJson reportPath
+  let results = field "runs" report |> arrayItems |> List.collect (fun run -> field "results" run |> arrayItems)
+  let records =
+    results |> List.choose (fun result ->
+      if optionalText "ruleId" result = "AXD000" then
+        Some (field "message" result |> field "text" |> text |> JsonNode.Parse)
+      else None)
+  if List.isEmpty records then fail "missing loader context records"
+  let root = field "context" (List.head records)
+  let project = field "project" root |> text |> canonical
+  if not (Array.contains ("project=" + project) manifest) then fail "loader project differs from dependency-closure check"
+  let expectedFiles = File.ReadAllLines(inputsPath) |> Array.map canonical |> Set.ofArray
+  let seenFiles = records |> List.map (fun record -> field "hashedBy" record |> text |> canonical)
+  if Set.ofList seenFiles <> expectedFiles || List.length seenFiles <> Set.count expectedFiles then fail "loader context file coverage mismatch"
+  for record in records do
+    if not (JsonNode.DeepEquals(root, field "context" record)) then fail "loader context differs across files"
+    for key, value in field "hashes" record |> objectItems do
+      if text value = "MISSING" then fail ("missing loader dependency file: " + key)
+  let hashKeys =
+    records
+    |> List.collect (fun record -> field "hashes" record |> objectItems |> List.map fst)
+    |> List.distinct
+    |> List.map (fun key -> key, canonical key)
+    |> Map.ofList
+  let canonicalHashKey key =
+    match Map.tryFind key hashKeys with
+    | Some resolved -> resolved
+    | None -> canonical key
+  let options = field "options" root |> arrayItems |> List.map text
+  if not (List.contains "--noframework" options && List.contains "--simpleresolution" options) then fail "loader option baseline changed"
+  let optionPaths =
+    options
+    |> List.choose (fun option ->
+      if option.StartsWith("-r:", StringComparison.Ordinal) then Some (canonical (option.Substring 3))
+      elif option.StartsWith("-r", StringComparison.Ordinal) || option.StartsWith("--reference", StringComparison.Ordinal) || option.StartsWith("/r", StringComparison.Ordinal) then fail ("unrecognized reference grammar: " + option)
+      else None)
+  if List.length optionPaths <> Set.count (Set.ofList optionPaths) then fail "duplicate loader reference"
+  let assemblies =
+    field "assemblies" root |> arrayItems |> List.map (fun assembly ->
+      let path = optionalText "file" assembly
+      if String.IsNullOrWhiteSpace path then fail "unresolved assembly file"
+      canonical path)
+  if List.length assemblies <> Set.count (Set.ofList assemblies) then fail "duplicate loader assembly"
+  if Set.ofList optionPaths <> Set.ofList assemblies then fail "loader/FCS reference asymmetry"
+  let rows = field "Items" references |> field "ReferencePath" |> arrayItems
+  for path in optionPaths do
+    let matches = rows |> List.filter (fun row ->
+      canonical (text (field "Identity" row)) = path ||
+      (optionalText "ReferenceSourceTarget" row = "ProjectReference" && canonical (text (field "ReferenceAssembly" row)) = path))
+    if List.length matches <> 1 then fail ("loader reference has no unique dependency-closure row: " + path)
+  let projects = rows |> List.filter (fun row -> optionalText "ReferenceSourceTarget" row = "ProjectReference")
+  let expectedProjects = projects |> List.map (fun row -> field "MSBuildSourceProjectFile" row |> text |> canonical) |> Set.ofList
+  let actualProjects = field "referencedProjects" root |> arrayItems |> List.map (text >> canonical) |> Set.ofList
+  if actualProjects <> expectedProjects then fail "loader project references differ from dependency-closure check"
+  for row in projects do
+    let path = field "ReferenceAssembly" row |> text |> canonical
+    if not (List.contains path optionPaths) || not (List.contains path assemblies) then fail ("project reference absent from loader: " + path)
+    let prefix = "project-reference-assembly=" + path + ":"
+    let evidence = manifest |> Array.filter (fun line -> line.StartsWith(prefix, StringComparison.Ordinal))
+    let expected = match evidence with [| item |] -> item.Substring(prefix.Length) | _ -> fail ("missing or ambiguous project reference digest: " + path)
+    for record in records do
+      let hashes = field "hashes" record |> objectItems |> List.filter (fun (key, _) -> canonicalHashKey key = path)
+      match hashes with
+      | [ _, value ] when text value = expected -> ()
+      | _ -> fail ("project reference digest mismatch: " + path)
+  let sourcePaths = field "sourceFiles" root |> arrayItems |> List.map (text >> canonical)
+  if List.length sourcePaths <> Set.count (Set.ofList sourcePaths) then fail "duplicate loader source file"
+  let sources = Set.ofList sourcePaths
+  if not (Set.isSubset expectedFiles sources) then fail "loader omitted evaluated source"
+  let graph = readJson graphPath
+  let projectSpec = field "projects" graph |> field project
+  let output = field "restore" projectSpec |> field "outputPath" |> text |> canonical
+  // Only MSBuild-evaluated properties use MSBuild separator syntax. Reject an
+  // existing literal-backslash path when it would name a different object.
+  let evaluatedPath (value: string) =
+    let raw = Path.Combine(Path.GetDirectoryName project, value)
+    let normalized = Path.Combine(Path.GetDirectoryName project, value.Replace('\\', '/'))
+    let resolved = canonical normalized
+    if raw <> normalized && (File.Exists raw || Directory.Exists raw) && canonical raw <> resolved then
+      fail ("ambiguous MSBuild path: " + value)
+    resolved
+  let intermediate = field "IntermediateOutputPath" properties |> text
+  let intermediatePath = evaluatedPath intermediate
+  let expectedIntermediate = Path.Combine(output, "Debug", "net10.0") |> canonical
+  if intermediatePath <> expectedIntermediate then fail "generated source outside intermediate output"
+  let expectedInfo = Path.Combine(intermediatePath, "Alex.AssemblyInfo.fs") |> canonical
+  let expectedFramework = Path.Combine(intermediatePath, ".NETCoreApp,Version=v10.0.AssemblyAttributes.fs") |> canonical
+  let generated = Set.ofList [ expectedInfo; expectedFramework ]
+  let generatedInfo = field "GeneratedAssemblyInfoFile" properties |> text |> evaluatedPath
+  let generatedFramework = field "TargetFrameworkMonikerAssemblyAttributesPath" properties |> text |> evaluatedPath
+  if generatedInfo <> expectedInfo || generatedFramework <> expectedFramework || text (field "GenerateAssemblyInfo" properties) <> "true" || text (field "GenerateTargetFrameworkAttribute" properties) <> "true" || text (field "TargetFrameworkMoniker" properties) <> ".NETCoreApp,Version=v10.0" then fail "generated source identity mismatch"
+  if Set.difference sources expectedFiles <> generated then fail "unsupported or missing generated source"
+  let verifyFileHashes paths label =
+    for path in paths do
+      let expected = fileDigest path
+      for record in records do
+        let hashes = field "hashes" record |> objectItems |> List.filter (fun (key, _) -> canonicalHashKey key = path)
+        match hashes with
+        | [ _, value ] when text value = expected -> ()
+        | _ -> fail (label + ": " + path)
+  verifyFileHashes generated "generated source changed or digest missing"
+  verifyFileHashes expectedFiles "authored source changed or digest missing"
+  printfn "Project loader context verified: %d project references, %d analyzed files." projects.Length records.Length
+
 let arguments = fsi.CommandLineArgs |> Array.skip 1
 match arguments with
+| [| "--compare-project-context"; report; references; manifest; inputs; graph |] -> compareProjectContext report references manifest inputs graph
 | [| "--host" |] ->
   match Environment.ProcessPath |> Option.ofObj with
   | Some path when not (String.IsNullOrWhiteSpace path) -> printfn "%s" (canonical path)

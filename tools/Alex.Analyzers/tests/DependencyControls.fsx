@@ -24,6 +24,7 @@ let canonical path =
 let tool = canonical (Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let root = canonical (Path.Combine(tool, "../.."))
 let scratch = Path.Combine(root, "artifacts/alex-analyzers-tests/dependency-control")
+if Directory.Exists scratch then Directory.Delete(scratch, true)
 Directory.CreateDirectory(scratch) |> ignore
 let obj entries =
   let result = JsonObject()
@@ -175,7 +176,7 @@ let runComparison name mode before after (expected: string) =
     if command.ExitCode = 0 || not (output.Contains expected) then failwithf "Dependency control %s failed (exit %d): %s" name command.ExitCode output
     printfn "PASS dependency %s" name
 let graphDifferent = Path.Combine(scratch, "graph-different.json")
-save graphDifferent (obj [ "projects", obj [] ])
+save graphDifferent (obj [ ("projects", obj []) ])
 runComparison "graph-environment" "--compare-graph" graphPath graphDifferent "restore graph depends on environment"
 if String.IsNullOrEmpty selected || selected = "response-file" then
   executed <- executed + 1
@@ -504,4 +505,181 @@ chainGraph.["projects"].[contract].["restore"].["frameworks"].["net10.0"].["proj
 let changedContract = chainGraph.["projects"].[contract]
 asset contract changedContract [ "FSharp.Core" ]
 run "foreign-chain" chainGraph refs ("project not permitted: " + foreign)
+// Synthetic SARIF exercises the existing dependency-closure comparator; actual CLI evidence
+// is separately required before claiming an in-run binding.
+let contextDir = Path.Combine(Path.GetDirectoryName rootProject, "obj", "Debug", "net10.0")
+let generatedInfo = file (Path.Combine(contextDir, "Alex.AssemblyInfo.fs"))
+let generatedFramework = file (Path.Combine(contextDir, ".NETCoreApp,Version=v10.0.AssemblyAttributes.fs"))
+let authored = file (Path.Combine(Path.GetDirectoryName rootProject, "Authored.fs"))
+let secondAuthored = file (Path.Combine(Path.GetDirectoryName rootProject, "Second.fs"))
+let contextInputs = Path.Combine(scratch, "context-inputs.txt")
+File.WriteAllLines(contextInputs, [ authored; secondAuthored ])
+let contextGraph = Path.Combine(scratch, "context-graph.json")
+save contextGraph graph
+let contextRefs = clone refs
+let contextProperties = contextRefs.["Properties"]
+for key, value in [ "IntermediateOutputPath", contextDir; "GeneratedAssemblyInfoFile", generatedInfo; "TargetFrameworkMonikerAssemblyAttributesPath", generatedFramework; "GenerateAssemblyInfo", "true"; "GenerateTargetFrameworkAttribute", "true"; "TargetFrameworkMoniker", ".NETCoreApp,Version=v10.0" ] do contextProperties.[key] <- str value
+let contextRefsPath = Path.Combine(scratch, "context-refs.json")
+save contextRefsPath contextRefs
+let contextManifest = Path.Combine(scratch, "context-manifest.txt")
+let hash path =
+  use stream = File.OpenRead(path)
+  SHA256.HashData(stream) |> Convert.ToHexString
+let projectRefPaths = [ targetRef "Contract"; targetRef "Library" ]
+let manifestLines = ("project=" + rootProject) :: (projectRefPaths |> List.map (fun path -> "project-reference-assembly=" + path + ":" + hash path))
+File.WriteAllLines(contextManifest, manifestLines)
+let context = obj [ "project", str rootProject; "sourceFiles", [ authored; secondAuthored; generatedInfo; generatedFramework ] |> List.map str |> arr; "referencedProjects", [ contract; library ] |> List.map str |> arr; "options", (projectRefPaths |> List.map (fun path -> str ("-r:" + path))) @ [ str "--noframework"; str "--simpleresolution" ] |> arr; "assemblies", projectRefPaths |> List.map (fun path -> obj [ ("file", str path) ]) |> arr ]
+let hashRows = (projectRefPaths @ [ authored; secondAuthored; generatedInfo; generatedFramework ]) |> List.map (fun path -> path, str (hash path))
+let mkRecord fileName value hashes = obj [ "context", value; "hashedBy", str fileName; "hashes", hashes |> List.map (fun (key, value: JsonNode) -> key, value.DeepClone()) |> obj ]
+let records () = [ mkRecord authored (clone context) hashRows; mkRecord secondAuthored (clone context) hashRows ]
+let runContext name (records: JsonNode list) expected =
+  if String.IsNullOrEmpty selected || selected = name then
+    executed <- executed + 1
+    let path = Path.Combine(scratch, name + ".sarif")
+    let resultRows = records |> List.map (fun record -> obj [ "ruleId", str "AXD000"; "message", obj [ ("text", str (record.ToJsonString())) ] ])
+    save path (obj [ ("runs", arr [ obj [ ("results", arr resultRows) ] ]) ])
+    let start = ProcessStartInfo(host)
+    for argument in [ "fsi"; Path.Combine(tool, "ProjectInputs.fsx"); "--compare-project-context"; path; contextRefsPath; contextManifest; contextInputs; contextGraph ] do start.ArgumentList.Add(argument)
+    start.RedirectStandardOutput <- true
+    start.RedirectStandardError <- true
+    use command = Process.Start(start)
+    let output = command.StandardOutput.ReadToEnd() + command.StandardError.ReadToEnd()
+    command.WaitForExit()
+    File.WriteAllText(Path.Combine(scratch, name + ".log"), output)
+    let ok = if expected = "PASS" then command.ExitCode = 0 && output.Contains("Project loader context verified") else command.ExitCode <> 0 && output.Contains(expected)
+    if not ok then failwithf "Context control %s failed (exit %d): %s" name command.ExitCode output
+    printfn "PASS dependency %s" name
+runContext "context-valid" (records ()) "PASS"
+let missingRef = records ()
+for record in missingRef do
+  record.["context"].["options"].AsArray().RemoveAt(0)
+  record.["context"].["assemblies"].AsArray().RemoveAt(0)
+runContext "context-missing-project" missingRef "project reference absent from loader"
+let wrongPath = records ()
+let otherRef = copiedDll (Path.Combine(scratch, "other", "Alex.dll"))
+for record in wrongPath do
+  record.["context"].["options"].[0] <- str ("-r:" + otherRef)
+  record.["context"].["assemblies"].[0].["file"] <- str otherRef
+runContext "context-wrong-project-path" wrongPath "loader reference has no unique dependency-closure row"
+let wrongReferencedProject = records ()
+for record in wrongReferencedProject do
+  record.["context"].["referencedProjects"].AsArray().RemoveAt(0)
+runContext "context-wrong-referenced-project" wrongReferencedProject "loader project references differ from dependency-closure check"
+let runManifest name (lines: string list) expected =
+  File.WriteAllLines(contextManifest, List.toArray lines)
+  try runContext name (records ()) expected
+  finally File.WriteAllLines(contextManifest, List.toArray manifestLines)
+runManifest "context-missing-manifest-digest" [ "project=" + rootProject ] ("missing or ambiguous project reference digest: " + List.head projectRefPaths)
+runManifest "context-duplicate-manifest-digest" (manifestLines @ [ List.item 1 manifestLines ]) ("missing or ambiguous project reference digest: " + List.head projectRefPaths)
+let duplicateRef = records ()
+for record in duplicateRef do record.["context"].["options"].AsArray().Add(str ("-r:" + List.head projectRefPaths))
+runContext "context-duplicate-project" duplicateRef "duplicate loader reference"
+let changedHash = records ()
+for record in changedHash do record.["hashes"].[List.head projectRefPaths] <- str "BAD"
+runContext "context-changed-project" changedHash "project reference digest mismatch"
+let missingHash = records ()
+for record in missingHash do record.["hashes"].AsObject().Remove(List.head projectRefPaths) |> ignore
+runContext "context-missing-digest" missingHash "project reference digest mismatch"
+let divergent = records ()
+divergent.[1].["context"].["options"].AsArray().Add(str "--different")
+runContext "context-divergent" divergent "loader context differs across files"
+let extra = records ()
+let extraSource = file (Path.Combine(contextDir, "Extra.fs"))
+for record in extra do record.["context"].["sourceFiles"].AsArray().Add(str extraSource)
+runContext "context-extra-source" extra "unsupported or missing generated source"
+let missingSource = records ()
+for record in missingSource do record.["context"].["sourceFiles"].AsArray().RemoveAt(3)
+runContext "context-missing-source" missingSource "unsupported or missing generated source"
+let duplicateSource = records ()
+for record in duplicateSource do record.["context"].["sourceFiles"].AsArray().Add(str generatedInfo)
+runContext "context-duplicate-source" duplicateSource "duplicate loader source file"
+let changedSource = records ()
+for record in changedSource do record.["hashes"].[generatedInfo] <- str "BAD"
+runContext "context-changed-source" changedSource "generated source changed or digest missing"
+let missingGeneratedHash = records ()
+for record in missingGeneratedHash do record.["hashes"].AsObject().Remove(generatedInfo) |> ignore
+runContext "context-missing-generated-digest" missingGeneratedHash "generated source changed or digest missing"
+let changedAuthored = records ()
+for record in changedAuthored do record.["hashes"].[authored] <- str "BAD"
+runContext "context-changed-authored" changedAuthored "authored source changed or digest missing"
+let missingAuthoredHash = records ()
+for record in missingAuthoredHash do record.["hashes"].AsObject().Remove(authored) |> ignore
+runContext "context-missing-authored-digest" missingAuthoredHash "authored source changed or digest missing"
+let missingHashedFile = records ()
+for record in missingHashedFile do record.["hashes"].[List.head projectRefPaths] <- str "MISSING"
+runContext "context-missing-hashed-file" missingHashedFile "missing loader dependency file"
+let alteredProperties name (changes: (string * string) list) expected =
+  let altered = clone contextRefs
+  for key, value in changes do altered.["Properties"].[key] <- str value
+  save contextRefsPath altered
+  try runContext name (records ()) expected
+  finally save contextRefsPath contextRefs
+alteredProperties "context-swapped-generated" [ "GeneratedAssemblyInfoFile", generatedFramework; "TargetFrameworkMonikerAssemblyAttributesPath", generatedInfo ] "generated source identity mismatch"
+let redirectedInfo = file (Path.Combine(contextDir, "Other.AssemblyInfo.fs"))
+alteredProperties "context-redirected-generated" [ ("GeneratedAssemblyInfoFile", redirectedInfo) ] "generated source identity mismatch"
+alteredProperties "context-disabled-generated" [ ("GenerateAssemblyInfo", "false") ] "generated source identity mismatch"
+alteredProperties "context-wrong-tfm" [ ("TargetFrameworkMoniker", ".NETCoreApp,Version=v9.0") ] "generated source identity mismatch"
+let otherIntermediate = Path.Combine(scratch, "other-intermediate")
+Directory.CreateDirectory(otherIntermediate) |> ignore
+alteredProperties "context-outside-intermediate" [ ("IntermediateOutputPath", otherIntermediate) ] "generated source outside intermediate output"
+alteredProperties "context-msbuild-separators" [ "IntermediateOutputPath", "obj\\Debug/net10.0/"; "GeneratedAssemblyInfoFile", "obj\\Debug/net10.0/Alex.AssemblyInfo.fs"; "TargetFrameworkMonikerAssemblyAttributesPath", "obj/Debug/net10.0\\.NETCoreApp,Version=v10.0.AssemblyAttributes.fs" ] "PASS"
+let ambiguousBase = Path.Combine(Path.GetDirectoryName rootProject, "obj\\Debug")
+let ambiguousDirectory = Path.Combine(ambiguousBase, "net10.0")
+Directory.CreateDirectory(ambiguousDirectory) |> ignore
+try alteredProperties "context-ambiguous-msbuild-path" [ ("IntermediateOutputPath", "obj\\Debug/net10.0/") ] "ambiguous MSBuild path"
+finally
+  if Directory.Exists ambiguousBase then Directory.Delete(ambiguousBase, true)
+let ambiguousFile = Path.Combine(Path.GetDirectoryName rootProject, "obj/Debug/net10.0\\Alex.AssemblyInfo.fs")
+File.WriteAllText(ambiguousFile, "distinct literal-backslash fixture")
+try alteredProperties "context-ambiguous-msbuild-file" [ ("GeneratedAssemblyInfoFile", "obj/Debug/net10.0\\Alex.AssemblyInfo.fs") ] "ambiguous MSBuild path"
+finally File.Delete ambiguousFile
+let foreignReference = records ()
+for record in foreignReference do
+  record.["context"].["options"].AsArray().Add(str ("-r:" + otherRef))
+  record.["context"].["assemblies"].AsArray().Add(obj [ ("file", str otherRef) ])
+runContext "context-foreign-reference" foreignReference "loader reference has no unique dependency-closure row"
+let outsideInfo = file (Path.Combine(otherIntermediate, "Alex.AssemblyInfo.fs"))
+let outsideFramework = file (Path.Combine(otherIntermediate, ".NETCoreApp,Version=v10.0.AssemblyAttributes.fs"))
+let outsideProperties = clone contextRefs
+outsideProperties.["Properties"].["IntermediateOutputPath"] <- str otherIntermediate
+outsideProperties.["Properties"].["GeneratedAssemblyInfoFile"] <- str outsideInfo
+outsideProperties.["Properties"].["TargetFrameworkMonikerAssemblyAttributesPath"] <- str outsideFramework
+let outsideRecords = records ()
+for record in outsideRecords do
+  record.["context"].["sourceFiles"].[2] <- str outsideInfo
+  record.["context"].["sourceFiles"].[3] <- str outsideFramework
+  record.["hashes"].[outsideInfo] <- str (hash outsideInfo)
+  record.["hashes"].[outsideFramework] <- str (hash outsideFramework)
+save contextRefsPath outsideProperties
+try runContext "context-outside-intermediate-existing" outsideRecords "generated source outside intermediate output"
+finally save contextRefsPath contextRefs
+let assemblyExtra = records ()
+for record in assemblyExtra do record.["context"].["assemblies"].AsArray().Add(obj [ ("file", str otherRef) ])
+runContext "context-assembly-not-requested" assemblyExtra "loader/FCS reference asymmetry"
+let optionExtra = records ()
+for record in optionExtra do record.["context"].["options"].AsArray().Add(str ("-r:" + otherRef))
+runContext "context-option-not-resolved" optionExtra "loader/FCS reference asymmetry"
+let knownOptionExtra = records ()
+for record in knownOptionExtra do record.["context"].["options"].AsArray().Add(str ("-r:" + packageAsset "FSharp.Core"))
+runContext "context-known-option-not-resolved" knownOptionExtra "loader/FCS reference asymmetry"
+let baselineMissing = records ()
+for record in baselineMissing do record.["context"].["options"].AsArray().RemoveAt(2)
+runContext "context-option-baseline" baselineMissing "loader option baseline changed"
+runContext "context-no-records" [] "missing loader context records"
+runContext "context-file-coverage" [ List.head (records ()) ] "loader context file coverage mismatch"
+let badGrammar = records ()
+for record in badGrammar do record.["context"].["options"].AsArray().Add(str "--reference:bad")
+runContext "context-reference-grammar" badGrammar "unrecognized reference grammar"
+let missingAssemblyFile = records ()
+for record in missingAssemblyFile do record.["context"].["assemblies"].[0].["file"] <- null
+runContext "context-null-assembly" missingAssemblyFile "unresolved assembly file"
+let duplicateAssembly = records ()
+for record in duplicateAssembly do record.["context"].["assemblies"].AsArray().Add(obj [ ("file", str (List.head projectRefPaths)) ])
+runContext "context-duplicate-assembly" duplicateAssembly "duplicate loader assembly"
+let missingAuthored = records ()
+for record in missingAuthored do record.["context"].["sourceFiles"].AsArray().RemoveAt(0)
+runContext "context-missing-authored" missingAuthored "loader omitted evaluated source"
+let wrongProject = records ()
+for record in wrongProject do record.["context"].["project"] <- str contract
+runContext "context-wrong-root" wrongProject "loader project differs from dependency-closure check"
 if executed = 0 then failwith "No dependency control matched."

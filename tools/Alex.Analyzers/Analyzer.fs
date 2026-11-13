@@ -358,3 +358,42 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
     walkTast walker tree
   return List.ofSeq diagnostics
 }
+
+[<CliAnalyzer("Alex dependency context")>]
+let dependencyContext : Analyzer<CliContext> = fun context -> async {
+  let options = context.ProjectOptions
+  let assemblies =
+    context.CheckFileResults.ProjectContext.GetReferencedAssemblies()
+    |> Seq.map (fun assembly ->
+      {| simpleName = assembly.SimpleName
+         qualifiedName = assembly.QualifiedName
+         file = assembly.FileName |> Option.toObj |})
+    |> Seq.toArray
+  let record =
+    {| project = options.ProjectFileName
+       sourceFiles = options.SourceFiles
+       referencedProjects = options.ReferencedProjectsPath
+       options = options.OtherOptions
+       assemblies = assemblies |}
+  let serialize value = System.Text.Json.JsonSerializer.Serialize(value)
+  let paths =
+    seq {
+      for option in options.OtherOptions do
+        if option.StartsWith("-r:", System.StringComparison.Ordinal) then yield option.Substring(3)
+      for assembly in assemblies do
+        if not (System.String.IsNullOrWhiteSpace assembly.file) then yield assembly.file
+      yield! options.SourceFiles
+    } |> Seq.distinct
+  let hashes =
+    paths
+    |> Seq.map (fun path ->
+      if System.IO.File.Exists path then
+        use stream = System.IO.File.OpenRead path
+        path, System.Security.Cryptography.SHA256.HashData(stream) |> System.Convert.ToHexString
+      else
+        path, "MISSING")
+    |> readOnlyDict
+  let payload = {| context = record; hashedBy = context.FileName; hashes = hashes |} |> serialize
+  let position = Position.mkPos 1 0
+  return [{ Type = "Alex dependency context"; Message = payload; Code = "AXD000"; Severity = Severity.Info; Range = Range.mkRange context.FileName position position; Fixes = [] }]
+}

@@ -16,7 +16,7 @@ if visited <> expected then
   failwithf "Analyzer source coverage mismatch: missing=%A unexpected=%A" (Set.difference expected visited) (Set.difference visited expected)
 let required =
   match arguments[2] with
-  | "alex" -> ["Clef production baseline"; "Alex published boundary"]
+  | "alex" -> ["Clef production baseline"; "Alex published boundary"; "Alex dependency context"]
   | "alex-boundary" -> ["Alex published boundary"]
   | "clef" -> ["Clef production baseline"]
   | _ -> failwith "Unknown analyzer mode."
