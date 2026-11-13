@@ -183,7 +183,6 @@ let private pResourceCall (call: BoundaryCall) (imported: BoundaryImport) : PSGP
     let! state = getUserState
     let boundary = state.Graph.Emission.Boundary
     do! ensure (call.Entry.IsNone) "Resource calls require their exact direct source invocation."
-    do! ensure (call.ResultAdaptation.IsNone) "Resource conversion cannot be replaced by a numeric result adaptation."
     let! resource =
         match call.Resource with
         | Some(BoundaryResourceUse.AcquireNullable acquisition) -> preturn acquisition.Declaration
@@ -195,6 +194,7 @@ let private pResourceCall (call: BoundaryCall) (imported: BoundaryImport) : PSGP
         | _ -> fail (Message "Resource call has no exact current resource declaration.")
     match call.Resource with
     | Some(BoundaryResourceUse.AcquireNullable _) ->
+        do! ensure (call.ResultAdaptation.IsNone) "Resource conversion cannot be replaced by a numeric result adaptation."
         do! ensure
                 (imported.Binding = declaration.Acquisition
                  && imported.Result = Some(BoundaryScalar.ResourceHandle(resource, true))
@@ -230,9 +230,14 @@ let private pResourceCall (call: BoundaryCall) (imported: BoundaryImport) : PSGP
         let result = { SSA = ssa; Type = resultType }
         return argumentOps @ [ResourceCall(call.Site, values, Some result)], TRValue result
     | Some(BoundaryResourceUse.ReleaseOwned release) ->
+        let voidRelease =
+            imported.Result.IsNone && call.Result.IsNone && call.ResultAdaptation.IsNone
+        let int32Release =
+            imported.Result = Some(BoundaryScalar.Integer(32, true))
+            && call.Result = imported.Result
         do! ensure
-                (imported.Binding = declaration.Release && imported.Result.IsNone && call.Result.IsNone)
-                "Owned resource release differs from its exact unary void declaration."
+                (imported.Binding = declaration.Release && (voidRelease || int32Release))
+                "Owned resource release differs from its exact unary void or signed 32-bit status declaration."
         let! operand =
             match call.Arguments with
             | [operand] when operand.Abi = BoundaryScalar.ResourceHandle(resource, false) && operand.Adaptation.IsNone -> preturn operand
@@ -255,7 +260,13 @@ let private pResourceCall (call: BoundaryCall) (imported: BoundaryImport) : PSGP
                          handleType = declaration.HandleType && bits = declaration.PointerBits && alignment > 0
                      | _ -> false))
                 "Owned resource release actual lacks its exact source-settled opaque handle representation."
-        return [ResourceCall(call.Site, [{ SSA = ssa; Type = ty }], None)], TRVoid
+        match call.Result with
+        | None -> return [ResourceCall(call.Site, [{ SSA = ssa; Type = ty }], None)], TRVoid
+        | Some scalar ->
+            let! rawSSA = getNodeSSA call.Site
+            let raw = { SSA = rawSSA; Type = BoundaryAbi.scalarTypeIn boundary scalar }
+            let! resultOps, result = pBoundaryAdapt call.Site call.Site call.ResultAdaptation raw
+            return ResourceCall(call.Site, [{ SSA = ssa; Type = ty }], Some raw) :: resultOps, TRValue result
     | None -> return! fail (Message "Resource call lacks its source conversion and cleanup account.")
 }
 

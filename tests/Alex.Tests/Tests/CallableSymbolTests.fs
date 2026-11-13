@@ -828,7 +828,7 @@ let ``optional native entry boundary refuses Some and None before operand loweri
       Obligation = NodeId 70 }
   let operand: BoundaryOperand =
     { Actual = NodeId 33; Formal = NodeId 71; Abi = BoundaryScalar.Entry(NodeId 72)
-      Adaptation = None; OptionalEntry = Some (BoundaryOptionalEntryChoice.Direct account) }
+      Adaptation = None; OptionalEntry = Some (BoundaryOptionalEntryChoice.Direct account); BufferAbsence = None }
   let changed =
     { boundary with
         Calls =
@@ -1245,7 +1245,7 @@ let private conditionalOptionalBoundaryFixture reversed =
   let choice = BoundaryOptionalEntryChoice.Conditional(selectNode.Id, tagNode.Id, whenTrueArm, whenFalseArm)
   let operand : BoundaryOperand =
     { Actual = selectNode.Id; Formal = formalParam; Abi = BoundaryScalar.Entry invocationId
-      Adaptation = None; OptionalEntry = Some choice }
+      Adaptation = None; OptionalEntry = Some choice; BufferAbsence = None }
   let boundaryCall : BoundaryCall =
     { Site = callNode.Id; Import = importId; Resource = None; Callee = calleeLeaf.Id; Entry = None
       Arguments = [operand]; ErasedUnitArguments = []; Result = None; ResultAdaptation = None
@@ -1550,7 +1550,7 @@ let private scalarBoundaryFixture () =
   let imported = graph.Emission.Boundary.Imports[NodeId 44]
   let call : BoundaryCall =
     {Site=site;Import=imported.Identity;Callee=NodeId 928;Entry=None;Resource=None
-     Arguments=[{Actual=actual;Formal=NodeId 882;Abi=BoundaryScalar.Integer(64,true);Adaptation=Some argumentMeet;OptionalEntry=None}]
+     Arguments=[{Actual=actual;Formal=NodeId 882;Abi=BoundaryScalar.Integer(64,true);Adaptation=Some argumentMeet;OptionalEntry=None;BufferAbsence=None}]
      ErasedUnitArguments=[];Result=imported.Result;ResultAdaptation=Some resultMeet
      Participants=Set.empty;SourceTypes=Map.empty}
   let nodes =
