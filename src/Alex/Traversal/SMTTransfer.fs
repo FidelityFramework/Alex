@@ -197,10 +197,22 @@ let private scope (ob: ObligationInfo) : MLIROp list =
         | ObligationBody.Pending _ ->
             invalidArg "ob" "A Pending obligation has no solver scope."
         | ObligationBody.ZeroCopyBufferExtent model ->
+            let maxCount, maxCountOps = intConst model.MaximumCount
+            let elemBytes, elemBytesOps = int64Const model.ElementBytes
+            let scaledMax = v ()
+            let cap, capOps = intConst model.ExtentCapacity
+            let boundOut = v ()
+            let scaledClause =
+                boundOut,
+                maxCountOps
+                @ elemBytesOps
+                @ [ smt (SMTIntMul(scaledMax, maxCount, elemBytes)) ]
+                @ capOps
+                @ [ smt (SMTIntCmp(boundOut, SmtLe, scaledMax, cap)) ]
             anchorClauses
                 [ cmpVal SmtLe 0I model.MinimumCount
                   cmpVal SmtLe model.MinimumCount model.MaximumCount
-                  cmpVal SmtLe model.MaximumCount model.ExtentCapacity
+                  scaledClause
                   cmpInt SmtGt model.ElementBytes 0 ]
         | ObligationBody.BufferRetentionDomination model ->
             let acq = model.AcquireOrder
@@ -242,27 +254,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                    boolConst model.NullToNoneBoundary
                    cmpInt SmtGt model.InvalidationOrders.Length 0 ]
                  @ invClauses @ readClauses)
-        | ObligationBody.BufferAbsenceArgumentConversion model ->
-            let c0, c0Ops = eqInt32 model.SourceCase 0
-            let c1, c1Ops = eqInt32 model.SourceCase 1
-            let srcDisj = v ()
-            let srcClause = srcDisj, c0Ops @ c1Ops @ [ smt (SMTOr(srcDisj, [ c0; c1 ])) ]
-            let choiceTag = function
-                | BufferAbsencePlanChoice.AbsentNull -> 0
-                | BufferAbsencePlanChoice.RequiresNonNullBuffer -> 1
-            let armClauses =
-                [ 0, 0; 1, 1 ]
-                |> List.collect (fun (expectedOrdinal, expectedChoice) ->
-                    match List.tryItem expectedOrdinal model.Arms with
-                    | Some arm ->
-                        [ eqInt32 arm.CaseOrdinal expectedOrdinal
-                          eqInt32 (choiceTag arm.Choice) expectedChoice ]
-                    | None -> [ eqInt32 0 1 ])
-            anchorClauses
-                ([ cmpInt SmtGe model.Parameter 0
-                   srcClause
-                   eqInt32 model.Arms.Length 2 ]
-                 @ armClauses)
+        | ObligationBody.BufferAbsenceArgumentConversion model -> BufferAbsenceArgumentProof.project model |> resource
         | ObligationBody.SnapshotBorrowBound(count, snapshot, copy, allocation, minimum, maximum, elementBytes, allocationCapacity) ->
             SnapshotBorrowProof.ofBounds count snapshot copy allocation minimum maximum elementBytes allocationCapacity |> resource
         | ObligationBody.ResourceConversion model -> ResourceProof.ofConversion model |> resource

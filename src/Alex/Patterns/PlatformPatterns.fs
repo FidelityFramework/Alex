@@ -494,46 +494,6 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                         && (BoundaryAbi.borrowedCHandleRepAt state.Graph imp decl nullable
                             |> Option.bind (Alex.CodeGeneration.TypeMapping.tryRepresentationType >> Result.toOption)
                             |> Option.exists (fun expected -> ty = expected))
-                let matchesCallbackHandleType (imp: BoundaryImport) (formal: NodeId) (ordinal: int) (decl: NodeId) (nullable: bool) (ty: MLIRType) =
-                    match boundary.ResourceDeclarations.TryFind decl with
-                    | Some _ -> matchesBorrowedHandleType imp formal decl nullable ty
-                    | None ->
-                        decl = formal
-                        && (BoundaryAbi.callbackHandleRepAt state.Graph imp formal ordinal nullable
-                            |> Option.bind (Alex.CodeGeneration.TypeMapping.tryRepresentationType >> Result.toOption)
-                            |> Option.exists (fun expected -> ty = expected))
-                let matchesCallbackAbi (invocation: NodeId) (actualType: MLIRType) =
-                    match boundary.CallbackInvocations.TryFind invocation, actualType with
-                    | Some row, TFunc(actualParams, actualResults) when row.Identity = invocation && row.Signature.CallingConvention = "CDecl" ->
-                        match boundary.Imports.TryFind row.Import with
-                        | Some callbackImp ->
-                            let resultsMatch =
-                                match row.Signature.Result with
-                                | None -> actualResults.IsEmpty
-                                | Some(BoundaryScalar.ResourceHandle _) -> false
-                                | Some scalar ->
-                                    match BoundaryAbi.tryScalarTypeIn boundary Set.empty scalar with
-                                    | Result.Ok expected -> actualResults = [ expected ]
-                                    | Result.Error _ -> false
-                            let paramsMatch =
-                                actualParams.Length = row.Signature.Parameters.Length
-                                && List.mapi (fun ordinal expectedScalar -> ordinal, expectedScalar) row.Signature.Parameters
-                                   |> List.forall2 (fun actualParam (ordinal, expectedScalar) ->
-                                       match expectedScalar with
-                                       | BoundaryScalar.ResourceHandle(decl, nullable) ->
-                                           matchesCallbackHandleType callbackImp row.Formal ordinal decl nullable actualParam
-                                       | BoundaryScalar.ReadOnlyBytes decl ->
-                                           match boundary.CountedEntryArrays.TryFind decl with
-                                           | Some counted when counted.Identity = decl && counted.Invocation = row.Identity && counted.Contract.Argument = ordinal ->
-                                               actualParam = TMemRef(TInt(IntWidth 8))
-                                           | _ -> false
-                                       | scalar ->
-                                           match BoundaryAbi.tryScalarTypeIn boundary Set.empty scalar with
-                                           | Result.Ok expected -> actualParam = expected
-                                           | Result.Error _ -> false) actualParams
-                            resultsMatch && paramsMatch
-                        | None -> false
-                    | _ -> false
                 let pValueTypeAt nodeId : PSGParser<MLIRType> = parser {
                     match Alex.CodeGeneration.TypeMapping.tryValueTypeAt state.Graph nodeId with
                     | Result.Ok ty -> return ty
@@ -711,9 +671,14 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                                         && matchesBorrowedHandleType declaration operand.Formal decl nullable value.Type)
                                                        "Borrowed resource argument disagrees with its source handle carrier."
                                       }
-                                    | BoundaryScalar.Entry invocation ->
-                                        ensure (matchesCallbackAbi invocation value.Type)
-                                               "Witnessed boundary argument disagrees with its published ABI."
+                                    | BoundaryScalar.Entry invocation -> parser {
+                                        let! expectedAbi =
+                                            match BoundaryAbi.tryCallbackSignatureTypeAt state.Graph invocation with
+                                            | Result.Ok ty -> preturn ty
+                                            | Result.Error reason -> fail (Message reason)
+                                        return! ensure (value.Type = expectedAbi)
+                                                       "Witnessed boundary argument disagrees with its published ABI."
+                                      }
                                     | _ -> parser {
                                         let! expectedAbi =
                                             match BoundaryAbi.tryScalarTypeIn boundary Set.empty operand.Abi with
@@ -745,15 +710,16 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                             | Result.Ok scalarTy -> preturn scalarTy
                             | Result.Error reason -> fail (Message reason)
                         let! resultSSA = getNodeSSA node.Id
-                        do!
+                        let! resultType =
                             match ty with
                             | BoundaryScalar.BorrowedBytes _ -> parser {
                                 let! nodeType = pValueTypeAt node.Id
-                                return! ensure (abiType = nodeType)
-                                               "Borrowed result view disagrees with its source-settled representation."
+                                do! ensure (BoundaryAbi.matchesBorrowedResultViewAt state.Graph node.Id nodeType)
+                                           "Borrowed result view disagrees with its source-settled representation."
+                                return nodeType
                               }
-                            | _ -> preturn ()
-                        return [{ SSA = resultSSA; Type = abiType }]
+                            | _ -> preturn abiType
+                        return [{ SSA = resultSSA; Type = resultType }]
                       }
                 let isPureOptionalEntry =
                     not slots.IsEmpty && not writable && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult

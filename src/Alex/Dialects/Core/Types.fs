@@ -1131,6 +1131,120 @@ module BoundaryAbi =
         | Ok None -> Error "A resource carrier requires its exact direct-call conversion and cleanup accounts."
         | Error reason -> Error reason
 
+    let private tryHandleTypeFromRepresentation (nullable: bool) (expectedHandleType: Fidelity.PSG.TypeIdentity option) (expectedBits: int option) (rep: Fidelity.PSG.ValueRepresentation) =
+        if not (matchesCHandleRepresentation nullable expectedHandleType expectedBits rep) then None
+        elif not nullable then
+            match rep with
+            | Fidelity.PSG.ValueRepresentation.Scalar slot -> SettledScalar.tryType slot
+            | _ -> None
+        else Some (TResourceOption rep)
+
+    /// Validate a published CDecl callback invocation and derive its closed native
+    /// function signature fail-closed from settled PSG and boundary facts.
+    let tryCallbackSignatureTypeAt (revision: Fidelity.PSG.Revision) (invocation: Fidelity.PSG.NodeId) : Result<MLIRType, string> =
+        let boundary = revision.Emission.Boundary
+        match boundary.CallbackInvocations.TryFind invocation with
+        | Some row when row.Identity = invocation ->
+            if row.Signature.CallingConvention <> "CDecl" then
+                Error "A closed native entry requires its source-published CDecl convention."
+            else
+                match boundary.Imports.TryFind row.Import with
+                | Some callbackImp ->
+                    let seen = Set.singleton invocation
+                    let settledResourceRep (res: Fidelity.PSG.BoundaryResourceDeclaration) ordinal nullable =
+                        let fromCallback = callbackHandleRepAt revision callbackImp row.Formal ordinal nullable
+                        let fromDeclType =
+                            if nullable then None
+                            else settledRepresentationForTypeAndNode revision (Some res.Identity) res.HandleType
+                        match fromCallback, fromDeclType with
+                        | Some r1, Some r2 -> if r1 = r2 then Some r1 else None
+                        | Some r1, None -> Some r1
+                        | None, Some r2 -> Some r2
+                        | None, None -> None
+                    let checkParam ordinal = function
+                        | Fidelity.PSG.BoundaryScalar.ResourceHandle(decl, nullable) ->
+                            if boundary.ResourceDeclarations.ContainsKey decl then
+                                match boundary.ResourceDeclarations.TryFind decl with
+                                | Some res when res.Identity = decl && res.PointerBits > 0 ->
+                                    match settledResourceRep res ordinal nullable
+                                          |> Option.bind (tryHandleTypeFromRepresentation nullable (Some res.HandleType) (Some res.PointerBits)) with
+                                    | Some ty -> Ok ty
+                                    | None -> Error "A callback resource parameter lacks its exact source-settled handle representation."
+                                | _ ->
+                                    Error "A callback resource parameter lacks its exact resource declaration."
+                            elif decl <> row.Formal then
+                                Error "A callback borrowed handle parameter disagrees with its callback formal identity."
+                            else
+                                match callbackHandleRepAt revision callbackImp row.Formal ordinal nullable
+                                      |> Option.bind (tryHandleTypeFromRepresentation nullable None None) with
+                                | Some ty -> Ok ty
+                                | None -> Error "A callback borrowed handle parameter lacks its exact source-settled handle representation."
+                        | Fidelity.PSG.BoundaryScalar.ReadOnlyBytes decl ->
+                            match boundary.CountedEntryArrays.TryFind decl with
+                            | Some counted when counted.Identity = decl && counted.Invocation = row.Identity && counted.Contract.Argument = ordinal ->
+                                Ok (TMemRef(TInt(IntWidth 8)))
+                            | _ -> Error "A callback counted-entry array lacks its exact receiving invocation or parameter ordinal."
+                        | scalar ->
+                            tryScalarTypeIn boundary seen scalar
+                    let rec collectParams ordinal acc = function
+                        | [] -> Ok (List.rev acc)
+                        | scalar :: rest ->
+                            match checkParam ordinal scalar with
+                            | Ok ty -> collectParams (ordinal + 1) (ty :: acc) rest
+                            | Error reason -> Error reason
+                    let resultTypesResult =
+                        match row.Signature.Result with
+                        | None -> Ok []
+                        | Some (Fidelity.PSG.BoundaryScalar.ResourceHandle _) ->
+                            Error "A callback signature cannot return a resource handle."
+                        | Some scalar ->
+                            tryScalarTypeIn boundary seen scalar |> Result.map List.singleton
+                    match collectParams 0 [] row.Signature.Parameters, resultTypesResult with
+                    | Ok paramTypes, Ok resultTypes -> Ok (TFunc(paramTypes, resultTypes))
+                    | Error reason, _ -> Error reason
+                    | _, Error reason -> Error reason
+                | None -> Error "A callback entry carrier lacks its exact receiving import."
+        | _ -> Error "A callback entry carrier lacks its exact receiving invocation."
+
+    /// Validate settled BorrowedBytes or Option<BorrowedBytes> view representations
+    /// without hardcoding byte widths or synthesizing pointer placement.
+    let matchesBorrowedResultViewRepresentation (rep: Fidelity.PSG.ValueRepresentation) =
+        let isByteBuffer = function
+            | Fidelity.PSG.ValueRepresentation.Buffer(None, Fidelity.PSG.ValueRepresentation.Scalar(Fidelity.PSG.SettledSlot.Integer(8, _))) -> true
+            | Fidelity.PSG.ValueRepresentation.Buffer(Some bytes, Fidelity.PSG.ValueRepresentation.Scalar(Fidelity.PSG.SettledSlot.Integer(8, _))) -> bytes > 0
+            | _ -> false
+        if isByteBuffer rep then true
+        else
+            match rep with
+            | Fidelity.PSG.ValueRepresentation.Union(cases, Some(_, bytes, optAlign))
+                when cases.Length = 2 && bytes > 0 && optAlign > 0 ->
+                (cases |> List.filter (snd >> List.isEmpty) |> List.length) = 1
+                && (cases |> List.filter (fun (_, payloads) ->
+                    match payloads with
+                    | [p] -> isByteBuffer p
+                    | _ -> false) |> List.length) = 1
+            | _ -> false
+
+    /// Validate a BorrowedBytes call result node against its published
+    /// OccurrenceRepresentations entry and computed MLIRType.
+    let matchesBorrowedResultViewAt (revision: Fidelity.PSG.Revision) (site: Fidelity.PSG.NodeId) (nodeType: MLIRType) =
+        match revision.Emission.Numeric.OccurrenceRepresentations.TryFind site with
+        | Some (Ok rep) when matchesBorrowedResultViewRepresentation rep ->
+            match nodeType with
+            | TMemRef(TInt(IntWidth 8)) ->
+                match rep with
+                | Fidelity.PSG.ValueRepresentation.Buffer(None, Fidelity.PSG.ValueRepresentation.Scalar(Fidelity.PSG.SettledSlot.Integer(8, _))) -> true
+                | _ -> false
+            | TMemRefStatic(bytes, TInt(IntWidth 8)) ->
+                match rep with
+                | Fidelity.PSG.ValueRepresentation.Buffer(Some repBytes, Fidelity.PSG.ValueRepresentation.Scalar(Fidelity.PSG.SettledSlot.Integer(8, _))) ->
+                    bytes > 0 && bytes = repBytes
+                | Fidelity.PSG.ValueRepresentation.Union(_, Some(_, repBytes, _)) ->
+                    bytes > 0 && bytes = repBytes
+                | _ -> false
+            | _ -> false
+        | _ -> false
+
     let validateImportCarriersIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) (declaration: Fidelity.PSG.BoundaryImport) : Result<unit, string> =
         let rec checkParams = function
             | [] -> Ok ()

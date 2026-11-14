@@ -1487,24 +1487,26 @@ module Schema53BoundaryWitnessing =
                   "  // origin: Fixture.clef:1:1"
                   "  smt.solver () : () -> () {"
                   "    smt.set_logic \"QF_LIA\""
-                  "    %v0_0 = smt.int.constant 0"
+                  "    %v0_5 = smt.int.constant 0"
+                  "    %v0_6 = smt.int.constant 1"
+                  "    %v0_7 = smt.int.cmp le %v0_5, %v0_6"
+                  "    %v0_8 = smt.int.constant 1"
+                  "    %v0_9 = smt.int.constant 8"
+                  "    %v0_10 = smt.int.cmp le %v0_8, %v0_9"
+                  "    %v0_0 = smt.int.constant 8"
                   "    %v0_1 = smt.int.constant 1"
-                  "    %v0_2 = smt.int.cmp le %v0_0, %v0_1"
-                  "    %v0_3 = smt.int.constant 1"
-                  "    %v0_4 = smt.int.constant 8"
-                  "    %v0_5 = smt.int.cmp le %v0_3, %v0_4"
-                  "    %v0_6 = smt.int.constant 8"
-                  "    %v0_7 = smt.int.constant 16"
-                  "    %v0_8 = smt.int.cmp le %v0_6, %v0_7"
-                  "    %v0_9 = smt.int.constant 1"
-                  "    %v0_10 = smt.int.constant 0"
-                  "    %v0_11 = smt.int.cmp gt %v0_9, %v0_10"
-                  "    %v0_12 = smt.and %v0_2, %v0_5, %v0_8, %v0_11"
-                  "    %v0_13 = smt.declare_fun \"ob_501\" : !smt.bool"
-                  "    %v0_14 = smt.eq %v0_13, %v0_12 : !smt.bool"
-                  "    smt.assert %v0_14"
-                  "    %v0_15 = smt.not %v0_13"
-                  "    smt.assert %v0_15"
+                  "    %v0_2 = smt.int.mul %v0_0, %v0_1"
+                  "    %v0_3 = smt.int.constant 16"
+                  "    %v0_4 = smt.int.cmp le %v0_2, %v0_3"
+                  "    %v0_11 = smt.int.constant 1"
+                  "    %v0_12 = smt.int.constant 0"
+                  "    %v0_13 = smt.int.cmp gt %v0_11, %v0_12"
+                  "    %v0_14 = smt.and %v0_7, %v0_10, %v0_4, %v0_13"
+                  "    %v0_15 = smt.declare_fun \"ob_501\" : !smt.bool"
+                  "    %v0_16 = smt.eq %v0_15, %v0_14 : !smt.bool"
+                  "    smt.assert %v0_16"
+                  "    %v0_17 = smt.not %v0_15"
+                  "    smt.assert %v0_17"
                   "    smt.check sat {} unknown {} unsat {}"
                   "  }"
                   "  // ob_502: fixture obligation"
@@ -1591,32 +1593,29 @@ module Schema53BoundaryWitnessing =
                   "  // origin: Fixture.clef:1:1"
                   "  smt.solver () : () -> () {"
                   "    smt.set_logic \"QF_LIA\""
-                  "    %v0_19 = smt.int.constant 0"
-                  "    %v0_20 = smt.int.constant 0"
-                  "    %v0_21 = smt.int.cmp ge %v0_19, %v0_20"
-                  "    %v0_0 = smt.int.constant 1"
-                  "    %v0_1 = smt.int.constant 0"
-                  "    %v0_2 = smt.eq %v0_0, %v0_1 : !smt.int"
-                  "    %v0_3 = smt.int.constant 1"
+                  "    %v0_2 = smt.declare_fun \"buffer_absence_accepted_9\" : !smt.bool"
+                  "    %v0_0 = smt.declare_fun \"buffer_absence_case\" : !smt.int"
+                  "    %v0_1 = smt.declare_fun \"buffer_absence_choice\" : !smt.int"
                   "    %v0_4 = smt.int.constant 1"
-                  "    %v0_5 = smt.eq %v0_3, %v0_4 : !smt.int"
-                  "    %v0_6 = smt.or %v0_2, %v0_5"
-                  "    %v0_22 = smt.int.constant 2"
-                  "    %v0_23 = smt.int.constant 2"
-                  "    %v0_24 = smt.eq %v0_22, %v0_23 : !smt.int"
+                  "    %v0_5 = smt.eq %v0_0, %v0_4 : !smt.int"
                   "    %v0_7 = smt.int.constant 0"
-                  "    %v0_8 = smt.int.constant 0"
-                  "    %v0_9 = smt.eq %v0_7, %v0_8 : !smt.int"
-                  "    %v0_10 = smt.int.constant 0"
-                  "    %v0_11 = smt.int.constant 0"
-                  "    %v0_12 = smt.eq %v0_10, %v0_11 : !smt.int"
-                  "    %v0_13 = smt.int.constant 1"
-                  "    %v0_14 = smt.int.constant 1"
-                  "    %v0_15 = smt.eq %v0_13, %v0_14 : !smt.int"
-                  "    %v0_16 = smt.int.constant 1"
-                  "    %v0_17 = smt.int.constant 1"
-                  "    %v0_18 = smt.eq %v0_16, %v0_17 : !smt.int"
-                  "    %v0_25 = smt.and %v0_21, %v0_6, %v0_24, %v0_9, %v0_12, %v0_15, %v0_18"
+                  "    %v0_8 = smt.eq %v0_0, %v0_7 : !smt.int"
+                  "    %v0_10 = smt.eq %v0_1, %v0_7 : !smt.int"
+                  "    %v0_12 = smt.not %v0_8"
+                  "    %v0_11 = smt.or %v0_12, %v0_10"
+                  "    %v0_13 = smt.eq %v0_1, %v0_4 : !smt.int"
+                  "    %v0_15 = smt.not %v0_5"
+                  "    %v0_14 = smt.or %v0_15, %v0_13"
+                  "    %v0_16 = smt.and %v0_5, %v0_2, %v0_11, %v0_14"
+                  "    %v0_17 = smt.ite %v0_8, %v0_4, %v0_7 : !smt.int"
+                  "    %v0_18 = smt.ite %v0_5, %v0_4, %v0_7 : !smt.int"
+                  "    %v0_20 = smt.int.add %v0_17, %v0_18"
+                  "    %v0_21 = smt.eq %v0_20, %v0_4 : !smt.int"
+                  "    %v0_22 = smt.and %v0_8, %v0_2"
+                  "    %v0_23 = smt.ite %v0_22, %v0_7, %v0_4 : !smt.int"
+                  "    %v0_24 = smt.eq %v0_1, %v0_23 : !smt.int"
+                  "    %v0_25 = smt.and %v0_21, %v0_24"
+                  "    smt.assert %v0_16"
                   "    %v0_26 = smt.declare_fun \"ob_505\" : !smt.bool"
                   "    %v0_27 = smt.eq %v0_26, %v0_25 : !smt.bool"
                   "    smt.assert %v0_27"
@@ -1627,56 +1626,44 @@ module Schema53BoundaryWitnessing =
                   "}" ]
         Assert.Equal(expectedMlir, mlir)
 
-        // Mutated arm ordinal emits literal constant 9 in smt.int.constant instead of collapsing in F#.
+        // ZeroCopyBufferExtent scales MaximumCount by ElementBytes via smt.int.mul.
+        let scaledExtentOb =
+            obligation (id 507) "foreign-readonly-buffer-extent"
+                (ObligationBody.ZeroCopyBufferExtent
+                    { Call = id 1; Declaration = id 2; Parameter = 1; CountParameter = 2
+                      Buffer = id 3; Count = id 4; MinimumCount = 1I; MaximumCount = 8I; ExtentCapacity = 32I
+                      ElementBytes = 4; CountCoverage = id 507 })
+        let scaledMlir = Alex.Traversal.SMTTransfer.transfer [ scaledExtentOb ]
+        Assert.Contains("%v0_0 = smt.int.constant 8\n    %v0_1 = smt.int.constant 4\n    %v0_2 = smt.int.mul %v0_0, %v0_1\n    %v0_3 = smt.int.constant 32\n    %v0_4 = smt.int.cmp le %v0_2, %v0_3", scaledMlir)
+
+        // BufferAbsenceArgumentConversion delegates to BufferAbsenceArgumentProof.project for both SourceCase = 0 and SourceCase = 1 and rejects invalid models.
+        let noneAbsenceOb =
+            obligation (id 508) "foreign-buffer-absence-conversion-0"
+                (ObligationBody.BufferAbsenceArgumentConversion
+                    { Call = id 1; Parameter = 0; Actual = id 8; Construction = id 8
+                      SourceCase = 0; Absence = id 9
+                      Arms = [ arm0; arm1 ] })
+        let noneAbsenceMlir = Alex.Traversal.SMTTransfer.transfer [ noneAbsenceOb ]
+        Assert.Contains("smt.declare_fun \"buffer_absence_accepted_9\" : !smt.bool", noneAbsenceMlir)
+        Assert.Contains("smt.declare_fun \"ob_508\" : !smt.bool", noneAbsenceMlir)
+
         let corruptOb =
             obligation (id 506) "foreign-buffer-absence-conversion-0"
                 (ObligationBody.BufferAbsenceArgumentConversion
                     { Call = id 1; Parameter = 0; Actual = id 8; Construction = id 8
                       SourceCase = 1; Absence = id 9
                       Arms = [ arm0; { arm1 with CaseOrdinal = 9 } ] })
-        let corruptMlir = Alex.Traversal.SMTTransfer.transfer [ corruptOb ]
-        let expectedCorruptMlir =
-            String.concat "\n"
-                [ "module @obligations {"
-                  "  // ob_506: fixture obligation"
-                  "  // origin: Fixture.clef:1:1"
-                  "  smt.solver () : () -> () {"
-                  "    smt.set_logic \"QF_LIA\""
-                  "    %v0_19 = smt.int.constant 0"
-                  "    %v0_20 = smt.int.constant 0"
-                  "    %v0_21 = smt.int.cmp ge %v0_19, %v0_20"
-                  "    %v0_0 = smt.int.constant 1"
-                  "    %v0_1 = smt.int.constant 0"
-                  "    %v0_2 = smt.eq %v0_0, %v0_1 : !smt.int"
-                  "    %v0_3 = smt.int.constant 1"
-                  "    %v0_4 = smt.int.constant 1"
-                  "    %v0_5 = smt.eq %v0_3, %v0_4 : !smt.int"
-                  "    %v0_6 = smt.or %v0_2, %v0_5"
-                  "    %v0_22 = smt.int.constant 2"
-                  "    %v0_23 = smt.int.constant 2"
-                  "    %v0_24 = smt.eq %v0_22, %v0_23 : !smt.int"
-                  "    %v0_7 = smt.int.constant 0"
-                  "    %v0_8 = smt.int.constant 0"
-                  "    %v0_9 = smt.eq %v0_7, %v0_8 : !smt.int"
-                  "    %v0_10 = smt.int.constant 0"
-                  "    %v0_11 = smt.int.constant 0"
-                  "    %v0_12 = smt.eq %v0_10, %v0_11 : !smt.int"
-                  "    %v0_13 = smt.int.constant 9"
-                  "    %v0_14 = smt.int.constant 1"
-                  "    %v0_15 = smt.eq %v0_13, %v0_14 : !smt.int"
-                  "    %v0_16 = smt.int.constant 1"
-                  "    %v0_17 = smt.int.constant 1"
-                  "    %v0_18 = smt.eq %v0_16, %v0_17 : !smt.int"
-                  "    %v0_25 = smt.and %v0_21, %v0_6, %v0_24, %v0_9, %v0_12, %v0_15, %v0_18"
-                  "    %v0_26 = smt.declare_fun \"ob_506\" : !smt.bool"
-                  "    %v0_27 = smt.eq %v0_26, %v0_25 : !smt.bool"
-                  "    smt.assert %v0_27"
-                  "    %v0_28 = smt.not %v0_26"
-                  "    smt.assert %v0_28"
-                  "    smt.check sat {} unknown {} unsat {}"
-                  "  }"
-                  "}" ]
-        Assert.Equal(expectedCorruptMlir, corruptMlir)
+        let armErr = Assert.Throws<System.ArgumentException>(fun () -> Alex.Traversal.SMTTransfer.transfer [ corruptOb ] |> ignore)
+        Assert.Contains("The buffer absence conversion plan requires exact AbsentNull and RequiresNonNullBuffer arms.", armErr.Message)
+
+        let badSourceCaseOb =
+            obligation (id 509) "foreign-buffer-absence-conversion-0"
+                (ObligationBody.BufferAbsenceArgumentConversion
+                    { Call = id 1; Parameter = 0; Actual = id 8; Construction = id 8
+                      SourceCase = 2; Absence = id 9
+                      Arms = [ arm0; arm1 ] })
+        let badSourceCaseMlir = Alex.Traversal.SMTTransfer.transfer [ badSourceCaseOb ]
+        Assert.Contains("smt.int.constant 2", badSourceCaseMlir)
 
     [<Fact>]
     let ``Boundary buffer calls refuse omitted or reordered actuals before operand traversal`` () =
@@ -2747,3 +2734,216 @@ module Schema53BoundaryWitnessing =
         | Result.Error reason ->
             Assert.Equal("Borrowed result view at boundary call 1760 lacks its exact non-owning declaration, invalidation frontier, or scope claim.", reason)
         | Result.Ok other -> failwithf "Admitted BorrowedResultView CompanionCall with CompanionArguments mismatch: %A" other
+
+    [<Fact>]
+    let ``BoundaryAbi.tryCallbackSignatureTypeAt derives closed callback ABI and fails closed on defective contracts`` () =
+        let scopeId = id 1800
+        let importId = id 1801
+        let invId = id 1802
+        let cbFormal = id 1803
+        let countedId = id 1804
+        let fnPtrType =
+            TypeIdentity.Application(
+                { Declaration = { Module = []; Name = "FnPtr" }
+                  Parameters = [ TypeParamKind.Type ]
+                  NativeKind = Some NTUKind.NTUfnptr },
+                [ functionFrom ptrHandleType (functionFrom intType (functionFrom uint8Type intType)) ])
+        let contract : BAREWire.Descriptors.CountedEntryArrayDescriptor =
+            { Binding = "Fixture.cbCtx"; Parameter = 0; Argument = 2; CountArgument = 1
+              Element = BAREWire.Descriptors.CountedElement.Handle "char*" }
+        let countedRow : BoundaryCountedEntryArray =
+            { Identity = countedId; Import = importId; Parameter = 0; Invocation = invId
+              Contract = contract; DeclarationFacts = Map.empty; Participants = ParticipantEvidence.Established [] }
+        let cbInv : BoundaryCallbackInvocation =
+            { Identity = invId; Import = importId; Parameter = 0; Formal = cbFormal; Scope = scopeId
+              Contract =
+                { Binding = "Fixture.execCb"; Parameter = 0; Scope = "Fixture.scope"
+                  Signature =
+                    { CallingConvention = BAREWire.Descriptors.CallConv.CDecl
+                      Parameters =
+                        [| { Name = "ctx"; Type = BAREWire.Descriptors.TypeRef.Pointer 64; PassBy = BAREWire.Descriptors.PassBy.Value }
+                           { Name = "argc"; Type = BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Signed, 32); PassBy = BAREWire.Descriptors.PassBy.Value }
+                           { Name = "argv"; Type = BAREWire.Descriptors.TypeRef.Pointer 64; PassBy = BAREWire.Descriptors.PassBy.Value } |]
+                      ReturnType = BAREWire.Descriptors.TypeRef.Integer(BAREWire.Descriptors.Signedness.Signed, 32) }
+                  Hypothesis = { Identity = "fixture.cb.sig"; Version = "1"; Source = "component contract" } }
+              Signature =
+                { CallingConvention = "CDecl"
+                  Parameters =
+                    [ BoundaryScalar.ResourceHandle(cbFormal, false)
+                      BoundaryScalar.Integer(32, true)
+                      BoundaryScalar.ReadOnlyBytes countedId ]
+                  Result = Some(BoundaryScalar.Integer(32, true)) }
+              Extent = BoundaryCallbackExtent.DuringCall; Participants = Set.singleton invId }
+        let cbImport : BoundaryImport =
+            { Identity = importId; Binding = scopeId; Scope = scopeId
+              Library = "fixture"; Symbol = "fixture_exec_cb"; CallingConvention = "CDecl"
+              DeclarationPath = [ scopeId ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
+              Result = Some(BoundaryScalar.Integer(32, true))
+              Participants = Set.ofList [ scopeId; importId; invId; cbFormal ]
+              SourceTypes = Map.ofList [ cbFormal, fnPtrType ]
+              DeclarationFacts = Map.ofList [ cbFormal, { emptyFact "binding" with SourceType = fnPtrType } ] }
+        let emptyGraph = revision []
+        let graph =
+            { emptyGraph with
+                Emission =
+                    { emptyGraph.Emission with
+                        Boundary =
+                            { emptyGraph.Emission.Boundary with
+                                Imports = Map.ofList [ importId, cbImport ]
+                                CountedEntryArrays = Map.ofList [ countedId, countedRow ]
+                                CallbackInvocations = Map.ofList [ invId, cbInv ] }
+                        Numeric =
+                            { emptyGraph.Emission.Numeric with
+                                TypeRepresentations = Map.ofList [ ptrHandleType, Result.Ok handleRep ] } } }
+
+        let expectedTy =
+            TFunc(
+                [ TOpaqueHandle(ptrHandleType, 64, 8)
+                  TInt(IntWidth 32)
+                  TMemRef(TInt(IntWidth 8)) ],
+                [ TInt(IntWidth 32) ])
+        Assert.Equal(Result.Ok expectedTy, BoundaryAbi.tryCallbackSignatureTypeAt graph invId)
+
+        let missingInvGraph =
+            { graph with Emission = { graph.Emission with Boundary = { graph.Emission.Boundary with CallbackInvocations = Map.empty } } }
+        Assert.True((BoundaryAbi.tryCallbackSignatureTypeAt missingInvGraph invId).IsError)
+
+        let nonCDeclGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                CallbackInvocations = Map.ofList [ invId, { cbInv with Signature = { cbInv.Signature with CallingConvention = "StdCall" } } ] } } }
+        Assert.True((BoundaryAbi.tryCallbackSignatureTypeAt nonCDeclGraph invId).IsError)
+
+        let resReturnGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                CallbackInvocations = Map.ofList [ invId, { cbInv with Signature = { cbInv.Signature with Result = Some(BoundaryScalar.ResourceHandle(cbFormal, false)) } } ] } } }
+        Assert.True((BoundaryAbi.tryCallbackSignatureTypeAt resReturnGraph invId).IsError)
+
+        let wrongOrdinalGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                CountedEntryArrays = Map.ofList [ countedId, { countedRow with Contract = { contract with Argument = 0 } } ] } } }
+        Assert.True((BoundaryAbi.tryCallbackSignatureTypeAt wrongOrdinalGraph invId).IsError)
+
+    [<Fact>]
+    let ``BorrowedBytes Option witnessing admits settled option and union representations and refuses non-byte or invalid shapes`` () =
+        let bvId = id 1850
+        let declBinding = id 1851
+        let bodyId = id 1852
+        let descId = id 1853
+        let ownerFormal = id 1854
+        let siteId = id 1860
+        let calleeId = id 1861
+        let ownerActual = id 1862
+        let invId = id 1863
+        let readId = id 1864
+        let scopeClaimId = id 1865
+        let support = Set.ofList [ bvId; declBinding; bodyId; descId; ownerFormal; siteId; calleeId; ownerActual; invId; readId; scopeClaimId ]
+        let descFacts =
+            let pCase = id 1890
+            let arrId = id 1891
+            Map.ofList
+                [ pCase, { emptyFact "case" with Text = [ "Value" ] }
+                  ownerFormal, { emptyFact "record" with Text = [ "PassBy" ]; References = [ pCase ]; Children = [ pCase ] }
+                  arrId, { emptyFact "array" with References = [ ownerFormal ]; Children = [ ownerFormal ] }
+                  descId, { emptyFact "record" with Text = [ "Parameters" ]; References = [ arrId ]; Children = [ arrId ] } ]
+        let bvDecl : BoundaryBorrowedResultViewDeclaration =
+            { Identity = bvId; Declaration = declBinding; Body = bodyId; Formals = [ ownerFormal ]; Descriptor = descId
+              OwnerParameter = 0; OwnerFormal = ownerFormal
+              Contract =
+                { Binding = "Fixture.columnTextOpt"; Owner = 0
+                  Content = BAREWire.Descriptors.BorrowedContent.Utf8Text
+                  Extent = BAREWire.Descriptors.BorrowedExtent.NulTerminated
+                  InvalidatedBy = [| BAREWire.Descriptors.BorrowInvalidation.OwnerCall { Binding = "Fixture.step"; Parameter = 0 } |]
+                  Hypothesis = { Identity = "fixture.bv.opt"; Version = "1"; Source = "component contract" } }
+              DeclarationFacts = descFacts; Participants = ParticipantEvidence.Established [] }
+        let bvUse : BoundaryBorrowedResultViewUse =
+            { Call = siteId; Declaration = bvId; Owner = ownerActual; View = siteId
+              CompanionCall = None; CompanionArguments = []
+              CallOrder = 10; Invalidations = [ invId ]; InvalidationOrders = [ 20 ]
+              Reads = [ readId ]; ReadOrders = [ 12 ]; NullToNoneBoundary = true
+              ScopeProof = scopeClaimId; Participants = ParticipantEvidence.Established [] }
+        let scopeOb =
+            obligation scopeClaimId "foreign-borrowed-view-scope"
+                (ObligationBody.BorrowedResultViewScope
+                    { Call = siteId; Declaration = bvId; Owner = ownerActual; View = siteId
+                      CallOrder = 10; InvalidationOrders = [ 20 ]; ReadOrders = [ 12 ]
+                      NullToNoneBoundary = true })
+        let importRow : BoundaryImport =
+            { Identity = descId; Binding = declBinding; Scope = declBinding
+              Library = "fixture"; Symbol = "fixture_column_text_opt"; CallingConvention = "CDecl"
+              DeclarationPath = [ declBinding ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
+              Result = Some(BoundaryScalar.BorrowedBytes bvId); Participants = support
+              SourceTypes = Map.ofList [ ownerFormal, ptrHandleType ]
+              DeclarationFacts = descFacts.Add(ownerFormal, { descFacts[ownerFormal] with SourceType = ptrHandleType }) }
+        let callRow : BoundaryCall =
+            { Site = siteId; Import = descId; Callee = calleeId; Entry = None; Resource = None
+              Arguments = [ { Actual = ownerActual; Formal = ownerFormal; Abi = BoundaryScalar.ResourceHandle(ownerFormal, false); Adaptation = None; OptionalEntry = None; BufferAbsence = None } ]
+              ErasedUnitArguments = []; Result = Some(BoundaryScalar.BorrowedBytes bvId); ResultAdaptation = None
+              Participants = support; SourceTypes = Map.empty }
+        let emptyGraph = revision []
+        let mkGraph (siteRep: ValueRepresentation) =
+            { emptyGraph with
+                Nodes =
+                    Map.ofList
+                        [ siteId, mkNode siteId unitType (SemanticKind.Application(calleeId, [ ownerActual ])) [ calleeId; ownerActual ]
+                          calleeId, mkNode calleeId unitType (SemanticKind.VarRef("fixture_column_text_opt", Some declBinding)) []
+                          ownerActual, mkNode ownerActual ptrHandleType (SemanticKind.VarRef("stmt", None)) []
+                          scopeClaimId, mkNode scopeClaimId unitType (SemanticKind.Obligation scopeOb) [] ]
+                Obligations = [ scopeOb ]
+                Emission =
+                    { emptyGraph.Emission with
+                        Callable = { emptyGraph.Emission.Callable with AliasTargets = Map.ofList [ siteId, siteId ] }
+                        Numeric =
+                            { emptyGraph.Emission.Numeric with
+                                TypeRepresentations = Map.ofList [ ptrHandleType, Result.Ok handleRep ]
+                                OccurrenceRepresentations =
+                                    Map.ofList
+                                        [ ownerActual, Result.Ok handleRep
+                                          ownerFormal, Result.Ok handleRep
+                                          siteId, Result.Ok siteRep ] }
+                        Boundary =
+                            { emptyGraph.Emission.Boundary with
+                                Imports = Map.ofList [ descId, importRow ]
+                                Calls = Map.ofList [ siteId, callRow ]
+                                BorrowedResultViewDeclarations = Map.ofList [ bvId, bvDecl ]
+                                BorrowedResultViewUses = Map.ofList [ siteId, bvUse ] } } }
+
+        let optBufferRep = ValueRepresentation.Buffer(Some 48, ValueRepresentation.Scalar(SettledSlot.Integer(8, None)))
+        match runBoundaryCallAt siteId (mkGraph optBufferRep) with
+        | Result.Ok(([ MLIROp.BoundaryBufferCall(NodeId 1860, [ { Type = TOpaqueHandle _ } ], [], [], [ { Type = TMemRefStatic(48, TInt(IntWidth 8)) } ]) ], TRValue { Type = TMemRefStatic(48, TInt(IntWidth 8)) }), _) -> ()
+        | other -> failwithf "Unexpected BorrowedBytes settled option buffer result: %A" other
+
+        let optUnionRep =
+            ValueRepresentation.Union([ "None", []; "Some", [ bufRep ] ], Some(0, 24, 8))
+        match runBoundaryCallAt siteId (mkGraph optUnionRep) with
+        | Result.Ok(([ MLIROp.BoundaryBufferCall(NodeId 1860, [ { Type = TOpaqueHandle _ } ], [], [], [ { Type = TMemRefStatic(24, TInt(IntWidth 8)) } ]) ], TRValue { Type = TMemRefStatic(24, TInt(IntWidth 8)) }), _) -> ()
+        | other -> failwithf "Unexpected BorrowedBytes settled 2-case union option result: %A" other
+
+        let badScalarRep = ValueRepresentation.Scalar(SettledSlot.Integer(32, Some "int32"))
+        match runBoundaryCallAt siteId (mkGraph badScalarRep) with
+        | Result.Error reason -> Assert.Equal("Borrowed result view disagrees with its source-settled representation.", reason)
+        | Result.Ok other -> failwithf "Admitted scalar BorrowedBytes result: %A" other
+
+        let badUnionRep =
+            ValueRepresentation.Union(
+                [ "None", []; "Some", [ ValueRepresentation.Scalar(SettledSlot.Integer(32, Some "int32")) ] ],
+                Some(0, 16, 8))
+        match runBoundaryCallAt siteId (mkGraph badUnionRep) with
+        | Result.Error reason -> Assert.Equal("Borrowed result view disagrees with its source-settled representation.", reason)
+        | Result.Ok other -> failwithf "Admitted non-byte union BorrowedBytes result: %A" other
+
+        let zeroByteBufferRep = ValueRepresentation.Buffer(Some 0, ValueRepresentation.Scalar(SettledSlot.Integer(8, None)))
+        match runBoundaryCallAt siteId (mkGraph zeroByteBufferRep) with
+        | Result.Error reason -> Assert.Equal("Borrowed result view disagrees with its source-settled representation.", reason)
+        | Result.Ok other -> failwithf "Admitted zero-extent BorrowedBytes option result: %A" other
