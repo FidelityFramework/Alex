@@ -6,4 +6,7 @@
   <ItemGroup>
     <Compile Include="Ensure.fs" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ContractFixture\ContractFixture.fsproj" />
+  </ItemGroup>
 </Project>

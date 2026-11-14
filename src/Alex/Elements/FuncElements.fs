@@ -55,9 +55,6 @@ let boundaryScalarType = BoundaryAbi.scalarType
 let publishedFuncDecl (declaration: BoundaryImport) : MLIROp =
     MLIROp.FuncOp (FuncOp.BoundaryFuncDecl(declaration, BoundaryAbi.parameters declaration, BoundaryAbi.results declaration))
 
-let publishedFuncDeclIn boundary (declaration: BoundaryImport) : MLIROp =
-    MLIROp.FuncOp (FuncOp.BoundaryFuncDecl(declaration, BoundaryAbi.parametersIn boundary declaration, BoundaryAbi.resultsIn boundary declaration))
-
 let publishedIntrinsicWriteDecl (declaration: IntrinsicWriteImport) : MLIROp =
     MLIROp.FuncOp (FuncOp.IntrinsicWriteDecl declaration)
 

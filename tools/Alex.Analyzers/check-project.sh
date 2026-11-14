@@ -29,7 +29,7 @@ for required in "$tool_dir/bin/Debug/net10.0/Alex.Analyzers.dll" "$tool_dir/Anal
   binding=$(sha256sum "$required")
   rg -Fqx "$binding" "$receipt" || { printf 'Truth receipt does not bind %s.\n' "$required" >&2; exit 1; }
 done
-for required in "$tool_dir/tests/StaleContract/Contract.fs" "$tool_dir/tests/StaleContract/StaleContract.fsproj" "$tool_dir/tests/StaleContract/bin/Debug/net10.0/Fidelity.PSG.dll" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$tool_dir/tests/InProject/Cases.fs" "$tool_dir/tests/DependencyControls.fsx" "$tool_dir/tests/project-control.sh" "$tool_dir/analyze-alex.sh" "$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256"; do
+for required in "$tool_dir/tests/StaleContract/Contract.fs" "$tool_dir/tests/StaleContract/StaleContract.fsproj" "$tool_dir/tests/StaleContract/bin/Debug/net10.0/Fidelity.PSG.dll" "$tool_dir/tests/AlexFixture/packages.lock.json" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$tool_dir/tests/InProject/Cases.fs" "$tool_dir/tests/InProject/Dialects/Cases.fs" "$tool_dir/tests/InProject/Elements/Cases.fs" "$tool_dir/tests/InProject/Elements/CleanCases.fs" "$tool_dir/tests/DependencyControls.fsx" "$tool_dir/tests/project-control.sh" "$tool_dir/analyze-alex.sh" "$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256"; do
   binding=$(sha256sum "$required")
   rg -Fqx "$binding" "$receipt" || { printf 'Truth receipt does not bind %s.\n' "$required" >&2; exit 1; }
 done

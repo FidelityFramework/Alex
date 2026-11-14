@@ -137,11 +137,25 @@ run_case() {
   if [[ -n ${ALEX_ANALYZER_ONLY:-} && "$name" != "$ALEX_ANALYZER_ONLY" ]]; then return 0; fi
   executed=$((executed + 1))
   cases+=("$name")
-  case "$name" in forward|revision|semantic-node|breadcrumb|impostor|missing-contract|stale-contract|nominal-*|other-name-field|published-width|published-string) analyzer='Alex published boundary' ;; esac
+  case "$name" in forward|revision|semantic-node|breadcrumb|impostor|missing-contract|stale-contract|nominal-*|other-name-field|published-width|published-string|Dialects/*|Elements/*|Patterns/*|Traversal/*|XParsec/*|Generation) analyzer='Alex published boundary' ;; esac
   (cd "$tool_dir" && dotnet fsharp-analyzers --script "$scratch/$name.fsx" --analyzers-path "$analyzers" --include-analyzers "$analyzer" --fail-on-type-errors) > "$scratch/$name.log" 2>&1 || rc=$?
   case "$expected" in
     clean|known-miss|policy-pending) [[ $rc -eq 0 ]] && ! rg -q 'AX[AC][0-9]+' "$scratch/$name.log" ;;
     type-error) [[ $rc -ne 0 ]] && rg -Fq 'did not type check and --fail-on-type-errors was passed' "$scratch/$name.log" ;;
+    AXA003+AXA004)
+      count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      [[ $rc -ne 0 && $count -eq 2 ]] || { printf 'FAIL %s diagnostic count (exit %s; log %s)\n' "$name" "$rc" "$scratch/$name.log" >&2; return 1; }
+      for pos_code in $positions; do
+        pos="${pos_code%%:*}"; code="${pos_code#*:}"
+        rg -Fq "$scratch/$name.fsx($pos): Error $code :" "$scratch/$name.log" || { printf 'FAIL %s %s at %s (log %s)\n' "$name" "$code" "$pos" "$scratch/$name.log" >&2; return 1; }
+      done
+      ;;
+    AXA005+AXA000-facts)
+      count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      [[ $rc -ne 0 && $count -eq 2 ]] || { printf 'FAIL %s diagnostic count (exit %s; log %s)\n' "$name" "$rc" "$scratch/$name.log" >&2; return 1; }
+      rg -Fq "$scratch/$name.fsx(3,44): Error AXA005 : Mutable local 'facts' is forbidden in non-traversal Alex layers." "$scratch/$name.log" || { printf 'FAIL %s AXA005\n' "$name" >&2; return 1; }
+      rg -Fq "$scratch/$name.fsx(3,76): Error AXA000 : Cannot establish DeclarationFacts provenance through mutable local 'facts'." "$scratch/$name.log" || { printf 'FAIL %s AXA000\n' "$name" >&2; return 1; }
+      ;;
     *)
       case "$expected" in
         AXA001) reason='Alex must not construct or update published PSG records.' ;;
@@ -149,7 +163,17 @@ run_case() {
         AXA000-mutable) expected=AXA000; reason="Cannot establish nominal predicate provenance through mutable local 'decision'." ;;
         AXA000-mutable-a) expected=AXA000; reason="Cannot establish nominal predicate provenance through mutable local 'a'." ;;
         AXA000-mutable-n) expected=AXA000; reason="Cannot establish nominal predicate provenance through mutable local 'n'." ;;
+        AXA000-mutable-opt) expected=AXA000; reason="Cannot establish published-fact option provenance through mutable local 'opt'." ;;
+        AXA000-mutable-facts) expected=AXA000; reason="Cannot establish DeclarationFacts provenance through mutable local 'facts'." ;;
         AXA002) reason='Alex must not derive an admission predicate from a nominal declaration name.' ;;
+        AXA003-fn) expected=AXA003; reason="Alex must confine Revision.Nodes and Revision.tryNode to Traversal/, XParsec/, or Generation.fs (in 'bad')." ;;
+        AXA004-fn) expected=AXA004; reason="Alex must not write recursive SemanticKind or Revision.Nodes catamorphisms outside Traversal/NanopassArchitecture.fs (tryWitnesses) (in 'bad')." ;;
+        AXA004-outer-bad) expected=AXA004; reason="Alex must not write recursive SemanticKind or Revision.Nodes catamorphisms outside Traversal/NanopassArchitecture.fs (tryWitnesses) (in 'outer.bad')." ;;
+        AXA005-elem) expected=AXA005; reason='Elements must not ' ;;
+        AXA005-mutable-x) expected=AXA005; reason="Mutable local 'x' is forbidden in non-traversal Alex layers." ;;
+        AXA005-ref) expected=AXA005; reason='Mutable ref cells (ref) are forbidden in non-traversal Alex layers.' ;;
+        AXA006) reason='Alex must not extract payloads from BoundaryImport.DeclarationFacts; only key-presence checks (ContainsKey / Map.containsKey) are permitted.' ;;
+        AXA007-fn) expected=AXA007; reason="Alex must not collapse None from a published-fact or symbol lookup into a fallback value (in 'bad')." ;;
         AXC001) reason='Clef production code must not use null.' ;;
         AXC002) reason='Clef production code must not depend on .NET library APIs:' ;;
         AXC003) reason='Clef production code must not use task computation expressions.' ;;
@@ -311,9 +335,118 @@ run_case file-reference AXC002 '1,21 1,11'
 run_case file-stream AXC002 '1,18 1,54 1,44'
 run_case stream-reader AXC002 '1,18 1,42'
 run_case invalid type-error
+mkdir -p "$scratch/Dialects/Core" "$scratch/Patterns" "$scratch/Traversal" "$scratch/XParsec" "$scratch/Elements"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Nodes.TryFind id\n' "$psg_dll" > "$scratch/Dialects/Core/axel-nodes.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = Revision.tryNode id g\n' "$psg_dll" > "$scratch/Patterns/axel-trynode.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (r: Revision) = { r with Header = r.Header }\n' "$psg_dll" > "$scratch/Dialects/Core/axel-revision-with.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet ok (g: Revision) (id: NodeId) = g.Nodes.TryFind id, Revision.tryNode id g\n' "$psg_dll" > "$scratch/Traversal/axel-trynode-ok.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet ok (g: Revision) (id: NodeId) = g.Nodes.TryFind id, Revision.tryNode id g\n' "$psg_dll" > "$scratch/XParsec/axel-trynode-ok.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet ok (g: Revision) (id: NodeId) = g.Nodes.TryFind id, Revision.tryNode id g\n' "$psg_dll" > "$scratch/Generation.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet rec bad (kind: SemanticKind) = match kind with SemanticKind.Literal n -> n | SemanticKind.Binding _ -> bad kind\n' "$psg_dll" > "$scratch/Dialects/Core/axel-cata-kind.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet outer (g: Revision) (id: NodeId) =\n  let rec bad i = match g.Nodes.TryFind i with Some _ -> bad i | None -> failwith "stop"\n  bad id\n' "$psg_dll" > "$scratch/Traversal/axel-cata-local-nodes.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet rec exprOrigin (g: Revision) (id: NodeId) =\n  match Revision.tryNode id g with\n  | Some n -> match n.Kind with SemanticKind.Literal v -> v | SemanticKind.Binding _ -> exprOrigin g id\n  | None -> failwith "missing"\n' "$psg_dll" > "$scratch/Dialects/Core/axel-expr-origin.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet rec tryWitnesses (kind: SemanticKind) = match kind with SemanticKind.Literal n -> n | SemanticKind.Binding _ -> tryWitnesses kind\n' "$psg_dll" > "$scratch/Traversal/NanopassArchitecture.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet ok (kind: SemanticKind) = match kind with SemanticKind.Literal n -> n | SemanticKind.Binding _ -> 0\n' "$psg_dll" > "$scratch/Dialects/Core/axel-nonrec-kind.fsx"
+printf '#r "%s"\ntype Bad = Fidelity.PSG.SemanticNode\n' "$psg_dll" > "$scratch/Elements/axel-elem-node.fsx"
+printf '#r "%s"\n#r "%s"\nlet bad s = Alex.Traversal.PSGZipper.focus s\n' "$psg_dll" "$alex_dll" > "$scratch/Elements/axel-elem-zipper.fsx"
+printf '#r "%s"\n#r "%s"\nlet bad () = Alex.CodeGeneration.TypeMapping.mapInt ()\n' "$psg_dll" "$alex_dll" > "$scratch/Elements/axel-elem-typemapping.fsx"
+printf '#r "%s"\n#r "%s"\nlet bad id = Alex.CodeGeneration.CallableSymbols.symbolFor id\n' "$psg_dll" "$alex_dll" > "$scratch/Elements/axel-elem-callablesymbols.fsx"
+printf '#r "%s"\n#r "%s"\nlet bad (s: Alex.XParsec.PSGCombinators.PSGParserState) = s.Graph\n' "$psg_dll" "$alex_dll" > "$scratch/Elements/axel-elem-parserstate-graph.fsx"
+printf '#r "%s"\n#r "%s"\nlet bad (s: Alex.XParsec.PSGCombinators.PSGParserState) = s.Zipper\n' "$psg_dll" "$alex_dll" > "$scratch/Elements/axel-elem-parserstate-zipper.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet ok (a: BoundaryImport) (b: IntrinsicWriteImport) (c: SpatialModuleWitness) (d: BoundaryScalar) = a, b, c, d\n' "$psg_dll" > "$scratch/Elements/axel-elem-allowed.fsx"
+printf '#r "%s"\nlet bad () = let mutable x = 0 in x <- 1; x\n' "$psg_dll" > "$scratch/Patterns/axel-mutable.fsx"
+printf '#r "%s"\nlet bad () = let c = ref 0 in c.Value\n' "$psg_dll" > "$scratch/Dialects/axel-ref.fsx"
+printf '#r "%s"\ntype R = { A: int; B: string }\nlet ok (xs: R list) = xs |> List.fold (fun s r -> s + r.A) 0\n' "$psg_dll" > "$scratch/Patterns/axel-pure-fold-ok.fsx"
+printf '#r "%s"\nlet ok () = let mutable x = 0 in x <- 1; x\n' "$psg_dll" > "$scratch/Traversal/axel-mutable-ok.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (imp: BoundaryImport) = imp.DeclarationFacts.TryFind "x"\n' "$psg_dll" > "$scratch/Patterns/axel-facts-tryfind.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (imp: BoundaryImport) = imp.DeclarationFacts |> Map.tryFind "x"\n' "$psg_dll" > "$scratch/Patterns/axel-facts-maptryfind.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (imp: BoundaryImport) = imp.DeclarationFacts["x"]\n' "$psg_dll" > "$scratch/Patterns/axel-facts-item.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (imp: BoundaryImport) = imp.DeclarationFacts.Values\n' "$psg_dll" > "$scratch/Patterns/axel-facts-values.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet ok (imp: BoundaryImport) = imp.DeclarationFacts.ContainsKey "x" && Map.containsKey "y" imp.DeclarationFacts\n' "$psg_dll" > "$scratch/Patterns/axel-facts-contains-ok.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet ok (imp: BoundaryImport) = imp.DeclarationFacts |> Map.containsKey "x"\n' "$psg_dll" > "$scratch/Patterns/axel-facts-pipe-contains-ok.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (imp: BoundaryImport) = let mutable facts = imp.DeclarationFacts in facts.ContainsKey "x"\n' "$psg_dll" > "$scratch/Patterns/axel-facts-mutable.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) (fb: SemanticNode) = Revision.tryNode id g |> Option.defaultValue fb\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-defaultval.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = let o = g.Codata.Escapes.TryFind id in Option.defaultWith (fun () -> 0) o\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-defaultwith.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad id acc = MLIRAccumulator.recallNode id acc |> Option.orElse (Some ("x", 1))\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/axel-fallback-orelse.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = defaultArg (g.Emission.Entries.TryFind id) "bad"\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-defaultarg.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = match Revision.tryNode id g with Some n -> n.Kind | None -> SemanticKind.Literal 0\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-match-val.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = match g.Codata.Escapes.TryFind id with Some _ -> true | None -> true\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-match-true.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Codata.Escapes.TryFind id |> Option.map (fun _ -> true) |> Option.defaultValue false\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-defaultval-false.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Codata.Escapes.TryFind id |> Option.forall (fun x -> x > 0)\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-forall.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = let r = g.Emission.Entries.TryFind id in if r.IsSome then r.Value else "bad"\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-issome.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) (fb: SemanticNode) = let mutable opt = Revision.tryNode id g in opt |> Option.defaultValue fb\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-mutable.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad (g: Revision) (id: NodeId) = match Revision.tryNode id g with Some _ -> WitnessOutput.error "ok" | None -> WitnessOutput.skip\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/axel-fallback-skip.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) (fb: bool) = match g.Codata.Escapes.TryFind id with Some x -> x > 0 | None -> fb\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-match-bool-var.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = match g.Codata.Escapes.TryFind id with Some x -> x > 0 | None -> not false\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-not-false.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad (g: Revision) (id: NodeId) = match Revision.tryNode id g with Some _ -> (1, WitnessOutput.skip) | None -> (0, WitnessOutput.error "x")\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/axel-fallback-tuple-refusal.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad (g: Revision) (id: NodeId) = match g.Codata.Escapes.TryFind id with Some x -> x | None -> WitnessOutput.error "x" |> ignore; 0\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/axel-fallback-seq-refusal.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) (fb: SemanticNode) = Revision.tryNode id g |> Option.orElse (Some fb) |> Option.defaultWith (fun () -> failwith "x")\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-orelse-chained.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Codata.Escapes.TryFind id |> Option.toList\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-tolist.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Codata.Escapes.TryFind id |> Option.toArray\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-toarray.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Codata.Escapes.TryFind id |> Option.fold (fun _ x -> x) 0\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-fold.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Codata.Escapes.TryFind id |> Option.count\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-count.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Codata.Escapes.TryFind id |> Option.iter ignore\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-iter.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Emission.Entries.TryFind id |> Option.toObj\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-toobj.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet tryAt (g: Revision) (id: NodeId) = g.Codata.Escapes.TryFind id\nlet bad (g: Revision) (id: NodeId) = tryAt g id |> Option.defaultValue 0\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-helper-ret.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet orZero opt = opt |> Option.defaultValue 0\nlet bad (g: Revision) (id: NodeId) = orZero (g.Codata.Escapes.TryFind id)\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-helper-param.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet cleanDomainOptional (alignmentOpt: string option) = alignmentOpt |> Option.defaultValue ""\nlet ok (g: Revision) (id: NodeId) (acc: MLIRAccumulator) (optArg: string option) =\n  let _ = cleanDomainOptional optArg\n  let _ = Revision.tryNode id g |> Option.defaultWith (fun () -> failwith "missing")\n  let _ = match g.Codata.Escapes.TryFind id with Some n -> Result.Ok n | None -> Result.Error "missing"\n  let _ = match MLIRAccumulator.recallNode id acc with Some _ -> WitnessOutput.error "ok" | None -> WitnessOutput.errorDiag (Diagnostic.error "missing")\n  let _ = match g.Codata.Escapes.TryFind id with Some x -> x > 0 | None -> false\n  let _ = match g.Codata.Escapes.TryFind id with Some _ -> (g.Emission.Entries.TryFind id |> Option.exists (fun s -> s = "ok")) | None -> (g.Emission.Entries.TryFind id |> Option.isSome)\n  Option.isSome (Revision.tryNode id g)\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/axel-fallback-ok.fsx"
+run_case Dialects/Core/axel-nodes AXA003-fn '3,37'
+run_case Patterns/axel-trynode AXA003-fn '3,37'
+run_case Dialects/Core/axel-revision-with AXA001 '3,24'
+run_case Traversal/axel-trynode-ok clean
+run_case XParsec/axel-trynode-ok clean
+run_case Generation clean
+run_case Dialects/Core/axel-cata-kind AXA004-fn '3,8'
+run_case Dialects/Core/axel-expr-origin AXA003+AXA004 '4,8:AXA003 3,8:AXA004'
+run_case Traversal/axel-cata-local-nodes AXA004-outer-bad '4,10'
+run_case Traversal/NanopassArchitecture clean
+run_case Dialects/Core/axel-nonrec-kind clean
+run_case Elements/axel-elem-node AXA005-elem '2,11'
+run_case Elements/axel-elem-zipper AXA005-elem '3,27 3,12 3,4'
+run_case Elements/axel-elem-typemapping AXA005-elem '3,33 3,13'
+run_case Elements/axel-elem-callablesymbols AXA005-elem '3,8 3,33 3,13 3,59 3,4'
+run_case Elements/axel-elem-parserstate-graph AXA005-elem '3,58 3,4'
+run_case Elements/axel-elem-parserstate-zipper AXA005-elem '3,58'
+run_case Elements/axel-elem-allowed clean
+run_case Patterns/axel-mutable AXA005-mutable-x '2,25'
+run_case Dialects/axel-ref AXA005-ref '2,21'
+run_case Patterns/axel-pure-fold-ok clean
+run_case Traversal/axel-mutable-ok clean
+run_case Patterns/axel-facts-tryfind AXA006 '3,32'
+run_case Patterns/axel-facts-maptryfind AXA006 '3,32 3,56'
+run_case Patterns/axel-facts-item AXA006 '3,32'
+run_case Patterns/axel-facts-values AXA006 '3,32'
+run_case Patterns/axel-facts-contains-ok clean
+run_case Patterns/axel-facts-pipe-contains-ok clean
+run_case Patterns/axel-facts-mutable AXA005+AXA000-facts
+run_case Traversal/axel-fallback-defaultval AXA007-fn '3,81'
+run_case Traversal/axel-fallback-defaultwith AXA007-fn '3,76'
+run_case Traversal/axel-fallback-orelse AXA007-fn '5,54'
+run_case Traversal/axel-fallback-defaultarg AXA007-fn '3,37'
+run_case Traversal/axel-fallback-match-val AXA007-fn '3,97'
+run_case Traversal/axel-fallback-match-true AXA007-fn '3,101'
+run_case Traversal/axel-fallback-defaultval-false AXA007-fn '3,98'
+run_case Traversal/axel-fallback-forall AXA007-fn '3,68'
+run_case Traversal/axel-fallback-issome AXA007-fn '3,108'
+run_case Traversal/axel-fallback-mutable AXA000-mutable-opt '3,106'
+run_case Traversal/axel-fallback-skip AXA007-fn '5,115'
+run_case Traversal/axel-fallback-match-bool-var AXA007-fn '3,113'
+run_case Traversal/axel-fallback-not-false AXA007-fn '3,102'
+run_case Traversal/axel-fallback-tuple-refusal AXA007-fn '5,115'
+run_case Traversal/axel-fallback-seq-refusal AXA007-fn '5,98'
+run_case Traversal/axel-fallback-orelse-chained AXA007-fn '3,81'
+run_case Traversal/axel-fallback-tolist AXA007-fn '3,68'
+run_case Traversal/axel-fallback-toarray AXA007-fn '3,68'
+run_case Traversal/axel-fallback-fold AXA007-fn '3,68'
+run_case Traversal/axel-fallback-count AXA007-fn '3,68'
+run_case Traversal/axel-fallback-iter AXA007-fn '3,68'
+run_case Traversal/axel-fallback-toobj AXA007-fn '3,70'
+run_case Traversal/axel-fallback-helper-ret AXA007-fn '4,51'
+run_case Traversal/axel-fallback-helper-param AXA007-fn '4,37'
+run_case Traversal/axel-fallback-ok clean
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 132 ]] || { printf 'Expected 132 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 186 ]] || { printf 'Expected 186 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done
@@ -324,7 +457,7 @@ if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
   separator=''
   for case_name in "${policy_pending[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done
   printf '],"sdk":"%s","analyzer_cli":"0.41.0"}\n' "$(dotnet --version)" >> "$scratch/truth.json"
-  sha256sum "$analyzers/Alex.Analyzers.dll" "$tool_dir/Analyzer.fs" "$tool_dir/tests/run.sh" "$tool_dir/.config/dotnet-tools.json" "$psg_dll" "$impostor_dll" "$alex_dll" "$stale_dll" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/ImpostorFixture/ImpostorFixture.fsproj" "$tool_dir/tests/AlexFixture/Ensure.fs" "$tool_dir/tests/AlexFixture/AlexFixture.fsproj" "$tool_dir/tests/StaleContract/Contract.fs" "$tool_dir/tests/StaleContract/StaleContract.fsproj" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$tool_dir/tests/InProject/Cases.fs" "$tool_dir/tests/project-control.sh" "$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256" "$tool_dir/analyze-alex.sh" "$tool_dir/check-project.sh" "$tool_dir/ProjectInputs.fsx" "$tool_dir/VerifyProjectLog.fsx" "$tool_dir/Alex.Analyzers.fsproj" "$tool_dir/Directory.Packages.props" "$tool_dir/packages.lock.json" "$tool_dir/NuGet.Config" "$scratch/truth.json" > "$scratch/truth.sha256"
+  sha256sum "$analyzers/Alex.Analyzers.dll" "$tool_dir/Analyzer.fs" "$tool_dir/tests/run.sh" "$tool_dir/.config/dotnet-tools.json" "$psg_dll" "$impostor_dll" "$alex_dll" "$stale_dll" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/ImpostorFixture/ImpostorFixture.fsproj" "$tool_dir/tests/AlexFixture/Ensure.fs" "$tool_dir/tests/AlexFixture/AlexFixture.fsproj" "$tool_dir/tests/AlexFixture/packages.lock.json" "$tool_dir/tests/StaleContract/Contract.fs" "$tool_dir/tests/StaleContract/StaleContract.fsproj" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$tool_dir/tests/InProject/Cases.fs" "$tool_dir/tests/InProject/Dialects/Cases.fs" "$tool_dir/tests/InProject/Elements/Cases.fs" "$tool_dir/tests/InProject/Elements/CleanCases.fs" "$tool_dir/tests/project-control.sh" "$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256" "$tool_dir/analyze-alex.sh" "$tool_dir/check-project.sh" "$tool_dir/ProjectInputs.fsx" "$tool_dir/VerifyProjectLog.fsx" "$tool_dir/Alex.Analyzers.fsproj" "$tool_dir/Directory.Packages.props" "$tool_dir/packages.lock.json" "$tool_dir/NuGet.Config" "$scratch/truth.json" > "$scratch/truth.sha256"
   sha256sum "$alias_dll" "$tool_dir/tests/AliasFixture/Aliases.fs" "$tool_dir/tests/AliasFixture/AliasFixture.fsproj" "$tool_dir/tests/AliasFixture/packages.lock.json" "$tool_dir/tests/DependencyControls.fsx" >> "$scratch/truth.sha256"
   cp "$scratch/truth.sha256" "${ALEX_ANALYZER_TRUTH_RECEIPT_OUT:-$repo_dir/artifacts/alex-analyzers-tests/latest-truth.sha256}"
   printf 'Truth receipt: %s\n' "$scratch/truth.sha256"
