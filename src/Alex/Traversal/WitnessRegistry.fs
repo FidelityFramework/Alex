@@ -149,8 +149,9 @@ let createRegistry (targetPlatform: TargetPlatform) =
                         // leaves the node's value unbound; the enclosing Lambda then either
                         // fails later with a confusing message or fabricates a result. Report
                         // the coverage gap here, exactly as the top-level combiner does.
-                        let kindLine = sprintf "%A" node.Kind |> Alex.Text.firstLine
-                        WitnessOutput.error (sprintf "No witness handled node %d — Kind: %s. Type: %A" (NodeId.value node.Id) kindLine node.Type)
+                        let kindLine = Alex.Dialects.Core.Serialize.describeSemanticKind node.Kind |> Alex.Text.firstLine
+                        let typeLine = Alex.Dialects.Core.Serialize.describeTypeIdentity node.Type
+                        WitnessOutput.error (sprintf "No witness handled node %d — Kind: %s. Type: %s" (NodeId.value node.Id) kindLine typeLine)
                     | nanopass :: rest ->
                         match nanopass.Witness ctx node with
                         | output when output.Result = TRSkip -> tryWitnesses rest

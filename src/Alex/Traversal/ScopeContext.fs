@@ -23,18 +23,19 @@ type ScopeLevel =
 /// Scope context tracks operations accumulated at a specific scope level
 /// Forms a hierarchy: child scopes nest within parent scopes
 type ScopeContext = {
+    Id: int64
     Level: ScopeLevel
     Operations: MLIROp list         // Accumulated ops at THIS level
     Parent: ScopeContext option     // Parent scope for nesting
 }
 
 module ScopeContext =
-    /// Create root module-level scope
-    ///
-    /// This is the top of the scope hierarchy. All module-level operations
-    /// (function definitions, global strings, external declarations) accumulate here.
+    let private nextScopeId = ref 0L
+
     let root () : ScopeContext =
-        { Level = ModuleLevel
+        nextScopeId.Value <- nextScopeId.Value + 1L
+        { Id = nextScopeId.Value
+          Level = ModuleLevel
           Operations = []
           Parent = None }
 
@@ -46,7 +47,9 @@ module ScopeContext =
     ///
     /// This ensures operations never appear in multiple scopes.
     let createChild (parent: ScopeContext) (level: ScopeLevel) : ScopeContext =
-        { Level = level
+        nextScopeId.Value <- nextScopeId.Value + 1L
+        { Id = nextScopeId.Value
+          Level = level
           Operations = []
           Parent = Some parent }
 

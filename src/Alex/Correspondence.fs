@@ -9,8 +9,7 @@ open Alex.Dialects.Core.Types
 /// The current full-witness pipeline supplies one whole revision.
 /// witnessRun distinguishes emission bookkeeping, not an accepted source
 /// revision or temporal freshness.
-[<NoEquality; NoComparison>]
-type WitnessRun = private WitnessRun of unit
+type WitnessRun = private WitnessRun of int64
 
 [<NoEquality; NoComparison>]
 type SemanticScope =
@@ -43,18 +42,22 @@ type WitnessEmission<'result> = {
     TopLevelOps: MLIROp list
 }
 
+let private nextRunId = ref 0L
+
 let witnessRun (WholeCheckedGraph(id, _)) = id
 let graph (WholeCheckedGraph(_, graph)) = graph
-let beginWholeGraphWitness graph = WholeCheckedGraph(WitnessRun (), graph)
+let beginWholeGraphWitness graph =
+    nextRunId.Value <- nextRunId.Value + 1L
+    WholeCheckedGraph(WitnessRun nextRunId.Value, graph)
 
 let sameScope left right =
-    LanguagePrimitives.PhysicalEquality (witnessRun left) (witnessRun right)
-    && LanguagePrimitives.PhysicalEquality (graph left) (graph right)
+    witnessRun left = witnessRun right
+    && graph left = graph right
 
 let validateOccurrence scope (occurrence: Occurrence) =
     let nodes = (graph scope).Nodes
     let current (node: SemanticNode) =
-        nodes.TryFind node.Id |> Option.exists (fun actual -> LanguagePrimitives.PhysicalEquality actual node)
+        nodes.TryFind node.Id |> Option.exists (fun actual -> actual = node)
     if not (sameScope scope occurrence.Scope) then Error "Witness occurrence belongs to a different checked graph snapshot or witness run"
     elif not (current occurrence.Focus) then
         Error "Witness occurrence does not retain the actual current PSG focus and Huet path"

@@ -169,7 +169,7 @@ let ``explicit demand refuses stale authority or absent scoped values`` defect =
     if defect <> "missing value" then MLIRAccumulator.bindNode operand (Arg 0) (TInt(IntWidth 1)) accumulator
     let position = Zipper.create graph root |> require "Missing root" |> atChild marker
     let ctx = context graph position accumulator
-    let ctx = if defect = "foreign graph" then { ctx with Graph = { graph with DeclarationRoots = [] } } else ctx
+    let ctx = if defect = "foreign graph" then { ctx with Graph = { graph with DeclarationRoots = [root, DeclRoot.EntryPoint] } } else ctx
     let output = Alex.Witnesses.EagerWitness.nanopass.Witness ctx position.Focus
     match output.Result with TRError _ -> () | other -> failwithf "Malformed demand was witnessed: %A" other
     Assert.Empty output.InlineOps
@@ -270,7 +270,7 @@ let ``unit demand requires successful completion at the actual child occurrence`
         let child = Zipper.create graph alternate.Id |> require "Missing alternate effect parent" |> atChild effect
         MLIRAccumulator.completeVoid child ctx.ScopeContext operands
     | "different graph" ->
-        let other = { graph with DeclarationRoots = [] }
+        let other = { graph with DeclarationRoots = [root, DeclRoot.EntryPoint] }
         let child = Zipper.create other root |> require "Missing other root" |> atChild marker |> atChild effect
         MLIRAccumulator.completeVoid child ctx.ScopeContext operands
     | _ -> ()

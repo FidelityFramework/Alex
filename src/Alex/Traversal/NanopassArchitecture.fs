@@ -81,7 +81,7 @@ let private validateNumericResult (graph: Revision) nodeId result =
                 try
                     let expected = Alex.CodeGeneration.TypeMapping.scalarCarrierType carrier
                     if value.Type = expected then Result.Ok ()
-                    else Result.Error (sprintf "Witness result at node %d has carrier %A; source Numeric publication requires %A" (NodeId.value nodeId) value.Type expected)
+                    else Result.Error (sprintf "Witness result at node %d has carrier %s; source Numeric publication requires %s" (NodeId.value nodeId) (Alex.Dialects.Core.Serialize.describeType value.Type) (Alex.Dialects.Core.Serialize.describeType expected))
                 with error -> Result.Error (Alex.Text.exceptionMessage error)
         | _ -> Result.Error (sprintf "Witness result at node %d omitted its source-published scalar value" (NodeId.value nodeId))
     else Result.Ok ()
@@ -108,7 +108,7 @@ let rec visitAllNodes
         if Set.contains currentNode.Id !(visitedCtx.GlobalVisited) then definitionOnlyLambda currentNode visitedCtx.Graph
         else false
     if currentNode.Id <> visitedCtx.Zipper.Focus.Id
-       || not ((LanguagePrimitives.PhysicalEquality (visitedCtx.Graph) (visitedCtx.Zipper.Graph))) then
+       || visitedCtx.Graph <> visitedCtx.Zipper.Graph then
         Diagnostic.error (Some currentNode.Id) (Some "Traversal") (Some "zipper occurrence")
             "The traversal node and zipper must identify the same occurrence in the current graph"
         |> fun diagnostic -> MLIRAccumulator.addError diagnostic visitedCtx.Accumulator
@@ -123,7 +123,7 @@ let rec visitAllNodes
     elif definitionReuse then
         ()
     else
-        let priorErrors = visitedCtx.Accumulator.Errors
+        let priorErrorCount = visitedCtx.Accumulator.Errors.Length
         MLIRAccumulator.forgetVoid currentNode.Id visitedCtx.Accumulator
         // Mark as visited in traversal scope
         visited := Set.add currentNode.Id !visited
@@ -172,7 +172,7 @@ let rec visitAllNodes
 
         // THEN witness current node (after its structural children)
         let witnessed =
-            if (LanguagePrimitives.PhysicalEquality (priorErrors) (visitedCtx.Accumulator.Errors)) then
+            if visitedCtx.Accumulator.Errors.Length = priorErrorCount then
                 witness visitedCtx currentNode
             else
                 WitnessOutput.errorCoded AX4001 (Some currentNode.Id) (Some "Traversal") (Some "required child occurrence")
@@ -242,21 +242,17 @@ let rec visitAllNodes
             | Result.Error reason ->
                 Diagnostic.error (Some currentNode.Id) (Some "Lazy") (Some "operand transport") reason
                 |> fun diagnostic -> MLIRAccumulator.addError diagnostic visitedCtx.Accumulator
-        | TRVoid when (LanguagePrimitives.PhysicalEquality (priorErrors) (visitedCtx.Accumulator.Errors)) ->
+        | TRVoid when visitedCtx.Accumulator.Errors.Length = priorErrorCount ->
             MLIRAccumulator.completeVoid visitedCtx.Zipper visitedCtx.ScopeContext visitedCtx.Accumulator
         | TRVoid -> ()
         | TRError diag ->
             MLIRAccumulator.addError diag visitedCtx.Accumulator
         | TRSkip ->
-            // A combined witness never returns TRSkip; a traversal witness that does
-            // left this node unclaimed, which is a coverage gap, not a no-op.
             Diagnostic.error (Some currentNode.Id) (Some "Traversal") (Some "witness coverage")
                 (sprintf "Alex witness coverage did not claim node %d: the traversal witness returned skip" (NodeId.value currentNode.Id))
             |> fun diagnostic -> MLIRAccumulator.addError diagnostic visitedCtx.Accumulator
 
-        // Capture the actual successful occurrence before the enclosing control
-        // witness restores branch-local operand maps.
-        if (LanguagePrimitives.PhysicalEquality (priorErrors) (visitedCtx.Accumulator.Errors)) then
+        if visitedCtx.Accumulator.Errors.Length = priorErrorCount then
             EmissionCorrespondence.recordWitness visitedCtx output pendingStaticGlobals
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -295,8 +291,8 @@ let combineWitnesses (nanopasses: Nanopass list) : (WitnessContext -> SemanticNo
                 // Structural nodes (ModuleDef, Sequential) should have transparent witnesses.
                 //
                 // Enrich the error with contextual information to aid diagnosis:
-                let kindStr = sprintf "%A" node.Kind
-                let typeStr = sprintf "%A" node.Type
+                let kindStr = Alex.Dialects.Core.Serialize.describeSemanticKind node.Kind
+                let typeStr = Alex.Dialects.Core.Serialize.describeTypeIdentity node.Type
                 let contextInfo =
                     match node.Kind with
                     | SemanticKind.VarRef (name, Some bindingId) ->
@@ -313,7 +309,7 @@ let combineWitnesses (nanopasses: Nanopass list) : (WitnessContext -> SemanticNo
                             sprintf "VarRef '%s' -> Binding %d (source binding-use account disagrees). Type: %s" name (NodeId.value bindingId) typeStr
                     | _ ->
                         sprintf "Kind: %s. Type: %s" (Alex.Text.firstLine kindStr) typeStr
-                WitnessOutput.error (sprintf "No witness handled node %A — %s" node.Id contextInfo)
+                WitnessOutput.error (sprintf "No witness handled node %d — %s" (NodeId.value node.Id) contextInfo)
             | nanopass :: rest ->
                 let result = nanopass.Witness ctx node
                 match result.Result with

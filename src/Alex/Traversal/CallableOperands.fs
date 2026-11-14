@@ -307,7 +307,7 @@ let closedEntryFunctionType (graph: Revision) (entry: BoundaryClosedEntry) (sign
 /// Shared physical parameters retain their symbolic measure variables. Only
 /// the current source-owned call instance can authorize that signature here.
 let parametersAtCall (ctx: WitnessContext) site implementation parameters =
-    if ctx.Zipper.Focus.Id <> site || not ((LanguagePrimitives.PhysicalEquality (ctx.Zipper.Focus) (ctx.Graph.Nodes[site]))) then
+    if ctx.Zipper.Focus.Id <> site || ctx.Zipper.Focus <> ctx.Graph.Nodes[site] then
         Result.Error "Direct call signature projection requires its current Huet occurrence."
     else
     let projection = ctx.Graph.Emission.Callable

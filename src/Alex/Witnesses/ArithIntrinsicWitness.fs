@@ -44,7 +44,8 @@ let private witnessArithIntrinsic (ctx: WitnessContext) (node: SemanticNode) : W
         match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
         | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
         | Result.Error reason ->
-            WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "ArithIntrinsic") (Some $"%A{info.Module}.{info.Operation}")
-                $"PSG settlement did not settle a witnessable operation for intrinsic application %A{info.Module}.{info.Operation} (node {NodeId.value node.Id}): {reason}"
+            let modName = Alex.Dialects.Core.Serialize.describeIntrinsicModule info.Module
+            WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "ArithIntrinsic") (Some $"{modName}.{info.Operation}")
+                $"PSG settlement did not settle a witnessable operation for intrinsic application {modName}.{info.Operation} (node {NodeId.value node.Id}): {reason}"
 
 let nanopass : Nanopass = { Name = "ArithIntrinsic"; Witness = witnessArithIntrinsic }

@@ -151,7 +151,7 @@ let structFieldOffset (ty: MLIRType) (fieldIndex: int) : int =
         | None -> failwithf "structFieldOffset: field %d is outside the settled layout of %d fields" fieldIndex bytes.Offsets.Length
     | TStruct (fields, None) ->
         failwithf "structFieldOffset: the struct {%s} has no settled layout to read an offset from" (fields |> List.map fst |> String.concat ", ")
-    | other -> failwithf "structFieldOffset: %A is not a struct" other
+    | _ -> failwith "structFieldOffset: the supplied type is not a struct"
 
 /// The size model read through the architecture's declared Pointer width.
 let mlirTypeSize (arch: Architecture) (ty: MLIRType) : int =

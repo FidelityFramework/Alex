@@ -398,7 +398,7 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                         let bodyNodeKindStr =
                             match Revision.tryNode actualValueNode ctx.Graph with
                             | Some bodyNode ->
-                                let kindStr = sprintf "%A" bodyNode.Kind |> Alex.Text.firstLine
+                                let kindStr = Alex.Dialects.Core.Serialize.describeSemanticKind bodyNode.Kind |> Alex.Text.firstLine
                                 sprintf "Body node %d is %s" (NodeId.value actualValueNode) kindStr
                             | None ->
                                 sprintf "Body node %d not found in graph" (NodeId.value actualValueNode)

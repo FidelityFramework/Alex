@@ -33,4 +33,4 @@ let replace (oldValue: string) newValue (value: string) =
 
 let exceptionMessage = function
     | Failure message -> message
-    | error -> sprintf "%A" error
+    | _ -> "Unhandled exception"

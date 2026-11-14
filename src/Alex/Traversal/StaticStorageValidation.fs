@@ -87,7 +87,7 @@ let validateWritable arch (graph: Revision) (ops: MLIROp list) =
                 let localErrors = [
                     yield! duplicate
                     if Set.contains entry.Identity identities then
-                        yield sprintf "source storage %A was emitted more than once" entry.Identity
+                        yield sprintf "source storage %s was emitted more than once" (Alex.Dialects.Core.Serialize.describeProgramStorageIdentity entry.Identity)
                     yield! Option.toList correspondence
                     if reads.IsEmpty || reads |> List.exists ((<>) ty) then
                         yield "writable allocation views disagree with its declaration: " + name
@@ -100,7 +100,7 @@ let validateWritable arch (graph: Revision) (ops: MLIROp list) =
         yield! declarationErrors |> List.rev |> List.concat
         for KeyValue(identity, _) in inventory.Entries do
             if not (Set.contains identity identities) then
-                yield sprintf "source writable allocation %A has no emitted declaration" identity
+                yield sprintf "source writable allocation %s has no emitted declaration" (Alex.Dialects.Core.Serialize.describeProgramStorageIdentity identity)
     ]
     if List.isEmpty errors then Ok(List.rev observed)
     else Error("Writable storage correspondence failed: " + String.concat "; " errors)

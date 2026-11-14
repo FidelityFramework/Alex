@@ -73,7 +73,7 @@ let ``witness scope requires both original run and original graph identities`` (
     Assert.True(Alex.Correspondence.sameScope scope scope)
     for _ in 1 .. 100 do
         Assert.False(Alex.Correspondence.sameScope scope (Alex.Correspondence.beginWholeGraphWitness graph))
-    let copy = { graph with Nodes = graph.Nodes }
+    let copy = { graph with DeclarationRoots = [value.Id, DeclRoot.EntryPoint] }
     let forged = Alex.Correspondence.WholeCheckedGraph(Alex.Correspondence.witnessRun scope, copy)
     Assert.False(Alex.Correspondence.sameScope scope forged)
 

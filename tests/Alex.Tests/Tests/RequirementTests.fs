@@ -144,7 +144,7 @@ let ``requirement rejects stale evidence operands and occurrences before emittin
     let ctx =
         match defect with
         | "foreign-position" -> { ctx with Zipper = at changed 6 [NodeId.value site] }
-        | "foreign-snapshot" -> { ctx with Graph = { changed with DeclarationRoots = [] } }
+        | "foreign-snapshot" -> { ctx with Graph = { changed with DeclarationRoots = [root, DeclRoot.EntryPoint] } }
         | _ -> ctx
     let output = Alex.Witnesses.RequirementWitness.nanopass.Witness ctx ctx.Zipper.Focus
     match output.Result with TRError _ -> () | other -> failwithf "Expected requirement rejection: %A" other

@@ -34,13 +34,13 @@ let isResourceOccurrence (graph: Revision) nodeId =
 
 let scalarCarrierType (carrier: ScalarCarrier) : MLIRType =
     settledScalarType carrier.Slot
-    |> Option.defaultWith (fun () -> failwithf "TypeMapping: source carrier at node %d has no admitted scalar physical form: %A" (NodeId.value carrier.Site) carrier.Slot)
+    |> Option.defaultWith (fun () -> failwithf "TypeMapping: source carrier at node %d has no admitted scalar physical form: %s" (NodeId.value carrier.Site) (Alex.Dialects.Core.Serialize.describeSettledSlot carrier.Slot))
 
 let rec tryRepresentationType = function
     | ValueRepresentation.Scalar slot ->
         settledScalarType slot
         |> Option.map Ok
-        |> Option.defaultWith (fun () -> Error(sprintf "TypeMapping: source scalar form has no physical spelling: %A" slot))
+        |> Option.defaultWith (fun () -> Error(sprintf "TypeMapping: source scalar form has no physical spelling: %s" (Alex.Dialects.Core.Serialize.describeSettledSlot slot)))
     | ValueRepresentation.Buffer(None, element) ->
         tryRepresentationType element |> Result.map TMemRef
     | ValueRepresentation.Buffer(Some count, element) when count >= 0 ->

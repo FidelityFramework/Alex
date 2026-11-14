@@ -400,8 +400,8 @@ module MLIRAccumulator =
             if not isBenignMemRefRefinement then
                 let ssaStr = Alex.Dialects.Core.Serialize.ssaToString ssa
                 let diag = Diagnostic.errorWithDetails (Some nodeId) (Some "SSATypes") (Some "bindNode")
-                            (sprintf "SSA type collision: %s already registered as %A, new type %A (keeping existing)" ssaStr existingTy ty)
-                            (sprintf "%A" existingTy) (sprintf "%A" ty)
+                            (sprintf "SSA type collision: %s already registered as %s, new type %s (keeping existing)" ssaStr (Alex.Dialects.Core.Serialize.describeType existingTy) (Alex.Dialects.Core.Serialize.describeType ty))
+                            (Alex.Dialects.Core.Serialize.describeType existingTy) (Alex.Dialects.Core.Serialize.describeType ty)
                 acc.Errors <- diag :: acc.Errors
         | Some _ -> () // Same type — no conflict
         | None ->
@@ -506,10 +506,10 @@ module MLIRAccumulator =
                 acc.LazyAssoc.ContainsKey nodeId) then
             acc.VoidAssoc <- acc.VoidAssoc.Add(nodeId, { Graph = position.Graph; Path = occurrencePath position; Scope = scope })
 
-    let completedVoid (position: PSGZipper) scope (acc: MLIRAccumulator) =
+    let completedVoid (position: PSGZipper) (scope: ScopeContext ref) (acc: MLIRAccumulator) =
         acc.VoidAssoc.TryFind position.Focus.Id |> Option.exists (fun completion ->
-            (LanguagePrimitives.PhysicalEquality (completion.Graph) (position.Graph)) &&
-            (LanguagePrimitives.PhysicalEquality (completion.Scope) (scope)) &&
+            completion.Graph = position.Graph &&
+            completion.Scope.Value.Id = scope.Value.Id &&
             completion.Path = occurrencePath position)
 
     let snapshotOperands (acc: MLIRAccumulator) =
@@ -701,9 +701,9 @@ module EmissionCorrespondence =
                 { Scope = scope; Focus = ctx.Zipper.Focus
                   Anchor = ctx.Zipper.Path |> List.tryLast |> Option.map _.Parent |> Option.defaultValue ctx.Zipper.Focus.Id
                   Path = ctx.Zipper.Path }
-            if not ((LanguagePrimitives.PhysicalEquality (ctx.Graph) (Alex.Correspondence.graph scope))) then
+            if ctx.Graph <> Alex.Correspondence.graph scope then
                 Result.Error "Witness result capture scope belongs to a different checked graph"
-            elif not ((LanguagePrimitives.PhysicalEquality (ctx.Graph) (ctx.Zipper.Graph))) then
+            elif ctx.Graph <> ctx.Zipper.Graph then
                 Result.Error "Witness zipper and context refer to different checked graphs"
             else Alex.Correspondence.validateOccurrence scope at |> Result.map (fun () -> at)
 

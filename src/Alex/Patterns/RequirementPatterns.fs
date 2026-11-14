@@ -13,8 +13,8 @@ open Alex.Patterns.LiteralPatterns
 
 let pRequirement (ctx: WitnessContext) = parser {
     let! state = getUserState
-    do! ensure ((LanguagePrimitives.PhysicalEquality (state.Zipper) (ctx.Zipper))
-                && (LanguagePrimitives.PhysicalEquality (ctx.Graph) (ctx.Zipper.Graph))
+    do! ensure (state.Zipper = ctx.Zipper
+                && ctx.Graph = ctx.Zipper.Graph
                 && state.Current.Id = ctx.Zipper.Focus.Id)
             "Requirement must be witnessed at its actual zipper occurrence."
     let! contract =

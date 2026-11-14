@@ -7,6 +7,7 @@ module internal Alex.Elements.MLIRAtomics
 open XParsec.Combinators // parser { }
 open Alex.XParsec.PSGCombinators
 open Alex.Dialects.Core.Types
+open Alex.Dialects.Core.Serialize
 
 // Elements accept type from caller - patterns know the type and pass it explicitly
 
@@ -18,7 +19,7 @@ open Alex.Dialects.Core.Types
 /// Emits constant + load operations
 let pExtractValue (ssa: SSA) (structMemref: SSA) (fieldIndex: int) (offsetSSA: SSA) (ty: MLIRType) : PSGParser<MLIROp list> =
     parser {
-        do! emitTrace "pExtractValue" (sprintf "ssa=%A, memref=%A, field=%d, ty=%A" ssa structMemref fieldIndex ty)
+        do! emitTrace "pExtractValue" (sprintf "ssa=%s, memref=%s, field=%d, ty=%s" (ssaToString ssa) (ssaToString structMemref) fieldIndex (describeType ty))
         let offsetOp = ArithOp.ConstI (offsetSSA, (NumericLiteralI.FromString (string fieldIndex)), TIndex) |> MLIROp.ArithOp
         let loadOp = MemRefOp.Load (ssa, structMemref, [offsetSSA], ty, TMemRefStatic (1, ty)) |> MLIROp.MemRefOp
         return [offsetOp; loadOp]
@@ -28,7 +29,7 @@ let pExtractValue (ssa: SSA) (structMemref: SSA) (fieldIndex: int) (offsetSSA: S
 /// Emits constant + store operations
 let pInsertValue (resultSSA: SSA) (structMemref: SSA) (value: SSA) (fieldIndex: int) (offsetSSA: SSA) (ty: MLIRType) : PSGParser<MLIROp list> =
     parser {
-        do! emitTrace "pInsertValue" (sprintf "result=%A, memref=%A, value=%A, field=%d, ty=%A" resultSSA structMemref value fieldIndex ty)
+        do! emitTrace "pInsertValue" (sprintf "result=%s, memref=%s, value=%s, field=%d, ty=%s" (ssaToString resultSSA) (ssaToString structMemref) (ssaToString value) fieldIndex (describeType ty))
         let offsetOp = ArithOp.ConstI (offsetSSA, (NumericLiteralI.FromString (string fieldIndex)), TIndex) |> MLIROp.ArithOp
         let memrefType = TMemRefStatic (1, ty)  // 1-element struct field storage
         let storeOp = MemRefOp.Store (value, structMemref, [offsetSSA], ty, memrefType) |> MLIROp.MemRefOp
@@ -50,15 +51,15 @@ let private pSameElementAtBase (name: string) (byteOffset: int) (fieldType: MLIR
         | TMemRef element | TMemRefStatic (_, element) | TMemRefScalar element -> Some element
         | _ -> None
     ensure (element = Some fieldType && byteOffset = 0)
-        (sprintf "%s: memref.reinterpret_cast reads a field of the source element type at offset 0; got field %A at offset %d of %A"
-            name fieldType byteOffset srcType)
+        (sprintf "%s: memref.reinterpret_cast reads a field of the source element type at offset 0; got field %s at offset %d of %s"
+            name (describeType fieldType) byteOffset (describeType srcType))
 
 /// Byte storage guarantees only byte alignment; typed views must preserve it.
 /// Typed field extraction from byte-level memref via memref.reinterpret_cast
 /// Uses 3 SSAs (pulled from coeffects): viewSSA, zeroSSA, resultSSA
 let pTypedExtract (resultSSA: SSA) (structMemref: SSA) (byteOffset: int) (viewSSA: SSA) (zeroSSA: SSA) (fieldType: MLIRType) (srcType: MLIRType) : PSGParser<MLIROp list> =
     parser {
-        do! emitTrace "pTypedExtract" (sprintf "result=%A, memref=%A, offset=%d, fieldTy=%A" resultSSA structMemref byteOffset fieldType)
+        do! emitTrace "pTypedExtract" (sprintf "result=%s, memref=%s, offset=%d, fieldTy=%s" (ssaToString resultSSA) (ssaToString structMemref) byteOffset (describeType fieldType))
         do! pSameElementAtBase "pTypedExtract" byteOffset fieldType srcType
         let destType = TMemRefStatic (1, fieldType)
         let castOp = MemRefOp.ReinterpretCast (viewSSA, structMemref, byteOffset, 1, srcType, destType) |> MLIROp.MemRefOp
@@ -71,7 +72,7 @@ let pTypedExtract (resultSSA: SSA) (structMemref: SSA) (byteOffset: int) (viewSS
 /// Uses 2 SSAs (pulled from coeffects): viewSSA, zeroSSA — store produces no SSA
 let pTypedInsert (structMemref: SSA) (value: SSA) (byteOffset: int) (viewSSA: SSA) (zeroSSA: SSA) (fieldType: MLIRType) (srcType: MLIRType) : PSGParser<MLIROp list> =
     parser {
-        do! emitTrace "pTypedInsert" (sprintf "memref=%A, value=%A, offset=%d, fieldTy=%A" structMemref value byteOffset fieldType)
+        do! emitTrace "pTypedInsert" (sprintf "memref=%s, value=%s, offset=%d, fieldTy=%s" (ssaToString structMemref) (ssaToString value) byteOffset (describeType fieldType))
         do! pSameElementAtBase "pTypedInsert" byteOffset fieldType srcType
         let destType = TMemRefStatic (1, fieldType)
         let castOp = MemRefOp.ReinterpretCast (viewSSA, structMemref, byteOffset, 1, srcType, destType) |> MLIROp.MemRefOp
@@ -84,7 +85,7 @@ let pTypedInsert (structMemref: SSA) (value: SSA) (byteOffset: int) (viewSSA: SS
 /// Uses 4 SSAs: offsetSSA (byte offset const), viewSSA, zeroSSA, resultSSA
 let pTypedExtractView (resultSSA: SSA) (structMemref: SSA) (byteOffset: int) (offsetSSA: SSA) (viewSSA: SSA) (zeroSSA: SSA) (fieldType: MLIRType) (srcType: MLIRType) : PSGParser<MLIROp list> =
     parser {
-        do! emitTrace "pTypedExtractView" (sprintf "result=%A, memref=%A, offset=%d, fieldTy=%A" resultSSA structMemref byteOffset fieldType)
+        do! emitTrace "pTypedExtractView" (sprintf "result=%s, memref=%s, offset=%d, fieldTy=%s" (ssaToString resultSSA) (ssaToString structMemref) byteOffset (describeType fieldType))
         let destType = TMemRefStatic (1, fieldType)
         let offsetOp = ArithOp.ConstI (offsetSSA, (NumericLiteralI.FromString (string byteOffset)), TIndex) |> MLIROp.ArithOp
         let viewOp = MemRefOp.View (viewSSA, structMemref, offsetSSA, srcType, destType) |> MLIROp.MemRefOp
@@ -97,7 +98,7 @@ let pTypedExtractView (resultSSA: SSA) (structMemref: SSA) (byteOffset: int) (of
 /// Uses 3 SSAs: offsetSSA (byte offset const), viewSSA, zeroSSA — store produces no SSA
 let pTypedInsertView (structMemref: SSA) (value: SSA) (byteOffset: int) (offsetSSA: SSA) (viewSSA: SSA) (zeroSSA: SSA) (fieldType: MLIRType) (srcType: MLIRType) : PSGParser<MLIROp list> =
     parser {
-        do! emitTrace "pTypedInsertView" (sprintf "memref=%A, value=%A, offset=%d, fieldTy=%A" structMemref value byteOffset fieldType)
+        do! emitTrace "pTypedInsertView" (sprintf "memref=%s, value=%s, offset=%d, fieldTy=%s" (ssaToString structMemref) (ssaToString value) byteOffset (describeType fieldType))
         let destType = TMemRefStatic (1, fieldType)
         let offsetOp = ArithOp.ConstI (offsetSSA, (NumericLiteralI.FromString (string byteOffset)), TIndex) |> MLIROp.ArithOp
         let viewOp = MemRefOp.View (viewSSA, structMemref, offsetSSA, srcType, destType) |> MLIROp.MemRefOp
@@ -111,7 +112,7 @@ let pTypedInsertView (structMemref: SSA) (value: SSA) (byteOffset: int) (offsetS
 /// Semantically equivalent: uninitialized memory = undef value
 let pUndef (ssa: SSA) (ty: MLIRType) : PSGParser<MLIROp> =
     parser {
-        do! emitTrace "pUndef" (sprintf "ssa=%A, ty=%A" ssa ty)
+        do! emitTrace "pUndef" (sprintf "ssa=%s, ty=%s" (ssaToString ssa) (describeType ty))
         // Allocate uninitialized memref (semantically equivalent to undef)
         return MLIROp.MemRefOp (MemRefOp.Alloca (ssa, ty, None))
     }
@@ -119,7 +120,7 @@ let pUndef (ssa: SSA) (ty: MLIRType) : PSGParser<MLIROp> =
 /// ConstI - caller provides type
 let pConstI (ssa: SSA) (value: bigint) (ty: MLIRType) : PSGParser<MLIROp> =
     parser {
-        do! emitTrace "pConstI" (sprintf "ssa=%A, value=%s, ty=%A" ssa (string value) ty)
+        do! emitTrace "pConstI" (sprintf "ssa=%s, value=%s, ty=%s" (ssaToString ssa) (string value) (describeType ty))
         return MLIROp.ArithOp (ArithOp.ConstI (ssa, value, ty))
     }
 

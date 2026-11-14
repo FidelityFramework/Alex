@@ -116,7 +116,7 @@ let nodeRange (graph: Revision) (nodeId: NodeId) : ValueRange option =
 let requireValueType (graph: Revision) (nodeId: NodeId) (ty: MLIRType) : MLIRType =
     let expected = valueTypeAt graph nodeId
     if ty <> expected then
-        failwithf "Value occurrence %d has carrier %A instead of its source-published carrier %A" (NodeId.value nodeId) ty expected
+        failwithf "Value occurrence %d has carrier %s instead of its source-published carrier %s" (NodeId.value nodeId) (Alex.Dialects.Core.Serialize.describeType ty) (Alex.Dialects.Core.Serialize.describeType expected)
     ty
 
 /// The value a derived meet produces: the extension by the operand's sign or the truncation of a
@@ -162,8 +162,8 @@ let adaptOperand (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (gr
         | TInt (IntWidth from) when from = meet.From -> ([ meetOp meet result value ], result, TInt (IntWidth meet.To))
         | TFloat _ when ty = floatType meet.From -> ([meetOp meet result value], result, floatType meet.To)
         | _ ->
-            failwithf "adaptOperand: the meet derived for node %d's operand %d adapts i%d, but the operand arrives as %A; the derivation and the emission disagree"
-                (NodeId.value consumer) (NodeId.value operand) meet.From ty
+            failwithf "adaptOperand: the meet derived for node %d's operand %d adapts i%d, but the operand arrives as %s; the derivation and the emission disagree"
+                (NodeId.value consumer) (NodeId.value operand) meet.From (Alex.Dialects.Core.Serialize.describeType ty)
     | None -> ([], value, ty)
 
 /// The monadic form of `adaptOperand`.
@@ -252,7 +252,7 @@ let pKind (expected: SemanticKind) : PSGParser<SemanticNode> =
         if node.Kind = expected then
             return node
         else
-            return! fail (Message (sprintf "Expected %A but got %A" expected node.Kind))
+            return! fail (Message (sprintf "Expected %s but got %s" (Alex.Dialects.Core.Serialize.describeSemanticKind expected) (Alex.Dialects.Core.Serialize.describeSemanticKind node.Kind)))
     }
 
 /// Match any node (always succeeds with current node)
@@ -430,7 +430,7 @@ let pLambdaWithBinding : PSGParser<string * (string * TypeIdentity * NodeId) lis
         match up state.Zipper |> Option.map (fun parent -> parent.Focus.Kind) with
         | Some (SemanticKind.Binding (name, _, _, _)) -> return (name, params', bodyId, captures)
         | Some other ->
-            return! fail (Message (sprintf "PSG settlement did not settle a binding name for the lambda at node %d: its parent is %A, not a Binding" (NodeId.value state.Current.Id) other))
+            return! fail (Message (sprintf "PSG settlement did not settle a binding name for the lambda at node %d: its parent is %s, not a Binding" (NodeId.value state.Current.Id) (Alex.Dialects.Core.Serialize.describeSemanticKind other)))
         | None ->
             return! fail (Message (sprintf "PSG settlement did not settle a binding name for the lambda at node %d: it has no parent in the zipper" (NodeId.value state.Current.Id)))
     }
@@ -553,7 +553,7 @@ let focusChild (childId: NodeId) : PSGParser<SemanticNode> =
             do! setCurrentNode childNode
             return childNode
         | None ->
-            return! fail (Message (sprintf "Child node %A not found" childId))
+            return! fail (Message (sprintf "Child node %d not found" (NodeId.value childId)))
     }
 
 /// Run parser on a specific child node, then restore focus
@@ -572,7 +572,7 @@ let onChild (childId: NodeId) (p: PSGParser<'T>) : PSGParser<'T> =
             do! setCurrentNode savedCurrent
             return result
         | None ->
-            return! fail (Message (sprintf "Child node %A not found" childId))
+            return! fail (Message (sprintf "Child node %d not found" (NodeId.value childId)))
     }
 
 /// Run parser on each child and collect results
@@ -607,7 +607,7 @@ let pIntrinsicModule (expectedModule: IntrinsicModule) : PSGParser<IntrinsicInfo
         if info.Module = expectedModule then
             return info
         else
-            return! fail (Message (sprintf "Expected module %A but got %A" expectedModule info.Module))
+            return! fail (Message (sprintf "Expected module %s but got %s" (Alex.Dialects.Core.Serialize.describeIntrinsicModule expectedModule) (Alex.Dialects.Core.Serialize.describeIntrinsicModule info.Module)))
     }
 
 /// Match atomic operation by full name pattern (SemanticKind.Intrinsic)
@@ -791,7 +791,7 @@ let private extractMessages (errors: XParsec.ErrorType<char, PSGParserState>) : 
             let acc = collect acc parent
             children |> List.fold (fun a child -> collect a child.Errors) acc
         | XParsec.ErrorType.EndOfInput -> "end of input" :: acc
-        | other -> (sprintf "%A" other) :: acc
+        | _ -> "parse error" :: acc
     collect [] errors |> List.rev
 
 /// Try to match a pattern with diagnostic error capture
@@ -876,8 +876,8 @@ let pSettledAdaptTo (consumer: NodeId) (operand: NodeId) (expected: MLIRType) (v
         let adaptation = Alex.Traversal.TransferTypes.meetFor state.Graph consumer operand |> Option.map fst
         let! operations, adapted = pPublishedAdapt consumer operand adaptation value
         do! ensure (adapted.Type = expected)
-                (sprintf "Source numeric meet for consumer %d operand %d does not establish destination carrier %A (got %A)"
-                    (NodeId.value consumer) (NodeId.value operand) expected adapted.Type)
+                (sprintf "Source numeric meet for consumer %d operand %d does not establish destination carrier %s (got %s)"
+                    (NodeId.value consumer) (NodeId.value operand) (Alex.Dialects.Core.Serialize.describeType expected) (Alex.Dialects.Core.Serialize.describeType adapted.Type))
         return operations, adapted
     }
 

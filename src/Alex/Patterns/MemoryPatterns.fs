@@ -126,8 +126,8 @@ let pUnionPayloadOffset (unionTy: TypeIdentity) : PSGParser<int> =
         match settledLayoutFor state.Graph unionTy with
         | Some (SettledLayout.Union (_, Some offset, _, _)) -> return offset
         | Some other ->
-            return! fail (Message (sprintf "PSG settlement did not publish a union payload offset at node %d: %A"
-                                       (NodeId.value state.Current.Id) other))
+            return! fail (Message (sprintf "PSG settlement did not publish a union payload offset at node %d: %s"
+                                       (NodeId.value state.Current.Id) (Alex.Dialects.Core.Serialize.describeSettledLayout other)))
         | None ->
             return! fail (Message (sprintf "PSG settlement did not publish a union layout at node %d" (NodeId.value state.Current.Id)))
     }
@@ -235,10 +235,10 @@ let pProgramStorageDeclaration identity storageTy : PSGParser<ProgramStorageEntr
         do! ensure inventory.Unresolved.IsEmpty
                 ("Writable program inventory is unresolved: " + (inventory.Unresolved.Values |> String.concat "; "))
         let entry = inventory.Entries.TryFind identity
-        do! ensure entry.IsSome (sprintf "Writable declaration has no source inventory entry for %A" identity)
+        do! ensure entry.IsSome (sprintf "Writable declaration has no source inventory entry for %s" (Alex.Dialects.Core.Serialize.describeProgramStorageIdentity identity))
         let entry = entry.Value
         let expected = programStorageType state.Platform.TargetArch state.Graph entry
-        do! ensure (expected = Some storageTy) (sprintf "Writable declaration %A disagrees with its source-held physical shape" identity)
+        do! ensure (expected = Some storageTy) (sprintf "Writable declaration %s disagrees with its source-held physical shape" (Alex.Dialects.Core.Serialize.describeProgramStorageIdentity identity))
         return entry
     }
 
@@ -567,7 +567,7 @@ let indexCastForRange (range: ValueRange) (result: SSA) (operand: SSA) (operandT
 let private pMemorySlot slot : PSGParser<MLIRType> =
     match SettledScalar.tryType slot with
     | Some ty -> preturn ty
-    | None -> fail (Message (sprintf "Published memory slot has no admitted scalar form: %A" slot))
+    | None -> fail (Message (sprintf "Published memory slot has no admitted scalar form: %s" (Alex.Dialects.Core.Serialize.describeSettledSlot slot)))
 
 let private pMemoryBuffer source element : PSGParser<Val> = parser {
     let! state = getUserState
@@ -579,7 +579,7 @@ let private pMemoryBuffer source element : PSGParser<Val> = parser {
     match MLIRAccumulator.recallSSAType ssa state.Accumulator with
     | Some physical when matchesElement physical -> return { SSA = ssa; Type = physical }
     | Some _ -> return! fail (Message "Memory operand disagrees with its published buffer carrier at the physical SSA.")
-    | None -> return! fail (Message (sprintf "Memory operand: memref SSA %A has no registered type." ssa))
+    | None -> return! fail (Message (sprintf "Memory operand: memref SSA %s has no registered type." (Alex.Dialects.Core.Serialize.ssaToString ssa)))
 }
 
 let private pMemoryExtent site source element resultCarrier unsigned : PSGParser<MLIROp list * TransferResult> = parser {

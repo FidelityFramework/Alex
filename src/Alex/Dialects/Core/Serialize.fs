@@ -169,7 +169,7 @@ let private describeTypeParamKind = function
 let private describeConstructor (ctor: Fidelity.PSG.ConstructorIdentity) : string =
     String.concat "." (ctor.Declaration.Module @ [ctor.Declaration.Name])
 
-let rec private describeTypeIdentity (ty: Fidelity.PSG.TypeIdentity) : string =
+let rec describeTypeIdentity (ty: Fidelity.PSG.TypeIdentity) : string =
     match ty with
     | Fidelity.PSG.TypeIdentity.Application(ctor, []) -> describeConstructor ctor
     | Fidelity.PSG.TypeIdentity.Application(ctor, args) ->
@@ -211,7 +211,7 @@ let rec private describeTypeIdentity (ty: Fidelity.PSG.TypeIdentity) : string =
     | Fidelity.PSG.TypeIdentity.Set inner -> sprintf "Set<%s>" (describeTypeIdentity inner)
     | Fidelity.PSG.TypeIdentity.Error msg -> sprintf "error<%s>" msg
 
-let private describeSettledSlot = function
+let describeSettledSlot = function
     | Fidelity.PSG.SettledSlot.InlineBytes(bytes, align) -> sprintf "bytes(%d, align=%d)" bytes align
     | Fidelity.PSG.SettledSlot.Integer(bits, _) -> if bits > 0 then sprintf "i%d" bits else sprintf "i<unresolved:%d>" bits
     | Fidelity.PSG.SettledSlot.Bool -> "bool"
@@ -221,6 +221,142 @@ let private describeSettledSlot = function
     | Fidelity.PSG.SettledSlot.Unit -> "unit"
     | Fidelity.PSG.SettledSlot.Opaque what -> sprintf "opaque(%s)" what
     | Fidelity.PSG.SettledSlot.CHandle(ht, bits, align) -> sprintf "chandle<%s, %d-bit, align=%d>" (describeTypeIdentity ht) bits align
+
+let describeSettledLayout = function
+    | Fidelity.PSG.SettledLayout.Record(fields, size, align) ->
+        let fs = fields |> List.map (fun f -> sprintf "%s: %s" f.Name (describeSettledSlot f.Slot)) |> String.concat "; "
+        sprintf "Record([%s], size=%s, align=%s)" fs (size |> Option.map string |> Option.defaultValue "none") (align |> Option.map string |> Option.defaultValue "none")
+    | Fidelity.PSG.SettledLayout.Union(cases, payloadOffset, size, align) ->
+        let cs =
+            cases
+            |> List.map (fun (name, slotOpt) ->
+                match slotOpt with
+                | Some slot -> sprintf "%s(%s)" name (describeSettledSlot slot)
+                | None -> name)
+            |> String.concat " | "
+        sprintf "Union([%s], offset=%s, size=%s, align=%s)"
+            cs
+            (payloadOffset |> Option.map string |> Option.defaultValue "none")
+            (size |> Option.map string |> Option.defaultValue "none")
+            (align |> Option.map string |> Option.defaultValue "none")
+
+let describeProgramStorageIdentity = function
+    | Fidelity.PSG.ProgramStorageIdentity.Allocation id -> sprintf "Allocation (NodeId %d)" (nodeIdValue id)
+    | Fidelity.PSG.ProgramStorageIdentity.BindingSlot id -> sprintf "BindingSlot (NodeId %d)" (nodeIdValue id)
+
+let describeIntrinsicModule = function
+    | Fidelity.PSG.IntrinsicModule.Sys -> "Sys"
+    | Fidelity.PSG.IntrinsicModule.NativeDefault -> "NativeDefault"
+    | Fidelity.PSG.IntrinsicModule.String -> "String"
+    | Fidelity.PSG.IntrinsicModule.Array -> "Array"
+    | Fidelity.PSG.IntrinsicModule.Math -> "Math"
+    | Fidelity.PSG.IntrinsicModule.Unchecked -> "Unchecked"
+    | Fidelity.PSG.IntrinsicModule.Operators -> "Operators"
+    | Fidelity.PSG.IntrinsicModule.Parse -> "Parse"
+    | Fidelity.PSG.IntrinsicModule.Format -> "Format"
+    | Fidelity.PSG.IntrinsicModule.Convert -> "Convert"
+    | Fidelity.PSG.IntrinsicModule.Crypto -> "Crypto"
+    | Fidelity.PSG.IntrinsicModule.Bits -> "Bits"
+    | Fidelity.PSG.IntrinsicModule.DateTime -> "DateTime"
+    | Fidelity.PSG.IntrinsicModule.TimeSpan -> "TimeSpan"
+    | Fidelity.PSG.IntrinsicModule.FnPtr -> "FnPtr"
+    | Fidelity.PSG.IntrinsicModule.Mmio -> "Mmio"
+    | Fidelity.PSG.IntrinsicModule.BorrowedView -> "BorrowedView"
+    | Fidelity.PSG.IntrinsicModule.Lazy -> "Lazy"
+    | Fidelity.PSG.IntrinsicModule.Seq -> "Seq"
+    | Fidelity.PSG.IntrinsicModule.SeqEnumerator -> "SeqEnumerator"
+    | Fidelity.PSG.IntrinsicModule.Arena -> "Arena"
+    | Fidelity.PSG.IntrinsicModule.Platform -> "Platform"
+    | Fidelity.PSG.IntrinsicModule.Map -> "Map"
+    | Fidelity.PSG.IntrinsicModule.Set -> "Set"
+    | Fidelity.PSG.IntrinsicModule.List -> "List"
+    | Fidelity.PSG.IntrinsicModule.Option -> "Option"
+    | Fidelity.PSG.IntrinsicModule.Result -> "Result"
+
+let describeSemanticKind (kind: Fidelity.PSG.SemanticKind) : string =
+    match kind with
+    | Fidelity.PSG.SemanticKind.Binding(name, isMut, isRec, _) -> sprintf "Binding(%s, mut=%b, rec=%b)" name isMut isRec
+    | Fidelity.PSG.SemanticKind.Application(fn, args) -> sprintf "Application(%d, [%s])" (nodeIdValue fn) (args |> List.map (nodeIdValue >> string) |> String.concat "; ")
+    | Fidelity.PSG.SemanticKind.Lambda(_, body, _, enclosing, _) -> sprintf "Lambda(body=%d, enclosing=%s)" (nodeIdValue body) (Option.defaultValue "none" enclosing)
+    | Fidelity.PSG.SemanticKind.Literal _ -> "Literal"
+    | Fidelity.PSG.SemanticKind.VarRef(name, defOpt) -> sprintf "VarRef(%s, %s)" name (defOpt |> Option.map (nodeIdValue >> string) |> Option.defaultValue "none")
+    | Fidelity.PSG.SemanticKind.Match(scrutinee, _) -> sprintf "Match(%d)" (nodeIdValue scrutinee)
+    | Fidelity.PSG.SemanticKind.CaseElimination(scrutinee, _) -> sprintf "CaseElimination(%d)" (nodeIdValue scrutinee)
+    | Fidelity.PSG.SemanticKind.Sequential nodes -> sprintf "Sequential([%s])" (nodes |> List.map (nodeIdValue >> string) |> String.concat "; ")
+    | Fidelity.PSG.SemanticKind.WhileLoop(guard, body) -> sprintf "WhileLoop(%d, %d)" (nodeIdValue guard) (nodeIdValue body)
+    | Fidelity.PSG.SemanticKind.ContinuationDispatch(sel, _, otherwise) -> sprintf "ContinuationDispatch(%d, otherwise=%d)" (nodeIdValue sel) (nodeIdValue otherwise)
+    | Fidelity.PSG.SemanticKind.FrameRead(frame, slot) -> sprintf "FrameRead(%d, %d)" (nodeIdValue frame) (nodeIdValue slot)
+    | Fidelity.PSG.SemanticKind.FrameBorrow(frame, slot) -> sprintf "FrameBorrow(%d, %d)" (nodeIdValue frame) (nodeIdValue slot)
+    | Fidelity.PSG.SemanticKind.FrameWrite(frame, slot, v) -> sprintf "FrameWrite(%d, %d, %d)" (nodeIdValue frame) (nodeIdValue slot) (nodeIdValue v)
+    | Fidelity.PSG.SemanticKind.ContinuationStorage owner -> sprintf "ContinuationStorage(%d)" (nodeIdValue owner)
+    | Fidelity.PSG.SemanticKind.ContinuationAllocate owner -> sprintf "ContinuationAllocate(%d)" (nodeIdValue owner)
+    | Fidelity.PSG.SemanticKind.AggregateStorage source -> sprintf "AggregateStorage(%d)" (nodeIdValue source)
+    | Fidelity.PSG.SemanticKind.DUInitialize(dest, caseName, caseIdx, _) -> sprintf "DUInitialize(%d, %s, %d)" (nodeIdValue dest) caseName caseIdx
+    | Fidelity.PSG.SemanticKind.ClosureValue(impl, env) -> sprintf "ClosureValue(%d, %d)" (nodeIdValue impl) (nodeIdValue env)
+    | Fidelity.PSG.SemanticKind.EnvironmentCreate(owner, _) -> sprintf "EnvironmentCreate(%d)" (nodeIdValue owner)
+    | Fidelity.PSG.SemanticKind.EnvironmentAllocate owner -> sprintf "EnvironmentAllocate(%d)" (nodeIdValue owner)
+    | Fidelity.PSG.SemanticKind.EnvironmentReference callable -> sprintf "EnvironmentReference(%d)" (nodeIdValue callable)
+    | Fidelity.PSG.SemanticKind.EnvironmentRead(env, slot) -> sprintf "EnvironmentRead(%d, %d)" (nodeIdValue env) (nodeIdValue slot)
+    | Fidelity.PSG.SemanticKind.EnvironmentBorrow(env, slot) -> sprintf "EnvironmentBorrow(%d, %d)" (nodeIdValue env) (nodeIdValue slot)
+    | Fidelity.PSG.SemanticKind.EnvironmentWrite(env, slot, v) -> sprintf "EnvironmentWrite(%d, %d, %d)" (nodeIdValue env) (nodeIdValue slot) (nodeIdValue v)
+    | Fidelity.PSG.SemanticKind.ForLoop(var, start, finish, isUp, body) -> sprintf "ForLoop(%s, %d, %d, up=%b, %d)" var (nodeIdValue start) (nodeIdValue finish) isUp (nodeIdValue body)
+    | Fidelity.PSG.SemanticKind.ForEach(var, _, coll, body) -> sprintf "ForEach(%s, %d, %d)" var (nodeIdValue coll) (nodeIdValue body)
+    | Fidelity.PSG.SemanticKind.IfThenElse(guard, thenB, elseOpt) -> sprintf "IfThenElse(%d, %d, %s)" (nodeIdValue guard) (nodeIdValue thenB) (elseOpt |> Option.map (nodeIdValue >> string) |> Option.defaultValue "none")
+    | Fidelity.PSG.SemanticKind.Require(cond, diag) -> sprintf "Require(%d, %s)" (nodeIdValue cond) diag
+    | Fidelity.PSG.SemanticKind.TryWith(body, handler) -> sprintf "TryWith(%d, %d)" (nodeIdValue body) (nodeIdValue handler)
+    | Fidelity.PSG.SemanticKind.TryFinally(body, cleanup) -> sprintf "TryFinally(%d, %d)" (nodeIdValue body) (nodeIdValue cleanup)
+    | Fidelity.PSG.SemanticKind.RecordExpr _ -> "RecordExpr"
+    | Fidelity.PSG.SemanticKind.UnionCase(name, idx, _) -> sprintf "UnionCase(%s, %d)" name idx
+    | Fidelity.PSG.SemanticKind.DUGetTag(duVal, duTy) -> sprintf "DUGetTag(%d, %s)" (nodeIdValue duVal) (describeTypeIdentity duTy)
+    | Fidelity.PSG.SemanticKind.DUEliminate(duVal, idx, name, _) -> sprintf "DUEliminate(%d, %d, %s)" (nodeIdValue duVal) idx name
+    | Fidelity.PSG.SemanticKind.DUConstruct(name, idx, _, _) -> sprintf "DUConstruct(%s, %d)" name idx
+    | Fidelity.PSG.SemanticKind.TupleExpr _ -> "TupleExpr"
+    | Fidelity.PSG.SemanticKind.ArrayExpr _ -> "ArrayExpr"
+    | Fidelity.PSG.SemanticKind.ArrayAllocate count -> sprintf "ArrayAllocate(%d)" (nodeIdValue count)
+    | Fidelity.PSG.SemanticKind.ListExpr _ -> "ListExpr"
+    | Fidelity.PSG.SemanticKind.FieldGet(expr, field) -> sprintf "FieldGet(%d, %s)" (nodeIdValue expr) field
+    | Fidelity.PSG.SemanticKind.StringByteBorrow source -> sprintf "StringByteBorrow(%d)" (nodeIdValue source)
+    | Fidelity.PSG.SemanticKind.FieldSet(expr, field, v) -> sprintf "FieldSet(%d, %s, %d)" (nodeIdValue expr) field (nodeIdValue v)
+    | Fidelity.PSG.SemanticKind.IndexGet(expr, idx) -> sprintf "IndexGet(%d, %d)" (nodeIdValue expr) (nodeIdValue idx)
+    | Fidelity.PSG.SemanticKind.IndexSet(expr, idx, v) -> sprintf "IndexSet(%d, %d, %d)" (nodeIdValue expr) (nodeIdValue idx) (nodeIdValue v)
+    | Fidelity.PSG.SemanticKind.NamedIndexedPropertySet(expr, prop, idx, v) -> sprintf "NamedIndexedPropertySet(%d, %s, %d, %d)" (nodeIdValue expr) prop (nodeIdValue idx) (nodeIdValue v)
+    | Fidelity.PSG.SemanticKind.TypeAnnotation(expr, ty) -> sprintf "TypeAnnotation(%d, %s)" (nodeIdValue expr) (describeTypeIdentity ty)
+    | Fidelity.PSG.SemanticKind.Upcast(expr, ty) -> sprintf "Upcast(%d, %s)" (nodeIdValue expr) (describeTypeIdentity ty)
+    | Fidelity.PSG.SemanticKind.Downcast(expr, ty) -> sprintf "Downcast(%d, %s)" (nodeIdValue expr) (describeTypeIdentity ty)
+    | Fidelity.PSG.SemanticKind.TypeTest(expr, ty) -> sprintf "TypeTest(%d, %s)" (nodeIdValue expr) (describeTypeIdentity ty)
+    | Fidelity.PSG.SemanticKind.AddressOf(expr, isByref) -> sprintf "AddressOf(%d, byref=%b)" (nodeIdValue expr) isByref
+    | Fidelity.PSG.SemanticKind.CellAddress binding -> sprintf "CellAddress(%d)" (nodeIdValue binding)
+    | Fidelity.PSG.SemanticKind.ElementAddress(buf, idx) -> sprintf "ElementAddress(%d, %d)" (nodeIdValue buf) (nodeIdValue idx)
+    | Fidelity.PSG.SemanticKind.FieldAddress(recv, field) -> sprintf "FieldAddress(%d, %s)" (nodeIdValue recv) field
+    | Fidelity.PSG.SemanticKind.Reborrow refNode -> sprintf "Reborrow(%d)" (nodeIdValue refNode)
+    | Fidelity.PSG.SemanticKind.Deref expr -> sprintf "Deref(%d)" (nodeIdValue expr)
+    | Fidelity.PSG.SemanticKind.Set(target, v) -> sprintf "Set(%d, %d)" (nodeIdValue target) (nodeIdValue v)
+    | Fidelity.PSG.SemanticKind.PlatformBinding name -> sprintf "PlatformBinding(%s)" name
+    | Fidelity.PSG.SemanticKind.Intrinsic info -> sprintf "Intrinsic(%s)" info.FullName
+    | Fidelity.PSG.SemanticKind.TraitCall(memberName, _, arg) -> sprintf "TraitCall(%s, %d)" memberName (nodeIdValue arg)
+    | Fidelity.PSG.SemanticKind.Quote(expr, isTyped) -> sprintf "Quote(%d, typed=%b)" (nodeIdValue expr) isTyped
+    | Fidelity.PSG.SemanticKind.ObjectExpr(ty, _) -> sprintf "ObjectExpr(%s)" (describeTypeIdentity ty)
+    | Fidelity.PSG.SemanticKind.ModuleDef(name, _) -> sprintf "ModuleDef(%s)" name
+    | Fidelity.PSG.SemanticKind.TypeDef(name, _, _) -> sprintf "TypeDef(%s)" name
+    | Fidelity.PSG.SemanticKind.MemberDef(name, _, _) -> sprintf "MemberDef(%s)" name
+    | Fidelity.PSG.SemanticKind.InterpolatedString _ -> "InterpolatedString"
+    | Fidelity.PSG.SemanticKind.PatternBinding name -> sprintf "PatternBinding(%s)" name
+    | Fidelity.PSG.SemanticKind.LazyExpr(body, _) -> sprintf "LazyExpr(%d)" (nodeIdValue body)
+    | Fidelity.PSG.SemanticKind.LazyForce lazyVal -> sprintf "LazyForce(%d)" (nodeIdValue lazyVal)
+    | Fidelity.PSG.SemanticKind.EagerExpr operand -> sprintf "EagerExpr(%d)" (nodeIdValue operand)
+    | Fidelity.PSG.SemanticKind.LazyValue(thunk, env) -> sprintf "LazyValue(%d, %d)" (nodeIdValue thunk) (nodeIdValue env)
+    | Fidelity.PSG.SemanticKind.LazyEnvironment(owner, _) -> sprintf "LazyEnvironment(%d)" (nodeIdValue owner)
+    | Fidelity.PSG.SemanticKind.LazyAllocate owner -> sprintf "LazyAllocate(%d)" (nodeIdValue owner)
+    | Fidelity.PSG.SemanticKind.LazyEnvironmentReference lazyVal -> sprintf "LazyEnvironmentReference(%d)" (nodeIdValue lazyVal)
+    | Fidelity.PSG.SemanticKind.LazyRead(env, slot) -> sprintf "LazyRead(%d, %d)" (nodeIdValue env) (nodeIdValue slot)
+    | Fidelity.PSG.SemanticKind.LazyBorrow(env, slot) -> sprintf "LazyBorrow(%d, %d)" (nodeIdValue env) (nodeIdValue slot)
+    | Fidelity.PSG.SemanticKind.LazyWrite(env, slot, v) -> sprintf "LazyWrite(%d, %d, %d)" (nodeIdValue env) (nodeIdValue slot) (nodeIdValue v)
+    | Fidelity.PSG.SemanticKind.SeqExpr(body, _) -> sprintf "SeqExpr(%d)" (nodeIdValue body)
+    | Fidelity.PSG.SemanticKind.Yield v -> sprintf "Yield(%d)" (nodeIdValue v)
+    | Fidelity.PSG.SemanticKind.YieldBang s -> sprintf "YieldBang(%d)" (nodeIdValue s)
+    | Fidelity.PSG.SemanticKind.TupleGet(tuple, idx) -> sprintf "TupleGet(%d, %d)" (nodeIdValue tuple) idx
+    | Fidelity.PSG.SemanticKind.Error msg -> sprintf "Error(%s)" msg
+    | Fidelity.PSG.SemanticKind.Obligation info -> sprintf "Obligation(%s)" info.Id
 
 let rec private describeValueRepresentation = function
     | Fidelity.PSG.ValueRepresentation.Scalar slot -> describeSettledSlot slot
@@ -246,7 +382,7 @@ let rec private describeValueRepresentation = function
         | None -> sprintf "union<%s> (unsettled)" cs
     | Fidelity.PSG.ValueRepresentation.Tag cases -> sprintf "tag<%d>" cases
 
-/// Total deterministic type description for diagnostics (never throws or uses %A)
+/// Total deterministic type description for diagnostics (never throws or uses reflection formatting)
 let rec describeType (ty: MLIRType) : string =
     match ty with
     | TInt (IntWidth bits) ->

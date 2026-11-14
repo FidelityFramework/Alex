@@ -120,6 +120,12 @@ printf 'let traverse (xs: int list) = xs |> List.map (fun x -> Some (x + 1))\nle
 printf 'let render x = sprintf "%%d" x\nlet consume xs = for x in xs do ignore x\n' > "$scratch/generic-pure.fsx"
 printf 'let consume (message: string) = message\nlet render (number: int) (reason: string) = consume $"Literal {number}: {reason}"\n' > "$scratch/interpolation-pure.fsx"
 printf 'let consume (value: obj) = ()\nlet render (number: int) = consume $"Literal {number}"\n' > "$scratch/interpolation-obj.fsx"
+printf 'let same (x: string) (y: string) = LanguagePrimitives.PhysicalEquality x y\n' > "$scratch/physical-equality.fsx"
+printf 'let same = LanguagePrimitives.PhysicalEquality\nlet value = same "a" "b"\n' > "$scratch/physical-equality-alias.fsx"
+printf 'let PhysicalEquality (x: int) (y: int) = x = y\nlet value = PhysicalEquality 1 1\n' > "$scratch/physical-equality-lookalike.fsx"
+printf 'let render (x: int) = sprintf "%%A" x\n' > "$scratch/reflection-format.fsx"
+printf 'let render (x: int) = sprintf "%%+A" x\n' > "$scratch/reflection-format-plus.fsx"
+printf 'let render (x: int) = $"value: %%A{x}"\n' > "$scratch/reflection-format-interpolated.fsx"
 for alias in Foreign ObjectAlias ObjectNominal Chain Builders Handler Pair Both Boxed Arr Text Names Lookup Function PurePair Optional Generic NestedObj NestedForeign Anonymous AnonymousObj Distance Ints UnitFunction Nat Resizable LazyValue Sequence LocalAlias ExceptionType BigInteger DecimalValue; do
   type_name=$alias
   case "$alias" in Boxed|Generic) type_name="$alias<int>" ;; esac
@@ -179,6 +185,8 @@ run_case() {
         AXC003) reason='Clef production code must not use task computation expressions.' ;;
         AXC004) reason='Clef production code must not widen a value to obj.' ;;
         AXC005) reason='Clef production code must not declare obj types.' ;;
+        AXC006) reason='Clef production code must not use reference identity (PhysicalEquality or ReferenceEquals).' ;;
+        AXC007) reason='Clef production code must not use %A reflection formatting.' ;;
         *) printf 'Unknown expected diagnostic %s\n' "$expected" >&2; return 1 ;;
       esac
       count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
@@ -277,6 +285,12 @@ run_case integer-literal-custom AXC002 '2,20 2,36'
 run_case generic-pure clean
 run_case interpolation-pure clean
 run_case interpolation-obj AXC004 '2,35' '1,20'
+run_case physical-equality AXC006 '1,35'
+run_case physical-equality-alias AXC006 '1,11'
+run_case physical-equality-lookalike clean
+run_case reflection-format AXC007 '1,30'
+run_case reflection-format-plus AXC007 '1,30'
+run_case reflection-format-interpolated AXC007 '1,22'
 run_case null AXC001 '1,20'
 run_case null-pattern AXC001 '1,37'
 run_case system-open AXC002 '1,5'
@@ -458,7 +472,7 @@ run_case Traversal/axel-fallback-helper-param AXA007-fn '4,37'
 run_case Traversal/axel-fallback-ok clean
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 192 ]] || { printf 'Expected 192 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 198 ]] || { printf 'Expected 198 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done

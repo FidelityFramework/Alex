@@ -119,20 +119,40 @@ let private analyzeShared (context: CliContext) = async {
       | :? FSharpMemberOrFunctionOrValue as value when value.CompiledName = "Box" && (value.DeclaringEntity |> Option.exists (fun entity -> entity.TryFullName = Some "Microsoft.FSharp.Core.Operators")) ->
         diagnostics.Add { Type = "Clef production boundary"; Message = "Clef production code must not widen a value to obj."; Code = "AXC004"; Severity = Severity.Error; Range = symbolUse.Range; Fixes = [] }
       | _ -> ()
+      let isReferenceIdentity =
+        match symbolUse.Symbol with
+        | :? FSharpMemberOrFunctionOrValue as value ->
+          let isPhysicalEquality =
+            (value.CompiledName = "PhysicalEquality" || value.LogicalName = "PhysicalEquality") &&
+            (value.DeclaringEntity |> Option.exists (fun entity ->
+              entity.TryFullName = Some "Microsoft.FSharp.Core.LanguagePrimitives"))
+          let isReferenceEquals =
+            (value.CompiledName = "ReferenceEquals" || value.LogicalName = "ReferenceEquals") &&
+            (value.DeclaringEntity |> Option.exists (fun entity ->
+              entity.TryFullName = Some "System.Object"))
+          isPhysicalEquality || isReferenceEquals
+        | _ -> false
+      if isReferenceIdentity then
+        diagnostics.Add {
+          Type = "Clef production boundary"
+          Message = "Clef production code must not use reference identity (PhysicalEquality or ReferenceEquals)."
+          Code = "AXC006"
+          Severity = Severity.Error
+          Range = symbolUse.Range
+          Fixes = []
+        }
       let entity =
         match symbolUse.Symbol with
         | :? FSharpEntity as entity -> Some entity
         | :? FSharpMemberOrFunctionOrValue as memberOrFunction -> memberOrFunction.DeclaringEntity
         | _ -> None
       entity |> Option.iter (fun value ->
-        // FCS adds BigInteger representation entities at bigint literal spans.
-        // Only these exact syntax spans qualify; explicit types, calls and opens still pass through.
         let literalRepresentation =
           (match symbolUse.Symbol with :? FSharpEntity -> true | _ -> false)
           && (value.TryFullName = Some "System" || value.TryFullName = Some "System.Numerics"
               || value.TryFullName = Some "System.Numerics.BigInteger")
           && integerLiteralRanges.Contains symbolUse.Range
-        if not literalRepresentation && not (symbolUse.IsFromDefinition && value.IsFSharpAbbreviation) then
+        if not isReferenceIdentity && not literalRepresentation && not (symbolUse.IsFromDefinition && value.IsFSharpAbbreviation) then
           checkEntity symbolUse.Range value)
     for declaration in context.CheckFileResults.OpenDeclarations do
       match declaration.Range with
@@ -150,6 +170,40 @@ let private analyzeShared (context: CliContext) = async {
         Range = range
         Fixes = []
       }
+    let rejectReflectionFormat range =
+      diagnostics.Add {
+        Type = "Clef production boundary"
+        Message = "Clef production code must not use %A reflection formatting."
+        Code = "AXC007"
+        Severity = Severity.Error
+        Range = range
+        Fixes = []
+      }
+    let hasReflectionFormat (text: string) =
+      let length = text.Length
+      let rec scan i =
+        if i >= length then false
+        elif text[i] <> '%' then scan (i + 1)
+        elif i + 1 < length && text[i + 1] = '%' then scan (i + 2)
+        else
+          let mutable j = i + 1
+          while j < length && (text[j] = '-' || text[j] = '+' || text[j] = '0' || text[j] = '#') do
+            j <- j + 1
+          if j < length && text[j] = '*' then
+            j <- j + 1
+          else
+            while j < length && text[j] >= '0' && text[j] <= '9' do
+              j <- j + 1
+          if j < length && text[j] = '.' then
+            j <- j + 1
+            if j < length && text[j] = '*' then
+              j <- j + 1
+            else
+              while j < length && text[j] >= '0' && text[j] <= '9' do
+                j <- j + 1
+          if j < length && text[j] = 'A' then true
+          else scan (i + 1)
+      scan 0
     let explicitUpcasts = ResizeArray<range * range>()
     let authoredValues = ResizeArray<range>()
     let rec listValues expression =
@@ -161,6 +215,16 @@ let private analyzeShared (context: CliContext) = async {
           override _.WalkExpr(_, expression) =
             match expression with
             | SynExpr.Null range -> rejectNull range
+            | SynExpr.Const(SynConst.String(text, _, range), _) when hasReflectionFormat text ->
+              rejectReflectionFormat range
+            | SynExpr.InterpolatedString(contents, _, range) ->
+              let hasInterpReflection =
+                contents
+                |> List.pairwise
+                |> List.exists (function
+                  | SynInterpolatedStringPart.String(text, _), SynInterpolatedStringPart.FillExpr _ -> hasReflectionFormat text
+                  | _ -> false)
+              if hasInterpReflection then rejectReflectionFormat range
             | SynExpr.Upcast(input, _, range) -> explicitUpcasts.Add(input.Range, range)
             | SynExpr.App(_, _, _, argument, _) -> authoredValues.Add(argument.Range)
             | SynExpr.ArrayOrList(_, values, _) -> values |> List.iter (fun value -> authoredValues.Add(value.Range))
@@ -1937,13 +2001,42 @@ let dependencyContext : Analyzer<CliContext> = fun context -> async {
          qualifiedName = assembly.QualifiedName
          file = assembly.FileName |> Option.toObj |})
     |> Seq.toArray
+  let jsonString (value: string) =
+    let escaped = System.Text.StringBuilder()
+    escaped.Append('"') |> ignore
+    for character in value do
+      match character with
+      | '"' -> escaped.Append("\\\"") |> ignore
+      | '\\' -> escaped.Append("\\\\") |> ignore
+      | '\b' -> escaped.Append("\\b") |> ignore
+      | '\f' -> escaped.Append("\\f") |> ignore
+      | '\n' -> escaped.Append("\\n") |> ignore
+      | '\r' -> escaped.Append("\\r") |> ignore
+      | '\t' -> escaped.Append("\\t") |> ignore
+      | c when int c < 0x20 -> escaped.Append(sprintf "\\u%04x" (int c)) |> ignore
+      | c -> escaped.Append(c) |> ignore
+    escaped.Append('"') |> ignore
+    escaped.ToString()
+  let jsonArray values = values |> Seq.map jsonString |> String.concat "," |> sprintf "[%s]"
+  let jsonObject fields =
+    fields
+    |> Seq.map (fun (key, value) -> jsonString key + ":" + value)
+    |> String.concat ","
+    |> sprintf "{%s}"
+  let assembliesJson =
+    assemblies
+    |> Seq.map (fun assembly ->
+      jsonObject [ "simpleName", jsonString assembly.simpleName
+                   "qualifiedName", jsonString assembly.qualifiedName
+                   "file", if isNull assembly.file then "null" else jsonString assembly.file ])
+    |> String.concat ","
+    |> sprintf "[%s]"
   let record =
-    {| project = options.ProjectFileName
-       sourceFiles = options.SourceFiles
-       referencedProjects = options.ReferencedProjectsPath
-       options = options.OtherOptions
-       assemblies = assemblies |}
-  let serialize value = System.Text.Json.JsonSerializer.Serialize(value)
+    jsonObject [ "project", jsonString options.ProjectFileName
+                 "sourceFiles", jsonArray options.SourceFiles
+                 "referencedProjects", jsonArray options.ReferencedProjectsPath
+                 "options", jsonArray options.OtherOptions
+                 "assemblies", assembliesJson ]
   let paths =
     seq {
       for option in options.OtherOptions do
@@ -1960,8 +2053,10 @@ let dependencyContext : Analyzer<CliContext> = fun context -> async {
         path, System.Security.Cryptography.SHA256.HashData(stream) |> System.Convert.ToHexString
       else
         path, "MISSING")
-    |> readOnlyDict
-  let payload = {| context = record; hashedBy = context.FileName; hashes = hashes |} |> serialize
+    |> Seq.sortBy fst
+    |> Seq.map (fun (path, hash) -> path, jsonString hash)
+    |> jsonObject
+  let payload = jsonObject [ "context", record; "hashedBy", jsonString context.FileName; "hashes", hashes ]
   let position = Position.mkPos 1 0
   return [{ Type = "Alex dependency context"; Message = payload; Code = "AXD000"; Severity = Severity.Info; Range = Range.mkRange context.FileName position position; Fixes = [] }]
 }

@@ -67,7 +67,7 @@ let private occurrence scope (region: WitnessRegion) =
     let node id =
         match graph.Nodes.TryFind id with
         | Some current -> Ok current
-        | None -> Result.Error (sprintf "Region '%s' names absent node %A" region.Identity id)
+        | None -> Result.Error (sprintf "Region '%s' names absent node %d" region.Identity (NodeId.value id))
     match region.Root, region.Anchor with
     | Some root, Some anchor ->
         node root |> Result.bind (fun focus ->
@@ -87,7 +87,7 @@ let private validateManifest (revision: Revision) (segmentation: WitnessSegmenta
               "SemanticRealizationDigest", SemanticRealizationDigest.DomainPrefix, SemanticRealizationDigest.value region.SemanticRealizationDigest
               "CanonicalProofSupportDigest", CanonicalProofSupportDigest.DomainPrefix, CanonicalProofSupportDigest.value region.CanonicalProofSupportDigest ]
             |> List.tryPick (fun (name, prefix, value) ->
-                if invalidDigest prefix value then Some (sprintf "Region '%s' at node %A has an empty or malformed %s" region.Identity region.Root name)
+                if invalidDigest prefix value then Some (sprintf "Region '%s' at node %s has an empty or malformed %s" region.Identity (region.Root |> Option.map (NodeId.value >> string) |> Option.defaultValue "absent") name)
                 else None))
     let identities = regions |> List.map _.Identity |> Set.ofList
     let nodeIds = revision.Nodes.Keys |> Set.ofSeq
@@ -162,7 +162,7 @@ let private freshScalar registry revision coeffects scope (region: WitnessRegion
             else
                 match operations, List.rev accumulator.EmittedDefinitions with
                 | [operation], [definition] when retainable operation &&
-                      (LanguagePrimitives.PhysicalEquality (definition.Operation) (operation)) &&
+                      (definition.Operation = operation) &&
                       definition.Occurrence.Focus.Id = at.Focus.Id &&
                       definition.Occurrence.Path = region.Path ->
                     Ok ({ Region = region; Operations = operations; Definitions = [definition]

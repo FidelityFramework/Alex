@@ -208,7 +208,7 @@ let ``scalar block refuses a changed width without a published meet`` () =
     let reported = Assert.Single accumulator.Errors
     Assert.Equal(Some AX4001, reported.Code)
     Assert.Equal(Some(NodeId 1), reported.NodeId)
-    Assert.Contains("Witness result at node 1 has carrier TInt (IntWidth 64); source Numeric publication requires TInt (IntWidth 32)", reported.Message)
+    Assert.Contains("Witness result at node 1 has carrier i64; source Numeric publication requires i32", reported.Message)
     Assert.Empty operations
     Assert.Equal(None, MLIRAccumulator.recallNode (NodeId 1) accumulator)
 

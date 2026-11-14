@@ -59,7 +59,7 @@ let ``missing memory carrier type is diagnosed before a load is composed`` () =
         // The Pattern examines the operand before it composes a load, so the
         // diagnosis is the Pattern's and names the same operand and the same defect.
         Assert.Contains("Memory operand:", message)
-        Assert.Contains($"memref SSA {Arg 0}", message)
+        Assert.Contains("memref SSA %arg0", message)
         Assert.Contains("has no registered type", message)
     | Result.Ok _ -> failwith "Pattern accepted an array with no registered memory type"
     Assert.Empty(operands.AllOps)

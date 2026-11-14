@@ -170,7 +170,7 @@ let getNode (nodeId: NodeId) (z: PSGZipper) : SemanticNode option =
 let requireNode (nodeId: NodeId) (z: PSGZipper) : SemanticNode =
     match getNode nodeId z with
     | Some node -> node
-    | None -> failwithf "Node %A not found in graph" nodeId
+    | None -> failwithf "Node %d not found in graph" (NodeId.value nodeId)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PATH INSPECTION
