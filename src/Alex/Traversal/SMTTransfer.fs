@@ -153,10 +153,116 @@ let private scope (ob: ObligationInfo) : MLIROp list =
         anchor values[projection.Conclusion]
             (declarations @ (bodies |> List.rev |> List.concat) @ [smt (SMTAssert values[projection.Premises])])
 
+    let boolConst (value: bool) : SSA * MLIROp list =
+        let zero, eqOut = v (), v ()
+        if value then
+            eqOut, [ smt (SMTBigIntConstant(zero, 0I)); smt (SMTEq(eqOut, zero, zero, SMTInt)) ]
+        else
+            let negated = v ()
+            negated, [ smt (SMTBigIntConstant(zero, 0I)); smt (SMTEq(eqOut, zero, zero, SMTInt)); smt (SMTNot(negated, eqOut)) ]
+
+    let intConst (value: bigint) : SSA * MLIROp list =
+        let ssa = v ()
+        ssa, [ smt (SMTBigIntConstant(ssa, value)) ]
+
+    let int64Const (value: int) : SSA * MLIROp list =
+        let ssa = v ()
+        ssa, [ smt (SMTIntConstant(ssa, int64 value)) ]
+
+    let cmpVal (pred: SMTCmpPred) (left: bigint) (right: bigint) : SSA * MLIROp list =
+        let l, lOps = intConst left
+        let r, rOps = intConst right
+        let out = v ()
+        out, lOps @ rOps @ [ smt (SMTIntCmp(out, pred, l, r)) ]
+
+    let cmpInt (pred: SMTCmpPred) (left: int) (right: int) : SSA * MLIROp list =
+        let l, lOps = int64Const left
+        let r, rOps = int64Const right
+        let out = v ()
+        out, lOps @ rOps @ [ smt (SMTIntCmp(out, pred, l, r)) ]
+
+    let eqInt32 (left: int) (right: int) : SSA * MLIROp list =
+        let l, lOps = int64Const left
+        let r, rOps = int64Const right
+        let out = v ()
+        out, lOps @ rOps @ [ smt (SMTEq(out, l, r, SMTInt)) ]
+
+    let anchorClauses (clauses: (SSA * MLIROp list) list) : MLIROp list =
+        let conjunction = v ()
+        let body = (clauses |> List.collect snd) @ [ smt (SMTAnd(conjunction, List.map fst clauses)) ]
+        anchor conjunction body
+
     let ops =
         match ob.Body with
         | ObligationBody.Pending _ ->
             invalidArg "ob" "A Pending obligation has no solver scope."
+        | ObligationBody.ZeroCopyBufferExtent model ->
+            anchorClauses
+                [ cmpVal SmtLe 0I model.MinimumCount
+                  cmpVal SmtLe model.MinimumCount model.MaximumCount
+                  cmpVal SmtLe model.MaximumCount model.ExtentCapacity
+                  cmpInt SmtGt model.ElementBytes 0 ]
+        | ObligationBody.BufferRetentionDomination model ->
+            let acq = model.AcquireOrder
+            let modeClauses =
+                match model.Mode with
+                | BufferRetentionMode.DuringCall ->
+                    [ eqInt32 model.RetirementOrders.Length 0 ]
+                | BufferRetentionMode.RetainedUntilOwner(ownerParam, releaseCount) ->
+                    [ cmpInt SmtGe ownerParam 0
+                      cmpInt SmtGt releaseCount 0
+                      eqInt32 releaseCount model.RetirementOrders.Length ]
+                    @ (model.RetirementOrders |> List.map (fun ord -> cmpInt SmtLt acq ord))
+            anchorClauses (cmpInt SmtGe acq 0 :: modeClauses)
+        | ObligationBody.UncountedPathTermination model ->
+            let modeClause =
+                match model.Mode with
+                | UncountedPathStagingMode.StaticImageZeroCopy poolEntry ->
+                    cmpInt SmtGe poolEntry 0
+                | UncountedPathStagingMode.CallScopedStaged(_, capacity) ->
+                    let cap, capOps = int64Const capacity
+                    let len, lenOps = intConst model.ByteLength
+                    let one, oneOps = int64Const 1
+                    let sum, eqOut = v (), v ()
+                    eqOut, capOps @ lenOps @ oneOps @ [ smt (SMTIntAdd(sum, len, one)); smt (SMTEq(eqOut, cap, sum, SMTInt)) ]
+            anchorClauses
+                [ cmpVal SmtGe model.ByteLength 0I
+                  boolConst model.RequiresNoInteriorNul
+                  boolConst model.RequiresTrailingNul
+                  modeClause ]
+        | ObligationBody.BorrowedResultViewScope model ->
+            let callOrd = model.CallOrder
+            let invClauses = model.InvalidationOrders |> List.map (fun inv -> cmpInt SmtGt inv callOrd)
+            let readClauses =
+                model.ReadOrders |> List.collect (fun rd ->
+                    cmpInt SmtGe rd callOrd
+                    :: (model.InvalidationOrders |> List.map (fun inv -> cmpInt SmtLt rd inv)))
+            anchorClauses
+                ([ cmpInt SmtGe callOrd 0
+                   boolConst model.NullToNoneBoundary
+                   cmpInt SmtGt model.InvalidationOrders.Length 0 ]
+                 @ invClauses @ readClauses)
+        | ObligationBody.BufferAbsenceArgumentConversion model ->
+            let c0, c0Ops = eqInt32 model.SourceCase 0
+            let c1, c1Ops = eqInt32 model.SourceCase 1
+            let srcDisj = v ()
+            let srcClause = srcDisj, c0Ops @ c1Ops @ [ smt (SMTOr(srcDisj, [ c0; c1 ])) ]
+            let choiceTag = function
+                | BufferAbsencePlanChoice.AbsentNull -> 0
+                | BufferAbsencePlanChoice.RequiresNonNullBuffer -> 1
+            let armClauses =
+                [ 0, 0; 1, 1 ]
+                |> List.collect (fun (expectedOrdinal, expectedChoice) ->
+                    match List.tryItem expectedOrdinal model.Arms with
+                    | Some arm ->
+                        [ eqInt32 arm.CaseOrdinal expectedOrdinal
+                          eqInt32 (choiceTag arm.Choice) expectedChoice ]
+                    | None -> [ eqInt32 0 1 ])
+            anchorClauses
+                ([ cmpInt SmtGe model.Parameter 0
+                   srcClause
+                   eqInt32 model.Arms.Length 2 ]
+                 @ armClauses)
         | ObligationBody.SnapshotBorrowBound(count, snapshot, copy, allocation, minimum, maximum, elementBytes, allocationCapacity) ->
             SnapshotBorrowProof.ofBounds count snapshot copy allocation minimum maximum elementBytes allocationCapacity |> resource
         | ObligationBody.ResourceConversion model -> ResourceProof.ofConversion model |> resource

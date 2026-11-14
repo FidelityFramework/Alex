@@ -634,9 +634,28 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
             let paramsStr = paramTypes |> List.map (typeToString pointer) |> String.concat ", "
             sprintf "func.func private @%s(%s) -> %s" (symbolName name) paramsStr (resultTypesToString pointer resultTypes)
         | BoundaryFuncDecl (declaration, parameters, results) ->
-            if declaration.Parameters |> List.exists (fun (_, scalar) ->
-                match scalar with Fidelity.PSG.BoundaryScalar.WritableBytes _ -> true | _ -> false) then
-                raise (TargetRealizationRequired "Writable byte declarations require the selected backend and their exact source accounts.")
+            let rec containsBufferType = function
+                | TMemRef _ | TMemRefStatic _ | TMemRefScalar _ -> true
+                | TFunc(argTypes, retTypes) -> List.exists containsBufferType argTypes || List.exists containsBufferType retTypes
+                | TVector(_, elemTy) -> containsBufferType elemTy
+                | TStruct(fields, _) -> List.exists (snd >> containsBufferType) fields
+                | _ -> false
+            let requiresTargetMarshalling =
+                (declaration.Parameters |> List.exists (fun (_, scalar) ->
+                    match scalar with
+                    | Fidelity.PSG.BoundaryScalar.WritableBytes _
+                    | Fidelity.PSG.BoundaryScalar.ReadOnlyBytes _
+                    | Fidelity.PSG.BoundaryScalar.BorrowedBytes _ -> true
+                    | _ -> false))
+                || (declaration.Result |> Option.exists (function
+                    | Fidelity.PSG.BoundaryScalar.BorrowedBytes _
+                    | Fidelity.PSG.BoundaryScalar.WritableBytes _
+                    | Fidelity.PSG.BoundaryScalar.ReadOnlyBytes _ -> true
+                    | _ -> false))
+                || List.exists containsBufferType parameters
+                || List.exists containsBufferType results
+            if requiresTargetMarshalling then
+                raise (TargetRealizationRequired "Boundary buffer and borrowed-view declarations require the selected backend and their exact source accounts.")
             let paramsStr = parameters |> List.map (typeToString pointer) |> String.concat ", "
             sprintf "func.func private @%s(%s) -> %s" (symbolName declaration.Symbol) paramsStr
                 (resultTypesToString pointer results)
@@ -816,6 +835,8 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
             (symbolName name) sourceId kind
     | MLIROp.WritableBufferCall _ ->
         raise (TargetRealizationRequired "Writable byte calls require the selected backend and their exact source accounts.")
+    | MLIROp.BoundaryBufferCall _ ->
+        raise (TargetRealizationRequired "Boundary buffer and borrowed-view realization requires the selected backend and its exact source accounts.")
     | MLIROp.EmptyBuffer _ | MLIROp.Utf8Validate _ | MLIROp.Utf8SnapshotRetire _ ->
         raise (TargetRealizationRequired "Checked text requires the selected backend and its exact snapshot, validator and retirement accounts.")
     | MLIROp.OptionalEntryCall _ ->

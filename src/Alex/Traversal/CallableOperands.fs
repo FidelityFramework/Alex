@@ -67,6 +67,8 @@ let closedNativeDefinition (graph: Revision) implementation =
             | Some invocation ->
                 match invocation.Extent with
                 | BoundaryCallbackExtent.DuringCall -> entry.Registrations.IsEmpty
+                | BoundaryCallbackExtent.Retained(owner, releases) ->
+                    entry.Registrations.IsEmpty && owner >= 0 && owner <> invocation.Parameter && not (Array.isEmpty releases)
                 | BoundaryCallbackExtent.ProcessExit _ ->
                     hasUnitParameterAdapter graph entry invocation.Signature &&
                     not entry.Registrations.IsEmpty &&
@@ -97,7 +99,11 @@ let closedNativeDefinition (graph: Revision) implementation =
                 signature.CallingConvention = "CDecl" &&
                 (not signature.Parameters.IsEmpty ||
                  (entries |> List.forall (fun entry -> hasUnitParameterAdapter graph entry signature))) &&
-                (signature.Parameters |> List.forall (function BoundaryScalar.Integer _ -> true | _ -> false)) &&
+                (signature.Parameters |> List.forall (function
+                    | BoundaryScalar.Integer _
+                    | BoundaryScalar.ResourceHandle _
+                    | BoundaryScalar.ReadOnlyBytes _ -> true
+                    | _ -> false)) &&
                 (entries |> List.forall (fun entry ->
                     (boundary.CallbackInvocations.TryFind entry.Invocation |> Option.exists (fun invocation ->
                         invocation.Contract.Signature.ReturnType = BAREWire.Descriptors.TypeRef.Void &&
@@ -224,6 +230,80 @@ let valueShape (ctx: WitnessContext) occurrence =
     | Some shape -> Result.Ok shape
     | None -> Result.Error "Value occurrence lacks its source-settled callable component role."
 
+let closedEntryParameterTypeAt (graph: Revision) (entry: BoundaryClosedEntry) (ordinal: int) (formal: NodeId) (scalar: BoundaryScalar) : Result<MLIRType, string> =
+    let boundary = graph.Emission.Boundary
+    match scalar with
+    | BoundaryScalar.ResourceHandle(decl, nullable) ->
+        let dataTypeResult =
+            match graph.Emission.Callable.ValueShapes.TryFind formal with
+            | Some(CallableValueShape.Data id) when graph.Emission.Callable.ClosedData.Contains id ->
+                match graph.Emission.Numeric.OccurrenceRepresentations.TryFind id with
+                | Some(Result.Ok _) -> Alex.CodeGeneration.TypeMapping.tryValueTypeAt graph id
+                | Some(Result.Error reason) ->
+                    Result.Error(sprintf "Callable signature data participant %d has an unresolved source-published physical representation: %s" (NodeId.value id) reason)
+                | None ->
+                    Result.Error(sprintf "Callable signature data participant %d lacks its source-published physical representation." (NodeId.value id))
+            | Some _ ->
+                Result.Error "Callable data participant lacks its source-settled closed or quantified signature authority."
+            | None ->
+                Result.Error "Value occurrence lacks its source-settled callable component role."
+        dataTypeResult
+        |> Result.bind (fun ty ->
+            match boundary.ResourceDeclarations.TryFind decl, ty, nullable with
+            | Some res, TOpaqueHandle(ht, bits, align), false
+                when res.Identity = decl && ht = res.HandleType && bits = res.PointerBits && align > 0 ->
+                Result.Ok ty
+            | Some res, TResourceOption rep, true
+                when res.Identity = decl && BoundaryAbi.matchesCHandleRepresentation true (Some res.HandleType) (Some res.PointerBits) rep ->
+                Result.Ok ty
+            | None, TOpaqueHandle(_, bits, align), false when bits > 0 && align > 0 ->
+                match boundary.CallbackInvocations.TryFind entry.Invocation
+                      |> Option.filter (fun inv -> inv.Formal = decl)
+                      |> Option.bind (fun inv -> boundary.Imports.TryFind inv.Import)
+                      |> Option.bind (fun imp -> BoundaryAbi.callbackHandleRepAt graph imp decl ordinal false)
+                      |> Option.bind (Alex.CodeGeneration.TypeMapping.tryRepresentationType >> Result.toOption) with
+                | Some expected when expected = ty -> Result.Ok ty
+                | _ -> Result.Error "Closed native borrowed handle parameter disagrees with its settled source contract."
+            | None, TResourceOption rep, true
+                when BoundaryAbi.matchesCHandleRepresentation true None None rep ->
+                match boundary.CallbackInvocations.TryFind entry.Invocation
+                      |> Option.filter (fun inv -> inv.Formal = decl)
+                      |> Option.bind (fun inv -> boundary.Imports.TryFind inv.Import)
+                      |> Option.bind (fun imp -> BoundaryAbi.callbackHandleRepAt graph imp decl ordinal true)
+                      |> Option.bind (Alex.CodeGeneration.TypeMapping.tryRepresentationType >> Result.toOption) with
+                | Some expected when expected = ty -> Result.Ok ty
+                | _ -> Result.Error "Closed native borrowed nullable handle parameter disagrees with its settled source contract."
+            | _ -> Result.Error "Closed native handle parameter lacks its exact source-settled handle representation.")
+    | BoundaryScalar.ReadOnlyBytes decl ->
+        match boundary.CountedEntryArrays.TryFind decl with
+        | Some counted when counted.Identity = decl && counted.Invocation = entry.Invocation && counted.Contract.Argument = ordinal ->
+            Result.Ok(TMemRef(TInt(IntWidth 8)))
+        | _ -> Result.Error "Closed native counted-entry array differs from its receiving invocation or parameter ordinal."
+    | _ -> BoundaryAbi.tryScalarTypeIn boundary Set.empty scalar
+
+let closedEntryFunctionType (graph: Revision) (entry: BoundaryClosedEntry) (signature: NativeEntrySignature) : Result<MLIRType, string> =
+    if signature.CallingConvention <> "CDecl" then
+        Result.Error "A closed native entry requires its source-published CDecl convention."
+    else
+        let boundary = graph.Emission.Boundary
+        let paramTypesResult =
+            if hasUnitParameterAdapter graph entry signature then Result.Ok []
+            elif signature.Parameters.Length <> entry.Formals.Length then
+                Result.Error "Closed native entry omitted an original native formal."
+            else
+                List.zip entry.Formals signature.Parameters
+                |> List.indexed
+                |> List.map (fun (ordinal, (formal, scalar)) ->
+                    closedEntryParameterTypeAt graph entry ordinal formal scalar)
+                |> collect
+        paramTypesResult
+        |> Result.bind (fun paramTypes ->
+            match signature.Result with
+            | None -> Result.Ok(TFunc(paramTypes, []))
+            | Some retScalar ->
+                BoundaryAbi.tryScalarTypeIn boundary Set.empty retScalar
+                |> Result.map (fun retTy -> TFunc(paramTypes, [retTy])))
+
 /// Shared physical parameters retain their symbolic measure variables. Only
 /// the current source-owned call instance can authorize that signature here.
 let parametersAtCall (ctx: WitnessContext) site implementation parameters =
@@ -237,7 +317,15 @@ let parametersAtCall (ctx: WitnessContext) site implementation parameters =
         closedNativeDefinition ctx.Graph implementation |> Result.bind (function
             | Some(entry, signature) when entry.Formals = (parameters |> List.map (fun (_, _, formal) -> formal)) ->
                 if hasUnitParameterAdapter ctx.Graph entry signature then Result.Ok [[]]
-                else Result.Ok(signature.Parameters |> List.map (BoundaryAbi.scalarType >> List.singleton))
+                elif signature.Parameters.Length <> entry.Formals.Length then
+                    Result.Error "Closed native direct call omitted or reordered an original formal."
+                else
+                    List.zip entry.Formals signature.Parameters
+                    |> List.indexed
+                    |> List.map (fun (ordinal, (formal, scalar)) ->
+                        closedEntryParameterTypeAt ctx.Graph entry ordinal formal scalar
+                        |> Result.map List.singleton)
+                    |> collect
             | Some _ -> Result.Error "Closed native direct call omitted or reordered an original formal."
             | None ->
                 let omitted = demand.Parameters.TryFind implementation |> Option.defaultValue Set.empty

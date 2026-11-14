@@ -100,8 +100,15 @@ let private parameterComponents (ctx: WitnessContext) parameters =
             elif signature.Parameters.Length <> parameters.Length then
                 Result.Error "Closed native implementation omitted or reordered an original formal."
             else
-                try Result.Ok(signature.Parameters |> List.map (fun scalar -> [BoundaryAbi.scalarType scalar], Scalar))
-                with ex -> Result.Error (Alex.Text.exceptionMessage ex))
+                let items =
+                    List.zip entry.Formals signature.Parameters
+                    |> List.indexed
+                    |> List.map (fun (ordinal, (formal, scalar)) ->
+                        CallableOperands.closedEntryParameterTypeAt ctx.Graph entry ordinal formal scalar
+                        |> Result.map (fun ty -> [ty], Scalar))
+                match items |> List.tryPick (function Result.Error reason -> Some reason | _ -> None) with
+                | Some reason -> Result.Error reason
+                | None -> Result.Ok(items |> List.choose (function Result.Ok item -> Some item | _ -> None)))
 
 // ═══════════════════════════════════════════════════════════
 // CATEGORY-SELECTIVE WITNESS (Private)

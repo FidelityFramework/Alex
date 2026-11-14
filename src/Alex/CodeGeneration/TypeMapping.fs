@@ -36,32 +36,48 @@ let scalarCarrierType (carrier: ScalarCarrier) : MLIRType =
     settledScalarType carrier.Slot
     |> Option.defaultWith (fun () -> failwithf "TypeMapping: source carrier at node %d has no admitted scalar physical form: %A" (NodeId.value carrier.Site) carrier.Slot)
 
-let rec representationType = function
+let rec tryRepresentationType = function
     | ValueRepresentation.Scalar slot ->
-        settledScalarType slot |> Option.defaultWith (fun () -> failwithf "TypeMapping: source scalar form has no physical spelling: %A" slot)
-    | ValueRepresentation.Buffer(None, element) -> TMemRef(representationType element)
-    | ValueRepresentation.Buffer(Some count, element) when count >= 0 -> TMemRefStatic(count, representationType element)
-    | ValueRepresentation.Buffer(Some count, _) -> failwithf "TypeMapping: source buffer has negative extent %d" count
+        settledScalarType slot
+        |> Option.map Ok
+        |> Option.defaultWith (fun () -> Error(sprintf "TypeMapping: source scalar form has no physical spelling: %A" slot))
+    | ValueRepresentation.Buffer(None, element) ->
+        tryRepresentationType element |> Result.map TMemRef
+    | ValueRepresentation.Buffer(Some count, element) when count >= 0 ->
+        tryRepresentationType element |> Result.map (fun ty -> TMemRefStatic(count, ty))
+    | ValueRepresentation.Buffer(Some count, _) ->
+        Error(sprintf "TypeMapping: source buffer has negative extent %d" count)
     | ValueRepresentation.Record(fields, placement) ->
         let bytes = placement |> Option.map (fun (offsets, size, alignment) -> { Offsets = offsets; Size = size; Align = alignment })
-        TStruct(fields |> List.map (fun (name, form) -> name, representationType form), bytes)
-    | ValueRepresentation.CallableComponent(_, data) -> representationType data
+        let rec collectFields acc = function
+            | [] -> Ok(TStruct(List.rev acc, bytes))
+            | (name, form) :: rest ->
+                match tryRepresentationType form with
+                | Ok ty -> collectFields ((name, ty) :: acc) rest
+                | Error reason -> Error reason
+        collectFields [] fields
+    | ValueRepresentation.CallableComponent(_, data) -> tryRepresentationType data
     | ValueRepresentation.Union(cases, Some(_, bytes, alignment)) as representation when
         cases.Length = 2 && bytes > 0 && alignment > 0
         && (cases |> List.filter (snd >> List.isEmpty) |> List.length) = 1
         && (cases |> List.filter (function
             | _, [ValueRepresentation.Scalar(SettledSlot.CHandle(_, bits, handleAlignment))] -> bits > 0 && handleAlignment > 0
             | _ -> false) |> List.length) = 1 ->
-        TResourceOption representation
+        Ok(TResourceOption representation)
     | ValueRepresentation.Union(cases, _) when
         cases |> List.exists (fun (_, payloads) ->
             payloads |> List.exists (function ValueRepresentation.Scalar(SettledSlot.CHandle _) -> true | _ -> false)) ->
-        failwith "TypeMapping: resource option requires its complete source-settled case and byte placement"
+        Error "TypeMapping: resource option requires its complete source-settled case and byte placement"
     | ValueRepresentation.Union(_, Some(_, bytes, alignment)) when bytes >= 0 && alignment > 0 ->
-        TMemRefStatic(bytes, TInt(IntWidth 8))
-    | ValueRepresentation.Union _ -> failwith "TypeMapping: source union has no complete physical data placement"
-    | ValueRepresentation.Tag cases when cases > 0 -> TTag cases
-    | ValueRepresentation.Tag _ -> failwith "TypeMapping: source tag has no cases"
+        Ok(TMemRefStatic(bytes, TInt(IntWidth 8)))
+    | ValueRepresentation.Union _ -> Error "TypeMapping: source union has no complete physical data placement"
+    | ValueRepresentation.Tag cases when cases > 0 -> Ok(TTag cases)
+    | ValueRepresentation.Tag _ -> Error "TypeMapping: source tag has no cases"
+
+let representationType rep =
+    match tryRepresentationType rep with
+    | Ok ty -> ty
+    | Error reason -> failwith reason
 
 let private read what = function
     | Some(Ok form) -> representationType form
@@ -88,46 +104,48 @@ let nativeEntrySlotType (graph: Revision) (storage: ProgramStorageEntry) =
         | _ -> Error "Native entry slot has no matching current source formation."
     | _ -> Error "Native entry slot requires its source-issued native entry storage shape."
 
-let private nativeSlotValueType (graph: Revision) nodeId =
+let private tryNativeSlotValueType (graph: Revision) nodeId : Result<MLIRType option, string> =
     let projection = graph.Emission.Storage
 
     match projection.ProgramStorage.Entries.TryFind(ProgramStorageIdentity.BindingSlot nodeId) with
-    | Some storage when
-        (match storage.Shape with
-         | ProgramStorageShape.NativeEntry _ -> true
-         | _ -> false)
-        ->
-        let entry, functionType =
-            nativeEntrySlotType graph storage
-            |> Result.defaultWith (fun reason -> failwithf "TypeMapping: %s" reason)
+    | Some ({ Shape = ProgramStorageShape.NativeEntry _ } as storage) ->
+        match nativeEntrySlotType graph storage with
+        | Error reason -> Error(sprintf "TypeMapping: %s" reason)
+        | Ok(entry, functionType) ->
+            if
+                not projection.ProgramStorage.Unresolved.IsEmpty
+                || not (projection.SlotAuthorities.Contains nodeId)
+            then
+                Error "TypeMapping: Native entry slot lacks its source-settled storage authority."
+            else
+                match graph.Nodes.TryFind nodeId with
+                | Some node when
+                    node.Type = storage.SourceType
+                    && entry.Transport.Contains nodeId
+                    && node.Children = [ entry.Formation ]
+                    && (match node.Kind with
+                        | SemanticKind.Binding(_, false, _, _) -> true
+                        | _ -> false)
+                    ->
+                    Ok(Some functionType)
+                | _ -> Error "TypeMapping: Native entry slot differs from its original immutable formation binding."
+    | _ -> Ok None
 
-        let binding = graph.Nodes.TryFind nodeId
-
-        if
-            not projection.ProgramStorage.Unresolved.IsEmpty
-            || not (projection.SlotAuthorities.Contains nodeId)
-        then
-            failwith "TypeMapping: Native entry slot lacks its source-settled storage authority."
-
-        match binding with
-        | Some node when
-            node.Type = storage.SourceType
-            && entry.Transport.Contains nodeId
-            && node.Children = [ entry.Formation ]
-            && (match node.Kind with
-                | SemanticKind.Binding(_, false, _, _) -> true
-                | _ -> false)
-            ->
-            Some functionType
-        | _ -> failwith "TypeMapping: Native entry slot differs from its original immutable formation binding."
-    | _ -> None
+let tryValueTypeAt (graph: Revision) (nodeId: NodeId) : Result<MLIRType, string> =
+    match tryNativeSlotValueType graph nodeId with
+    | Error reason -> Error reason
+    | Ok(Some functionType) -> Ok functionType
+    | Ok None ->
+        match (numericProjection graph).OccurrenceRepresentations.TryFind nodeId with
+        | Some(Ok form) -> tryRepresentationType form
+        | Some(Error reason) ->
+            Error(sprintf "TypeMapping: value occurrence %d has no source-published representation: %s" (NodeId.value nodeId) reason)
+        | None -> Error(sprintf "TypeMapping: source publication omitted value occurrence %d" (NodeId.value nodeId))
 
 let valueTypeAt (graph: Revision) (nodeId: NodeId) =
-    match nativeSlotValueType graph nodeId with
-    | Some functionType -> functionType
-    | None ->
-        (numericProjection graph).OccurrenceRepresentations.TryFind nodeId
-        |> read (sprintf "value occurrence %d" (NodeId.value nodeId))
+    match tryValueTypeAt graph nodeId with
+    | Ok ty -> ty
+    | Error reason -> failwith reason
 
 /// A pointer occurrence must publish its scalar form directly. Generic callable
 /// component unwrapping cannot establish this contract for the occurrence.

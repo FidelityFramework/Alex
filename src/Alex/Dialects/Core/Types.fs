@@ -392,6 +392,25 @@ type OptionalEntrySlot = {
     Choice: OptionalEntrySlotChoice
 }
 
+/// One source-selected optional byte-buffer arm. Absence converts None strictly
+/// to a boundary null carrier while keeping interior fat pointers non-null.
+type BufferAbsenceArm = {
+    CaseOrdinal: int
+    Claim: Fidelity.PSG.NodeId
+    Buffer: Val option
+}
+
+[<RequireQualifiedAccess>]
+type BufferAbsenceSlotChoice =
+    | Direct of BufferAbsenceArm
+    | Conditional of selection: Fidelity.PSG.NodeId * tag: Val * whenTrue: BufferAbsenceArm * whenFalse: BufferAbsenceArm
+
+/// One source-selected optional byte-buffer position converting None at the boundary.
+type BufferAbsenceSlot = {
+    BufferOrdinal: int
+    Plan: BufferAbsenceSlotChoice
+}
+
 /// Top-level portable operation. Target dialects belong to backend realization.
 /// Single-phase execution with nested accumulators - no scope markers needed
 type MLIROp =
@@ -418,6 +437,11 @@ type MLIROp =
     /// Source-selected Some conversion, deferred to the selected backend.
     /// Slots retain their original ordinal, case and per-use proof citizen.
     | OptionalEntryCall of site: Fidelity.PSG.NodeId * arguments: Val list * slots: OptionalEntrySlot list * results: Val list
+    /// Direct read-only buffer, boundary buffer-absence, or borrowed
+    /// result-view call retaining the exact source occurrence and native
+    /// operand order. Target address, null-boundary, and staging realization
+    /// are deferred to the selected backend.
+    | BoundaryBufferCall of site: Fidelity.PSG.NodeId * arguments: Val list * optionalEntries: OptionalEntrySlot list * bufferAbsences: BufferAbsenceSlot list * results: Val list
     /// Published MMIO intent retains its exact source account; target expansion
     /// and any temporary values belong to the selected backend.
     | MmioLoad of site: Fidelity.PSG.NodeId * result: SSA * address: SSA * bits: int
@@ -583,7 +607,9 @@ module BoundaryAbi =
                     match revision.Emission.Boundary.CallbackAbsences.TryFind model.Absence with
                     | Some absence when absence.Quote = model.Absence && absence.Import = call.Import
                                         && absence.Parameter = ordinal && absence.Formal = operand.Formal
-                                        && absence.Invocation = invocation ->
+                                        && absence.Invocation = invocation
+                                        && (revision.Emission.Boundary.Imports.TryFind call.Import
+                                            |> Option.bind (fun imp -> imp.Parameters |> List.tryFindIndex (fun (f, _) -> f = absence.Formal)) = Some ordinal) ->
                         match Fidelity.PSG.Integrity.check revision with
                         | [] ->
                             Fidelity.PSG.OptionalEntryArgumentProof.projectAbsence model
@@ -617,11 +643,112 @@ module BoundaryAbi =
                 "Optional native-entry absence conversion has stale published source facts: "
         | _ -> Error missing
 
-    /// Read the source-published conditional optional-entry account: assigned tag
-    /// projection, unique callable Select row, and both arm conversion citizens.
+    /// Validate settled CHandle and Option<CHandle> representations without
+    /// deriving admission from nominal declaration names or synthesizing alignment.
+    let matchesCHandleRepresentation (nullable: bool) (expectedHandleType: Fidelity.PSG.TypeIdentity option) (expectedBits: int option) (rep: Fidelity.PSG.ValueRepresentation) =
+        let matchesSlot = function
+            | Fidelity.PSG.ValueRepresentation.Scalar(Fidelity.PSG.SettledSlot.CHandle(ht, bits, alignment)) ->
+                bits > 0 && alignment > 0
+                && (expectedHandleType |> Option.forall ((=) ht))
+                && (expectedBits |> Option.forall ((=) bits))
+            | _ -> false
+        if not nullable then matchesSlot rep
+        else
+            match rep with
+            | Fidelity.PSG.ValueRepresentation.Union(cases, Some(_, bytes, optAlign)) when
+                cases.Length = 2 && bytes > 0 && optAlign > 0 ->
+                (cases |> List.filter (snd >> List.isEmpty) |> List.length) = 1
+                && (cases |> List.filter (fun (_, payloads) ->
+                    match payloads with
+                    | [p] -> matchesSlot p
+                    | _ -> false) |> List.length) = 1
+            | _ -> false
+
+    let private settledRepresentationForTypeAndNode (revision: Fidelity.PSG.Revision) (nodeOpt: Fidelity.PSG.NodeId option) (ty: Fidelity.PSG.TypeIdentity) =
+        let byNode = nodeOpt |> Option.bind revision.Emission.Numeric.OccurrenceRepresentations.TryFind
+        let byType = revision.Emission.Numeric.TypeRepresentations.TryFind ty
+        match byNode, byType with
+        | Some(Ok r1), Some(Ok r2) when r1 = r2 -> Some r1
+        | Some(Ok r1), None -> Some r1
+        | None, Some(Ok r2) -> Some r2
+        | _ -> None
+
+    let borrowedCHandleRepAt (revision: Fidelity.PSG.Revision) (imp: Fidelity.PSG.BoundaryImport) (formal: Fidelity.PSG.NodeId) (nullable: bool) =
+        if not (imp.DeclarationFacts.ContainsKey formal) then None
+        else
+            imp.SourceTypes.TryFind formal
+            |> Option.bind (settledRepresentationForTypeAndNode revision (Some formal))
+            |> Option.filter (matchesCHandleRepresentation nullable None None)
+
+    let callbackHandleRepAt (revision: Fidelity.PSG.Revision) (imp: Fidelity.PSG.BoundaryImport) (formal: Fidelity.PSG.NodeId) (ordinal: int) (nullable: bool) =
+        let isSettledOptionalWrapper (optTy: Fidelity.PSG.TypeIdentity) =
+            match settledRepresentationForTypeAndNode revision (Some formal) optTy with
+            | Some (Fidelity.PSG.ValueRepresentation.Union(cases, Some(_, bytes, optAlign)))
+                when cases.Length = 2 && bytes > 0 && optAlign > 0 ->
+                let emptyCount = cases |> List.filter (snd >> List.isEmpty) |> List.length
+                let singleCount = cases |> List.filter (fun (_, ps) -> ps.Length = 1) |> List.length
+                emptyCount = 1 && singleCount = 1
+            | _ -> false
+        let unwrapEntryFnType = function
+            | Fidelity.PSG.TypeIdentity.Application(entry, [fnTy])
+                when entry.NativeKind = Some Fidelity.PSG.NTUKind.NTUfnptr -> Some fnTy
+            | Fidelity.PSG.TypeIdentity.Application(opt, [ Fidelity.PSG.TypeIdentity.Application(entry, [fnTy]) ]) as optTy
+                when opt.NativeKind.IsNone && entry.NativeKind = Some Fidelity.PSG.NTUKind.NTUfnptr
+                     && isSettledOptionalWrapper optTy -> Some fnTy
+            | _ -> None
+        let rec domainTypes = function
+            | Fidelity.PSG.TypeIdentity.Function(Fidelity.PSG.TypeIdentity.Tuple(_, domains), _) -> domains
+            | Fidelity.PSG.TypeIdentity.Function(domain, range) -> domain :: domainTypes range
+            | _ -> []
+        if not (imp.DeclarationFacts.ContainsKey formal) then None
+        else
+            imp.SourceTypes.TryFind formal
+            |> Option.bind unwrapEntryFnType
+            |> Option.map domainTypes
+            |> Option.bind (List.tryItem ordinal)
+            |> Option.bind (settledRepresentationForTypeAndNode revision None)
+            |> Option.filter (matchesCHandleRepresentation nullable None None)
+
+    let private claimBodyAt (revision: Fidelity.PSG.Revision) (id: Fidelity.PSG.NodeId) (expectedKind: string) =
+        match revision.CurrentClaims.TryFind id with
+        | Some info when info.Kind = expectedKind && List.contains info revision.Obligations -> Some info
+        | _ -> None
+
+    let private conditionalTagSelectionAt (revision: Fidelity.PSG.Revision)
+                                          (call: Fidelity.PSG.BoundaryCall)
+                                          (operand: Fidelity.PSG.BoundaryOperand)
+                                          (selection: Fidelity.PSG.NodeId)
+                                          (tagProjection: Fidelity.PSG.NodeId)
+                                          missing =
+        let tagCurrent =
+            match revision.Nodes.TryFind tagProjection, revision.Nodes.TryFind operand.Actual with
+            | Some { Kind = Fidelity.PSG.SemanticKind.DUGetTag(tagTarget, unionType); Children = [tagChild]; Type = tagType; ValueRange = tagRange },
+              Some actualNode ->
+                tagTarget = operand.Actual
+                && tagChild = operand.Actual
+                && unionType = actualNode.Type
+                && tagRange = Some(Fidelity.PSG.ValueRange.Bounded(0I, 1I))
+                && call.Participants.Contains tagProjection
+                && (revision.Nodes.TryFind call.Site |> Option.exists (fun siteNode -> List.contains tagProjection siteNode.Children))
+                && (revision.Emission.Numeric.Values.TryFind tagProjection
+                    |> Option.exists (fun carrier ->
+                        carrier.Site = tagProjection
+                        && carrier.SourceType = tagType
+                        && carrier.Range = Fidelity.PSG.ValueRange.Bounded(0I, 1I)
+                        && carrier.Participants.Contains operand.Actual))
+            | _ -> false
+        let selections =
+            revision.Emission.Callable.AggregateValues.TryFind selection
+            |> Option.defaultValue []
+            |> List.filter (fun row -> row.Operation = Fidelity.PSG.CallableAggregateOperation.Select)
+        match selections with
+        | [selectedRow] when tagCurrent && operand.Adaptation.IsNone && selectedRow.Occurrence = selection && selectedRow.Aggregate = selection ->
+            Ok selectedRow
+        | _ -> Error missing
+
     let optionalEntryConditionalAt (revision: Fidelity.PSG.Revision)
-                                   (call: Fidelity.PSG.BoundaryCall) ordinal
-                                   (operand: Fidelity.PSG.BoundaryOperand) =
+                                           (call: Fidelity.PSG.BoundaryCall) ordinal
+                                           (operand: Fidelity.PSG.BoundaryOperand) =
         let (Fidelity.PSG.NodeId siteId) = call.Site
         let missing =
             $"Conditional optional-entry conversion at boundary call {siteId} operand {ordinal} requires source-authored assigned tag projection and both arm conversions."
@@ -629,34 +756,9 @@ module BoundaryAbi =
             $"Conditional optional native-entry conversion at boundary call {siteId} operand {ordinal} has stale published source facts: "
         match operand.OptionalEntry with
         | Some (Fidelity.PSG.BoundaryOptionalEntryChoice.Conditional(selection, tagProjection, whenTrue, whenFalse)) ->
-            let tagCurrent =
-                match revision.Nodes.TryFind tagProjection, revision.Nodes.TryFind operand.Actual with
-                | Some { Kind = Fidelity.PSG.SemanticKind.DUGetTag(tagTarget, unionType); Children = [tagChild]; Type = tagType; ValueRange = tagRange },
-                  Some actualNode ->
-                    tagTarget = operand.Actual
-                    && tagChild = operand.Actual
-                    && unionType = actualNode.Type
-                    && tagRange = Some(Fidelity.PSG.ValueRange.Bounded(0I, 1I))
-                    && call.Participants.Contains tagProjection
-                    && (revision.Nodes.TryFind call.Site |> Option.exists (fun siteNode -> List.contains tagProjection siteNode.Children))
-                    && (revision.Emission.Numeric.Values.TryFind tagProjection
-                        |> Option.exists (fun carrier ->
-                            carrier.Site = tagProjection
-                            && carrier.SourceType = tagType
-                            && carrier.Range = Fidelity.PSG.ValueRange.Bounded(0I, 1I)
-                            && carrier.Participants.Contains operand.Actual))
-                | _ -> false
-            let selections =
-                revision.Emission.Callable.AggregateValues.TryFind selection
-                |> Option.defaultValue []
-                |> List.filter (fun row -> row.Operation = Fidelity.PSG.CallableAggregateOperation.Select)
-            match selections with
-            | [selectedRow] when
-                tagCurrent
-                && operand.Adaptation.IsNone
-                && selectedRow.Occurrence = selection
-                && selectedRow.Aggregate = selection
-                && whenTrue.Construction <> whenFalse.Construction
+            match conditionalTagSelectionAt revision call operand selection tagProjection missing with
+            | Ok selectedRow when
+                whenTrue.Construction <> whenFalse.Construction
                 && whenTrue.Obligation <> whenFalse.Obligation
                 && Set.ofList [whenTrue.CaseOrdinal; whenFalse.CaseOrdinal] = Set.ofList [0; 1]
                 && (selectedRow.Selection |> Option.exists (fun held ->
@@ -673,6 +775,250 @@ module BoundaryAbi =
                     | violations -> Error (stalePrefix + Fidelity.PSG.Integrity.describe violations)
                 | Error reason, _
                 | _, Error reason -> Error reason
+            | Error reason -> Error reason
+            | Ok _ -> Error missing
+        | _ -> Error missing
+
+    /// Validate a current direct-call ReadOnlyBytes crossing against its
+    /// published declaration, crossing mode, extent/termination claim, and retention claim.
+    let readOnlyBufferUseAt (revision: Fidelity.PSG.Revision)
+                            (call: Fidelity.PSG.BoundaryCall) ordinal
+                            (operand: Fidelity.PSG.BoundaryOperand) =
+        let (Fidelity.PSG.NodeId siteId) = call.Site
+        let missing = $"Read-only buffer argument at boundary call {siteId} operand {ordinal} lacks its exact source crossing, extent/termination, or retention account."
+        let boundary = revision.Emission.Boundary
+        match operand.Abi with
+        | Fidelity.PSG.BoundaryScalar.ReadOnlyBytes declId ->
+            match boundary.ReadOnlyBufferDeclarations.TryFind declId, boundary.Imports.TryFind call.Import with
+            | Some roDecl, Some imported ->
+                match boundary.ReadOnlyBufferUses.TryFind(call.Site, roDecl.Parameter) with
+                | Some row when
+                    operand.Adaptation.IsNone
+                    && roDecl.Identity = declId
+                    && imported.Binding = roDecl.Declaration
+                    && imported.Identity = roDecl.Descriptor
+                    && roDecl.Formals = (imported.Parameters |> List.map fst)
+                    && roDecl.Formals |> List.tryItem ordinal = Some roDecl.BufferFormal
+                    && row.Call = call.Site && row.Declaration = declId && row.Parameter = roDecl.Parameter
+                    && row.Copies = 0 && row.Buffer = operand.Actual
+                    && operand.Formal = roDecl.BufferFormal
+                    && call.Entry.IsNone && call.Resource.IsNone
+                    && not (boundary.WritableBufferUses.ContainsKey(call.Site, roDecl.Parameter)) ->
+                    let crossingOk =
+                        match row.Crossing, roDecl.Contract.Extent, roDecl.CountParameter, roDecl.CountFormal with
+                        | Fidelity.PSG.BoundaryReadOnlyBufferCrossing.ExplicitZeroCopy(countParam, countNode, extentCapacity, extentCoverage),
+                          BAREWire.Descriptors.ReadOnlyBufferExtent.ExplicitCount expectedParam, Some cp, Some countFormal
+                            when expectedParam = countParam && cp = countParam ->
+                            let countArgOk =
+                                roDecl.Formals
+                                |> List.tryFindIndex ((=) countFormal)
+                                |> Option.bind (fun fi -> List.tryItem fi call.Arguments)
+                                |> Option.exists (fun arg -> arg.Actual = countNode && arg.Formal = countFormal)
+                            let extentOk =
+                                match claimBodyAt revision extentCoverage "foreign-readonly-buffer-extent" with
+                                | Some { Body = Fidelity.PSG.ObligationBody.ZeroCopyBufferExtent model } ->
+                                    model.Call = call.Site && model.Declaration = declId && model.Parameter = roDecl.Parameter
+                                    && model.CountParameter = countParam && model.Buffer = row.Buffer && model.Count = countNode
+                                    && model.CountCoverage = extentCoverage && model.ExtentCapacity = extentCapacity
+                                | _ -> false
+                            countArgOk && extentOk
+                        | Fidelity.PSG.BoundaryReadOnlyBufferCrossing.StaticImageNulBorrowed(poolEntry, staticOrigin, byteLength, terminationProof),
+                          BAREWire.Descriptors.ReadOnlyBufferExtent.UncountedNulTerminated, None, None ->
+                            roDecl.Contract.Retention = BAREWire.Descriptors.BufferRetention.DuringCall
+                            && (match revision.StaticStringPool with
+                                | Some pool ->
+                                    match pool.Entries |> List.tryItem poolEntry with
+                                    | Some entry -> List.contains staticOrigin entry.NodeIds
+                                    | None -> false
+                                | None -> false)
+                            && (match claimBodyAt revision terminationProof "foreign-uncounted-path-termination" with
+                                | Some { Body = Fidelity.PSG.ObligationBody.UncountedPathTermination model } ->
+                                    model.Call = call.Site && model.Declaration = declId && model.Parameter = roDecl.Parameter
+                                    && model.Source = row.Buffer && model.ByteLength = byteLength
+                                    && model.Mode = Fidelity.PSG.UncountedPathStagingMode.StaticImageZeroCopy poolEntry
+                                    && model.RequiresNoInteriorNul && model.RequiresTrailingNul
+                                | _ -> false)
+                        | Fidelity.PSG.BoundaryReadOnlyBufferCrossing.CallScopedNulStaged(stagingBuffer, capacity, byteLength, terminationProof),
+                          BAREWire.Descriptors.ReadOnlyBufferExtent.UncountedNulTerminated, None, None ->
+                            roDecl.Contract.Retention = BAREWire.Descriptors.BufferRetention.DuringCall
+                            && stagingBuffer <> row.Buffer
+                            && (match claimBodyAt revision terminationProof "foreign-uncounted-path-termination" with
+                                | Some { Body = Fidelity.PSG.ObligationBody.UncountedPathTermination model } ->
+                                    model.Call = call.Site && model.Declaration = declId && model.Parameter = roDecl.Parameter
+                                    && model.Source = row.Buffer && model.ByteLength = byteLength
+                                    && model.Mode = Fidelity.PSG.UncountedPathStagingMode.CallScopedStaged(stagingBuffer, capacity)
+                                    && model.RequiresNoInteriorNul && model.RequiresTrailingNul
+                                | _ -> false)
+                        | _ -> false
+                    let retentionOk =
+                        match claimBodyAt revision row.RetentionProof "foreign-buffer-retention-domination" with
+                        | Some { Body = Fidelity.PSG.ObligationBody.BufferRetentionDomination model } ->
+                            let modeOk =
+                                match roDecl.Contract.Retention, model.Mode with
+                                | BAREWire.Descriptors.BufferRetention.DuringCall, Fidelity.PSG.BufferRetentionMode.DuringCall ->
+                                    row.Retirements.IsEmpty && model.RetirementOrders.IsEmpty
+                                | BAREWire.Descriptors.BufferRetention.RetainedUntil(owner, releases), Fidelity.PSG.BufferRetentionMode.RetainedUntilOwner(modelOwner, releaseCount) ->
+                                    owner = modelOwner && releaseCount = Array.length releases
+                                    && releaseCount > 0 && row.Retirements.Length = releaseCount
+                                    && model.RetirementOrders.Length = releaseCount
+                                | _ -> false
+                            modeOk && model.Call = call.Site && model.Declaration = declId
+                            && model.Buffer = row.Buffer && model.Residence = row.Residence
+                        | _ -> false
+                    if crossingOk && retentionOk then Ok(roDecl, row)
+                    else Error missing
+                | _ -> Error missing
+            | _ -> Error missing
+        | _ -> Error missing
+
+    let private bufferAbsenceArmAt (revision: Fidelity.PSG.Revision)
+                                   (call: Fidelity.PSG.BoundaryCall) ordinal
+                                   (operand: Fidelity.PSG.BoundaryOperand)
+                                   (selected: Fidelity.PSG.BoundaryBufferAbsenceSelection)
+                                   missing =
+        let boundary = revision.Emission.Boundary
+        match operand.Abi with
+        | Fidelity.PSG.BoundaryScalar.ReadOnlyBytes declId
+        | Fidelity.PSG.BoundaryScalar.WritableBytes declId when
+            (selected.CaseOrdinal = 0 && selected.Payload.IsNone || selected.CaseOrdinal = 1 && selected.Payload.IsSome)
+            && List.contains operand.Actual selected.Transport
+            && List.contains selected.Construction selected.Transport ->
+            match boundary.Imports.TryFind call.Import,
+                  boundary.BufferAbsences.TryFind selected.Absence,
+                  claimBodyAt revision selected.Obligation (sprintf "foreign-buffer-absence-conversion-%d" ordinal) with
+            | Some imported, Some absence, Some { Body = Fidelity.PSG.ObligationBody.BufferAbsenceArgumentConversion model }
+                when absence.Quote = selected.Absence && absence.Import = call.Import
+                     && (imported.Parameters |> List.tryFindIndex (fun (f, _) -> f = absence.Formal) = Some ordinal)
+                     && absence.Formal = operand.Formal
+                     && absence.BufferDeclaration = declId
+                     && model.Call = call.Site && model.Parameter = ordinal && model.Actual = operand.Actual
+                     && model.Construction = selected.Construction && model.SourceCase = selected.CaseOrdinal
+                     && model.Absence = selected.Absence
+                     && model.Arms = [ { Fidelity.PSG.BufferAbsencePlanArm.CaseOrdinal = 0; Choice = Fidelity.PSG.BufferAbsencePlanChoice.AbsentNull }
+                                       { Fidelity.PSG.BufferAbsencePlanArm.CaseOrdinal = 1; Choice = Fidelity.PSG.BufferAbsencePlanChoice.RequiresNonNullBuffer } ] ->
+                let importedFormals = imported.Parameters |> List.map fst
+                match operand.Abi with
+                | Fidelity.PSG.BoundaryScalar.ReadOnlyBytes roId ->
+                    match boundary.ReadOnlyBufferDeclarations.TryFind roId with
+                    | Some roDecl
+                        when roDecl.Identity = roId
+                             && roDecl.Descriptor = imported.Identity
+                             && roDecl.Declaration = imported.Binding
+                             && roDecl.Formals = importedFormals
+                             && roDecl.BufferFormal = operand.Formal ->
+                        if selected.CaseOrdinal = 0 then Ok selected
+                        else readOnlyBufferUseAt revision call ordinal operand |> Result.map (fun _ -> selected)
+                    | _ -> Error missing
+                | Fidelity.PSG.BoundaryScalar.WritableBytes wbId ->
+                    match boundary.WritableBufferDeclarations.TryFind wbId with
+                    | Some wbDecl
+                        when wbDecl.Identity = wbId
+                             && wbDecl.Descriptor = imported.Identity
+                             && wbDecl.Declaration = imported.Binding
+                             && wbDecl.Formals = importedFormals
+                             && wbDecl.BufferFormal = operand.Formal ->
+                        if selected.CaseOrdinal = 0 then Ok selected
+                        else
+                            match boundary.WritableBufferUses.TryFind(call.Site, ordinal) with
+                            | Some row when row.Call = call.Site && row.Declaration = wbId && row.Buffer = operand.Actual -> Ok selected
+                            | _ -> Error missing
+                    | _ -> Error missing
+                | _ -> Error missing
+            | _ -> Error missing
+        | _ -> Error missing
+
+    let bufferAbsenceConversionAt (revision: Fidelity.PSG.Revision)
+                                  (call: Fidelity.PSG.BoundaryCall) ordinal
+                                  (operand: Fidelity.PSG.BoundaryOperand) =
+        let (Fidelity.PSG.NodeId siteId) = call.Site
+        let missing = $"Optional byte-buffer absence conversion at boundary call {siteId} operand {ordinal} lacks its exact BufferAbsenceContract or claim."
+        match operand.BufferAbsence with
+        | Some (Fidelity.PSG.BoundaryBufferAbsenceChoice.Direct selected) ->
+            bufferAbsenceArmAt revision call ordinal operand selected missing
+        | _ -> Error missing
+
+    let bufferAbsenceConditionalAt (revision: Fidelity.PSG.Revision)
+                                   (call: Fidelity.PSG.BoundaryCall) ordinal
+                                   (operand: Fidelity.PSG.BoundaryOperand) =
+        let (Fidelity.PSG.NodeId siteId) = call.Site
+        let missing = $"Conditional byte-buffer absence conversion at boundary call {siteId} operand {ordinal} requires source-authored assigned tag projection and both arm accounts."
+        match operand.BufferAbsence with
+        | Some (Fidelity.PSG.BoundaryBufferAbsenceChoice.Conditional(selection, tagProjection, whenTrue, whenFalse)) ->
+            match conditionalTagSelectionAt revision call operand selection tagProjection missing with
+            | Ok selectedRow when
+                whenTrue.Construction <> whenFalse.Construction
+                && whenTrue.Obligation <> whenFalse.Obligation
+                && Set.ofList [whenTrue.CaseOrdinal; whenFalse.CaseOrdinal] = Set.ofList [0; 1]
+                && (selectedRow.Selection |> Option.exists (fun held ->
+                    held.WhenTrue = whenTrue.Construction && held.WhenFalse = whenFalse.Construction)) ->
+                let whenTrueIsSome = whenTrue.CaseOrdinal = 1
+                let presentCandidate, absentCandidate =
+                    if whenTrueIsSome then whenTrue, whenFalse
+                    else whenFalse, whenTrue
+                match bufferAbsenceArmAt revision call ordinal operand presentCandidate missing,
+                      bufferAbsenceArmAt revision call ordinal operand absentCandidate missing with
+                | Ok presentArm, Ok absentArm -> Ok(selection, tagProjection, selectedRow, whenTrueIsSome, presentArm, absentArm)
+                | Error reason, _
+                | _, Error reason -> Error reason
+            | Error reason -> Error reason
+            | Ok _ -> Error missing
+        | _ -> Error missing
+
+    /// Validate a current BorrowedResultView return slice, invalidation frontier,
+    /// optional companion call measurement, and scope claim.
+    let borrowedResultViewAt (revision: Fidelity.PSG.Revision) (call: Fidelity.PSG.BoundaryCall) =
+        let (Fidelity.PSG.NodeId siteId) = call.Site
+        let missing = $"Borrowed result view at boundary call {siteId} lacks its exact non-owning declaration, invalidation frontier, or scope claim."
+        let boundary = revision.Emission.Boundary
+        match call.Result with
+        | Some (Fidelity.PSG.BoundaryScalar.BorrowedBytes declId) ->
+            match boundary.BorrowedResultViewDeclarations.TryFind declId,
+                  boundary.BorrowedResultViewUses.TryFind call.Site,
+                  boundary.Imports.TryFind call.Import with
+            | Some bvDecl, Some bvUse, Some imported when
+                call.ResultAdaptation.IsNone
+                && bvDecl.Identity = declId
+                && imported.Binding = bvDecl.Declaration && imported.Identity = bvDecl.Descriptor
+                && bvDecl.Formals = (imported.Parameters |> List.map fst)
+                && bvUse.Call = call.Site && bvUse.Declaration = declId && bvUse.View = call.Site
+                && bvUse.NullToNoneBoundary
+                && not bvUse.Invalidations.IsEmpty
+                && bvUse.Invalidations.Length = bvUse.InvalidationOrders.Length
+                && bvUse.Reads.Length = bvUse.ReadOrders.Length ->
+                let ownerOk =
+                    bvDecl.Formals
+                    |> List.tryFindIndex ((=) bvDecl.OwnerFormal)
+                    |> Option.bind (fun fi -> List.tryItem fi call.Arguments)
+                    |> Option.exists (fun arg -> arg.Actual = bvUse.Owner && arg.Formal = bvDecl.OwnerFormal)
+                let companionOk =
+                    match bvDecl.Contract.Extent with
+                    | BAREWire.Descriptors.BorrowedExtent.NulTerminated -> bvUse.CompanionCall.IsNone && bvUse.CompanionArguments.IsEmpty
+                    | BAREWire.Descriptors.BorrowedExtent.CompanionCall(_, args) ->
+                        match bvUse.CompanionCall |> Option.bind boundary.Calls.TryFind with
+                        | Some compCall ->
+                            compCall.Site <> call.Site
+                            && compCall.Entry.IsNone
+                            && compCall.Resource.IsNone
+                            && compCall.Arguments.Length = Array.length args
+                            && bvUse.CompanionArguments.Length = Array.length args
+                            && (match boundary.Imports.TryFind compCall.Import with
+                                | Some compImport ->
+                                    compImport.Parameters = (compCall.Arguments |> List.map (fun actual -> actual.Formal, actual.Abi))
+                                    && compCall.Result = compImport.Result
+                                    && (match compImport.Result with Some(Fidelity.PSG.BoundaryScalar.Integer _) -> true | _ -> false)
+                                | None -> false)
+                            && (compCall.Arguments |> List.map (fun actual -> actual.Actual)) = bvUse.CompanionArguments
+                        | None -> false
+                let scopeOk =
+                    match claimBodyAt revision bvUse.ScopeProof "foreign-borrowed-view-scope" with
+                    | Some { Body = Fidelity.PSG.ObligationBody.BorrowedResultViewScope model } ->
+                        model.Call = call.Site && model.Declaration = declId && model.Owner = bvUse.Owner
+                        && model.View = bvUse.View && model.CallOrder = bvUse.CallOrder
+                        && model.InvalidationOrders = bvUse.InvalidationOrders && model.ReadOrders = bvUse.ReadOrders
+                        && model.NullToNoneBoundary
+                    | _ -> false
+                if ownerOk && companionOk && scopeOk then Ok(bvDecl, bvUse)
+                else Error missing
             | _ -> Error missing
         | _ -> Error missing
 
@@ -704,25 +1050,129 @@ module BoundaryAbi =
             invalidArg "scalar" "A resource carrier requires its exact direct-call conversion and cleanup accounts."
         | Fidelity.PSG.BoundaryScalar.WritableBytes _ ->
             invalidArg "scalar" "A writable byte carrier requires its exact source-published declaration."
+        | Fidelity.PSG.BoundaryScalar.ReadOnlyBytes _ ->
+            invalidArg "scalar" "A read-only byte carrier requires its exact source-published declaration."
+        | Fidelity.PSG.BoundaryScalar.BorrowedBytes _ ->
+            invalidArg "scalar" "A borrowed result view carrier requires its exact source-published declaration."
 
-    let signatureType (signature: Fidelity.PSG.NativeEntrySignature) =
+    let rec private hasResourceCarrierSeen (boundary: Fidelity.PSG.BoundaryEmissionProjection) (seen: Set<Fidelity.PSG.NodeId>) = function
+        | Fidelity.PSG.BoundaryScalar.ResourceHandle _ -> true
+        | Fidelity.PSG.BoundaryScalar.Entry invocation when not (seen.Contains invocation) ->
+            match boundary.CallbackInvocations.TryFind invocation with
+            | Some row when row.Identity = invocation ->
+                let nextSeen = seen.Add invocation
+                (row.Signature.Parameters |> List.exists (hasResourceCarrierSeen boundary nextSeen))
+                || (row.Signature.Result |> Option.exists (hasResourceCarrierSeen boundary nextSeen))
+            | _ -> false
+        | _ -> false
+
+    let importCarriesResourceHandle (boundary: Fidelity.PSG.BoundaryEmissionProjection) (declaration: Fidelity.PSG.BoundaryImport) =
+        (declaration.Parameters |> List.exists (snd >> hasResourceCarrierSeen boundary Set.empty))
+        || (declaration.Result |> Option.exists (hasResourceCarrierSeen boundary Set.empty))
+
+    let rec private trySignatureTypeWith (allowResource: bool) (boundary: Fidelity.PSG.BoundaryEmissionProjection) (seen: Set<Fidelity.PSG.NodeId>) (invocation: Fidelity.PSG.NodeId) (signature: Fidelity.PSG.NativeEntrySignature) : Result<MLIRType option, string> =
+        if signature.CallingConvention <> "CDecl" then
+            Error "A closed native entry requires its source-published CDecl convention."
+        else
+            let rec collectParams ordinal acc = function
+                | [] -> Ok (List.rev acc)
+                | scalar :: rest ->
+                    match tryScalarTypeContextWith allowResource boundary seen (Some(invocation, ordinal)) scalar with
+                    | Ok tyOpt -> collectParams (ordinal + 1) (tyOpt :: acc) rest
+                    | Error reason -> Error reason
+            match collectParams 0 [] signature.Parameters, signature.Result with
+            | Error reason, _ -> Error reason
+            | Ok paramOpts, None ->
+                if List.exists Option.isNone paramOpts then Ok None
+                else Ok (Some (TFunc(List.choose id paramOpts, [])))
+            | Ok paramOpts, Some retScalar ->
+                tryScalarTypeContextWith allowResource boundary seen None retScalar
+                |> Result.map (fun retOpt ->
+                    match retOpt with
+                    | Some retTy when not (List.exists Option.isNone paramOpts) ->
+                        Some (TFunc(List.choose id paramOpts, [retTy]))
+                    | _ -> None)
+
+    and private tryScalarTypeContextWith (allowResource: bool) (boundary: Fidelity.PSG.BoundaryEmissionProjection) (seen: Set<Fidelity.PSG.NodeId>) (callbackContext: (Fidelity.PSG.NodeId * int) option) = function
+        | Fidelity.PSG.BoundaryScalar.Integer(bits, _) -> Ok (Some (TInt(IntWidth bits)))
+        | Fidelity.PSG.BoundaryScalar.Boolean -> Ok (Some (TInt(IntWidth 1)))
+        | Fidelity.PSG.BoundaryScalar.Entry invocation when seen.Contains invocation ->
+            Error "An entry carrier contains a recursive receiving invocation."
+        | Fidelity.PSG.BoundaryScalar.Entry invocation ->
+            match boundary.CallbackInvocations.TryFind invocation with
+            | Some row when row.Identity = invocation -> trySignatureTypeWith allowResource boundary (seen.Add invocation) invocation row.Signature
+            | _ -> Error "An entry carrier lacks its exact source-published receiving invocation."
+        | Fidelity.PSG.BoundaryScalar.ResourceHandle _ ->
+            if allowResource then Ok None
+            else Error "A resource carrier requires its exact direct-call conversion and cleanup accounts."
+        | Fidelity.PSG.BoundaryScalar.WritableBytes identity ->
+            match boundary.WritableBufferDeclarations.TryFind identity with
+            | Some row when row.Identity = identity -> Ok (Some (TMemRef(TInt(IntWidth 8))))
+            | _ -> Error "A writable byte carrier lacks its exact source-published declaration."
+        | Fidelity.PSG.BoundaryScalar.ReadOnlyBytes identity ->
+            match callbackContext with
+            | Some(invocation, ordinal) ->
+                match boundary.CountedEntryArrays.TryFind identity with
+                | Some counted when counted.Identity = identity && counted.Invocation = invocation && counted.Contract.Argument = ordinal ->
+                    Ok (Some (TMemRef(TInt(IntWidth 8))))
+                | _ -> Error "A callback counted-entry array lacks its exact receiving invocation or parameter ordinal."
+            | None ->
+                match boundary.ReadOnlyBufferDeclarations.TryFind identity with
+                | Some row when row.Identity = identity -> Ok (Some (TMemRef(TInt(IntWidth 8))))
+                | _ -> Error "A read-only byte carrier lacks its exact source-published declaration."
+        | Fidelity.PSG.BoundaryScalar.BorrowedBytes identity ->
+            match boundary.BorrowedResultViewDeclarations.TryFind identity with
+            | Some row when row.Identity = identity -> Ok (Some (TMemRef(TInt(IntWidth 8))))
+            | _ -> Error "A borrowed result view carrier lacks its exact source-published declaration."
+
+    let tryScalarTypeIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) (seen: Set<Fidelity.PSG.NodeId>) scalar =
+        match tryScalarTypeContextWith false boundary seen None scalar with
+        | Ok (Some ty) -> Ok ty
+        | Ok None -> Error "A resource carrier requires its exact direct-call conversion and cleanup accounts."
+        | Error reason -> Error reason
+
+    let validateImportCarriersIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) (declaration: Fidelity.PSG.BoundaryImport) : Result<unit, string> =
+        let rec checkParams = function
+            | [] -> Ok ()
+            | (_, scalar) :: rest ->
+                match tryScalarTypeContextWith true boundary Set.empty None scalar with
+                | Ok _ -> checkParams rest
+                | Error reason -> Error reason
+        checkParams declaration.Parameters
+        |> Result.bind (fun () ->
+            match declaration.Result with
+            | None -> Ok ()
+            | Some ret -> tryScalarTypeContextWith true boundary Set.empty None ret |> Result.map ignore)
+
+    let rec signatureTypeIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) (signature: Fidelity.PSG.NativeEntrySignature) =
+        if signature.CallingConvention <> "CDecl" then
+            invalidArg "signature" "A closed native entry requires its source-published CDecl convention."
+        TFunc(List.map (scalarTypeIn boundary) signature.Parameters, signature.Result |> Option.map (scalarTypeIn boundary) |> Option.toList)
+
+    and signatureType (signature: Fidelity.PSG.NativeEntrySignature) =
         if signature.CallingConvention <> "CDecl" then
             invalidArg "signature" "A closed native entry requires its source-published CDecl convention."
         TFunc(List.map scalarType signature.Parameters, signature.Result |> Option.map scalarType |> Option.toList)
 
-    let scalarTypeIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) = function
-        | Fidelity.PSG.BoundaryScalar.Entry invocation ->
-            match boundary.CallbackInvocations.TryFind invocation with
-            | Some row when row.Identity = invocation -> signatureType row.Signature
-            | _ -> invalidArg "boundary" "An entry carrier lacks its exact source-published receiving invocation."
-        | Fidelity.PSG.BoundaryScalar.WritableBytes identity ->
-            match boundary.WritableBufferDeclarations.TryFind identity with
-            | Some row when row.Identity = identity -> TMemRef(TInt(IntWidth 8))
-            | _ -> invalidArg "boundary" "A writable byte carrier lacks its exact source-published declaration."
-        | scalar -> scalarType scalar
+    and scalarTypeIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) scalar =
+        match tryScalarTypeIn boundary Set.empty scalar with
+        | Ok ty -> ty
+        | Error reason -> invalidArg "scalar" reason
+
+    let tryParametersIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
+        let rec collect acc = function
+            | [] -> Ok (List.rev acc)
+            | (_, scalar) :: rest ->
+                match tryScalarTypeIn boundary Set.empty scalar with
+                | Ok ty -> collect (ty :: acc) rest
+                | Error reason -> Error reason
+        collect [] declaration.Parameters
 
     let parametersIn boundary (declaration: Fidelity.PSG.BoundaryImport) =
         declaration.Parameters |> List.map (snd >> scalarTypeIn boundary)
+
+    let resultsIn boundary (declaration: Fidelity.PSG.BoundaryImport) =
+        declaration.Result |> Option.map (scalarTypeIn boundary) |> Option.toList
 
     let parameters (declaration: Fidelity.PSG.BoundaryImport) =
         declaration.Parameters |> List.map (snd >> scalarType)

@@ -884,10 +884,15 @@ let private conditionalOptionalBoundaryFixture reversed =
   let callerBinding = node 33 (SemanticKind.Binding("dispatch", false, false, None)) callerSig [32] (Some 34)
   let rootSeq = node 34 (SemanticKind.Sequential [NodeId 20; NodeId 33]) unitType [20; 33] None
   let moduleScope = { node 50 (SemanticKind.ModuleDef("Native", [NodeId 20])) unitType [] None with IsReachable = false }
+  // Per AGENTS.md fixture rules: states the complete published absence-quote and
+  // import-parameter declaration facts so Integrity.check admits the full revision.
+  let absenceNodes =
+    [ 710 .. 718 ]
+    |> List.map (fun k -> node k (SemanticKind.PatternBinding(sprintf "abs_%d" k)) unitType [] None)
   let liveNodes =
     [ cbFormal; cbBody; cbLambda; cbBinding; ofFunctionNode; cbRef; formation
       condRef; someNode; noneNode; selectNode; tagNode; calleeLeaf; callNode
-      predFormal; callerLambda; callerBinding; rootSeq; moduleScope ]
+      predFormal; callerLambda; callerBinding; rootSeq; moduleScope ] @ absenceNodes
   let participant role ordinal group identity : Participant =
     { Role = role; Ordinal = ordinal; Group = group; Node = identity }
   let rowParticipants (row: CallableAggregateValue) =
@@ -1004,14 +1009,18 @@ let private conditionalOptionalBoundaryFixture reversed =
       noneNode.Id, [noneRow]
       selectNode.Id, [selectRow] ]
   let invocationId, invocationScope, invocationRecord = NodeId 700, NodeId 701, NodeId 702
-  let importId, importBinding, formalParam = NodeId 703, NodeId 704, NodeId 705
+  let importId, importBinding, formalParam, importParamsArrId = NodeId 703, NodeId 704, NodeId 705, NodeId 706
   let scopedDescriptorType =
     TypeIdentity.Application(
       { Declaration = { Module = ["BAREWire"; "Descriptors"]; Name = "Descriptors.ScopedCallbackDescriptor" }
         Parameters = []; NativeKind = None }, [])
+  // Complete published DeclarationFacts record/array rows matching Integrity.fs for
+  // BoundaryImport.Parameters alongside CallbackAbsences quotation records.
   let importFacts =
     Map.ofList [
       importBinding, { Form = "binding"; Text = ["consume_callback"]; Numbers = [0I; 0I]; References = []; Children = []; Parent = Some moduleScope.Id; SourceType = consumerSig }
+      importId, { Form = "record"; Text = ["Parameters"]; Numbers = []; References = [importParamsArrId]; Children = [importParamsArrId]; Parent = None; SourceType = unitType }
+      importParamsArrId, { Form = "array"; Text = []; Numbers = []; References = [formalParam]; Children = [formalParam]; Parent = Some importId; SourceType = unitType }
       formalParam, { Form = "pattern-binding"; Text = ["cb"]; Numbers = []; References = []; Children = []; Parent = Some importBinding; SourceType = optionType }
       invocationId, { Form = "quotation"; Text = []; Numbers = []; References = []; Children = []; Parent = None; SourceType = unitType }
       invocationScope, { Form = "quotation"; Text = []; Numbers = []; References = [invocationRecord]; Children = [invocationRecord]; Parent = None; SourceType = scopedDescriptorType }
