@@ -154,15 +154,17 @@ let pBuildRecordCopyWith
         match platform with
         | Alex.Target.FPGA ->
             // FPGA: chain of hw.struct_inject from original
-            let mutable currentSSA = origSSA
-            let mutable ops = []
-            for i in 0 .. updatedFields.Length - 1 do
-                let (fieldName, valueSSA, _fieldType) = updatedFields.[i]
-                let resultSSA = ssas.[i]
-                let! injectOp = pHWStructInject resultSSA currentSSA fieldName valueSSA structTy
-                ops <- ops @ [injectOp]
-                currentSSA <- resultSSA
-            return (ops, TRValue { SSA = currentSSA; Type = structTy })
+            let! (opsRev, currentSSA) =
+                updatedFields
+                |> List.indexed
+                |> List.fold (fun accParser (i, (fieldName, valueSSA, _fieldType)) ->
+                    parser {
+                        let! (accOps, prevSSA) = accParser
+                        let resultSSA = ssas.[i]
+                        let! injectOp = pHWStructInject resultSSA prevSSA fieldName valueSSA structTy
+                        return (injectOp :: accOps, resultSSA)
+                    }) (preturn ([], origSSA))
+            return (List.rev opsRev, TRValue { SSA = currentSSA; Type = structTy })
 
         | _ ->
             // CPU: alloca + memcpy from original + overwrite updated fields

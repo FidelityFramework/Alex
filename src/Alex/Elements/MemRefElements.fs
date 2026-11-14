@@ -13,9 +13,7 @@ open XParsec
 open XParsec.Parsers     // getUserState
 open XParsec.Combinators // parser { }
 open Alex.XParsec.PSGCombinators
-open Fidelity.PSG
 open Alex.Dialects.Core.Types
-open Alex.CodeGeneration.TypeMapping
 open Alex.Traversal.TransferTypes
 
 /// Copy two views whose exact physical type was supplied by the source-owned
@@ -61,9 +59,10 @@ let pLoad (ssa: SSA) (memref: SSA) (indices: SSA list) : PSGParser<MLIROp> =
             | TMemRef elemType | TMemRefStatic (_, elemType) | TMemRefScalar elemType ->
                 return MLIROp.MemRefOp (MemRefOp.Load (ssa, memref, indices, elemType, memrefType))
             | other ->
-                return! fail (Message (sprintf "Alex emission did not register a memref type for the loaded value at node %d: SSA %s is registered as %A, not a memref" (NodeId.value state.Current.Id) (Alex.Dialects.Core.Serialize.ssaToString memref) other))
+                return! fail (Message (sprintf "Alex emission did not register a memref type for the loaded value at node %d: SSA %s is registered as %s, not a memref" (currentNodeIdValue state) (Alex.Dialects.Core.Serialize.ssaToString memref) (Alex.Dialects.Core.Serialize.describeType other)))
         | None ->
-            return! fail (Message $"pLoad: memref SSA {memref} has no registered type in accumulator")
+            let ssaStr = Alex.Dialects.Core.Serialize.ssaToString memref
+            return! fail (Message $"pLoad (node {currentNodeIdValue state}): memref SSA {ssaStr} has no registered type in accumulator")
     }
 
 /// Emit memref.load with explicit element type (memref type derived from accumulator)
@@ -80,9 +79,12 @@ let pLoadFrom (ssa: SSA) (memref: SSA) (indices: SSA list) (elemType: MLIRType) 
                 return MLIROp.MemRefOp (MemRefOp.Load (ssa, memref, indices, elemType, memrefType))
             | _ ->
                 let ssaStr = Alex.Dialects.Core.Serialize.ssaToString memref
-                return! fail (Message $"pLoadFrom: SSA {ssaStr} has type {memrefType} — expected memref type. This indicates an SSATypes scope leak (cross-function SSA collision).")
+                let memrefTypeStr = Alex.Dialects.Core.Serialize.describeType memrefType
+                return! fail (Message $"pLoadFrom: SSA {ssaStr} has type {memrefTypeStr} — expected memref type. This indicates an SSATypes scope leak (cross-function SSA collision).")
         | None ->
-            return! fail (Message $"pLoadFrom: memref SSA {memref} has no registered type in accumulator (elemType={elemType})")
+            let ssaStr = Alex.Dialects.Core.Serialize.ssaToString memref
+            let elemTypeStr = Alex.Dialects.Core.Serialize.describeType elemType
+            return! fail (Message $"pLoadFrom: memref SSA {ssaStr} has no registered type in accumulator (elemType={elemTypeStr})")
     }
 
 /// Emit memref.store operation
@@ -153,11 +155,9 @@ let pMemRefView (result: SSA) (source: SSA) (byteOffset: SSA) (sourceType: MLIRT
     }
 
 /// Emit memref.subview operation (replaces GEP for arrays)
-let pSubView (ssa: SSA) (source: SSA) (offsets: SSA list) : PSGParser<MLIROp> =
+let pSubView (ssa: SSA) (source: SSA) (offsets: SSA list) (elemType: MLIRType) : PSGParser<MLIROp> =
     parser {
-        let! state = getUserState
-        let ty = valueTypeAt state.Graph state.Current.Id
-        let memrefType = TMemRef ty
+        let memrefType = TMemRef elemType
         return MLIROp.MemRefOp (MemRefOp.SubView (ssa, source, offsets, memrefType))
     }
 

@@ -159,6 +159,136 @@ let rec hwTypeToString (pointer: Result<int, string>) (ty: MLIRType) : string =
         sprintf "!hw.struct<%s>" (String.concat ", " fs)
     | _ -> typeToString pointer ty
 
+let private nodeIdValue (Fidelity.PSG.NodeId id) = id
+
+let private describeTypeParamKind = function
+    | Fidelity.PSG.TypeParamKind.Type -> "type"
+    | Fidelity.PSG.TypeParamKind.Measure -> "measure"
+    | Fidelity.PSG.TypeParamKind.Carrier -> "carrier"
+
+let private describeConstructor (ctor: Fidelity.PSG.ConstructorIdentity) : string =
+    String.concat "." (ctor.Declaration.Module @ [ctor.Declaration.Name])
+
+let rec private describeTypeIdentity (ty: Fidelity.PSG.TypeIdentity) : string =
+    match ty with
+    | Fidelity.PSG.TypeIdentity.Application(ctor, []) -> describeConstructor ctor
+    | Fidelity.PSG.TypeIdentity.Application(ctor, args) ->
+        sprintf "%s<%s>" (describeConstructor ctor) (args |> List.map describeTypeIdentity |> String.concat ", ")
+    | Fidelity.PSG.TypeIdentity.Union(ctor, []) -> describeConstructor ctor
+    | Fidelity.PSG.TypeIdentity.Union(ctor, cases) ->
+        let caseNames = cases |> List.map (fun (name, _, _) -> name) |> String.concat " | "
+        sprintf "%s(%s)" (describeConstructor ctor) caseNames
+    | Fidelity.PSG.TypeIdentity.Numeric(carrier, _) ->
+        match carrier with
+        | Fidelity.PSG.CarrierIdentity.Constructor ctor -> describeConstructor ctor
+        | Fidelity.PSG.CarrierIdentity.Variable(idx, kind) -> sprintf "'%s%d" (describeTypeParamKind kind) idx
+    | Fidelity.PSG.TypeIdentity.Measure _ -> "measure"
+    | Fidelity.PSG.TypeIdentity.Variable(idx, kind) -> sprintf "'%s%d" (describeTypeParamKind kind) idx
+    | Fidelity.PSG.TypeIdentity.Function(domain, range) ->
+        sprintf "(%s -> %s)" (describeTypeIdentity domain) (describeTypeIdentity range)
+    | Fidelity.PSG.TypeIdentity.Tuple(isStruct, items) ->
+        let joined = items |> List.map describeTypeIdentity |> String.concat " * "
+        if isStruct then sprintf "struct(%s)" joined else sprintf "(%s)" joined
+    | Fidelity.PSG.TypeIdentity.AnonymousRecord(isStruct, fields) ->
+        let joined = fields |> List.map (fun (n, t) -> sprintf "%s: %s" n (describeTypeIdentity t)) |> String.concat "; "
+        if isStruct then sprintf "struct{| %s |}" joined else sprintf "{| %s |}" joined
+    | Fidelity.PSG.TypeIdentity.Forall(pars, body) ->
+        let pStr = pars |> List.map (fun (i, k) -> sprintf "'%s%d" (describeTypeParamKind k) i) |> String.concat " "
+        sprintf "forall %s. %s" pStr (describeTypeIdentity body)
+    | Fidelity.PSG.TypeIdentity.Byref(kind, inner) ->
+        let k =
+            match kind with
+            | Fidelity.PSG.ByrefKind.In -> "inref"
+            | Fidelity.PSG.ByrefKind.Out -> "outref"
+            | Fidelity.PSG.ByrefKind.InOut -> "byref"
+        sprintf "%s<%s>" k (describeTypeIdentity inner)
+    | Fidelity.PSG.TypeIdentity.NativePointer inner -> sprintf "nativeptr<%s>" (describeTypeIdentity inner)
+    | Fidelity.PSG.TypeIdentity.Lazy inner -> sprintf "Lazy<%s>" (describeTypeIdentity inner)
+    | Fidelity.PSG.TypeIdentity.Sequence inner -> sprintf "seq<%s>" (describeTypeIdentity inner)
+    | Fidelity.PSG.TypeIdentity.Enumerator inner -> sprintf "enumerator<%s>" (describeTypeIdentity inner)
+    | Fidelity.PSG.TypeIdentity.List inner -> sprintf "list<%s>" (describeTypeIdentity inner)
+    | Fidelity.PSG.TypeIdentity.Map(k, v) -> sprintf "Map<%s, %s>" (describeTypeIdentity k) (describeTypeIdentity v)
+    | Fidelity.PSG.TypeIdentity.Set inner -> sprintf "Set<%s>" (describeTypeIdentity inner)
+    | Fidelity.PSG.TypeIdentity.Error msg -> sprintf "error<%s>" msg
+
+let private describeSettledSlot = function
+    | Fidelity.PSG.SettledSlot.InlineBytes(bytes, align) -> sprintf "bytes(%d, align=%d)" bytes align
+    | Fidelity.PSG.SettledSlot.Integer(bits, _) -> if bits > 0 then sprintf "i%d" bits else sprintf "i<unresolved:%d>" bits
+    | Fidelity.PSG.SettledSlot.Bool -> "bool"
+    | Fidelity.PSG.SettledSlot.Char -> "char"
+    | Fidelity.PSG.SettledSlot.Real bits -> sprintf "f%d" bits
+    | Fidelity.PSG.SettledSlot.Pointer words -> sprintf "ptr(%d words)" words
+    | Fidelity.PSG.SettledSlot.Unit -> "unit"
+    | Fidelity.PSG.SettledSlot.Opaque what -> sprintf "opaque(%s)" what
+    | Fidelity.PSG.SettledSlot.CHandle(ht, bits, align) -> sprintf "chandle<%s, %d-bit, align=%d>" (describeTypeIdentity ht) bits align
+
+let rec private describeValueRepresentation = function
+    | Fidelity.PSG.ValueRepresentation.Scalar slot -> describeSettledSlot slot
+    | Fidelity.PSG.ValueRepresentation.Buffer(None, elem) -> sprintf "buf<?x%s>" (describeValueRepresentation elem)
+    | Fidelity.PSG.ValueRepresentation.Buffer(Some count, elem) -> sprintf "buf<%dx%s>" count (describeValueRepresentation elem)
+    | Fidelity.PSG.ValueRepresentation.Record(fields, placement) ->
+        let fs = fields |> List.map (fun (n, r) -> sprintf "%s: %s" n (describeValueRepresentation r)) |> String.concat "; "
+        match placement with
+        | Some(_, sz, al) -> sprintf "record<%s> (size=%d, align=%d)" fs sz al
+        | None -> sprintf "record<%s> (unsettled)" fs
+    | Fidelity.PSG.ValueRepresentation.CallableComponent(slot, data) ->
+        sprintf "component(node %d: %s)" (nodeIdValue slot) (describeValueRepresentation data)
+    | Fidelity.PSG.ValueRepresentation.Union(cases, placement) ->
+        let cs =
+            cases
+            |> List.map (fun (name, ps) ->
+                match ps with
+                | [] -> name
+                | _ -> sprintf "%s(%s)" name (ps |> List.map describeValueRepresentation |> String.concat ", "))
+            |> String.concat " | "
+        match placement with
+        | Some(_, sz, al) -> sprintf "union<%s> (size=%d, align=%d)" cs sz al
+        | None -> sprintf "union<%s> (unsettled)" cs
+    | Fidelity.PSG.ValueRepresentation.Tag cases -> sprintf "tag<%d>" cases
+
+/// Total deterministic type description for diagnostics (never throws or uses %A)
+let rec describeType (ty: MLIRType) : string =
+    match ty with
+    | TInt (IntWidth bits) ->
+        if bits > 0 then sprintf "i%d" bits else sprintf "i<unresolved:%d>" bits
+    | TFloat width -> floatWidthToString width
+    | TFunc (paramTypes, resultTypes) ->
+        let paramStrs = paramTypes |> List.map describeType |> String.concat ", "
+        let resultStrs = resultTypes |> List.map describeType |> String.concat ", "
+        sprintf "(%s) -> (%s)" paramStrs resultStrs
+    | TMemRef elemTy -> sprintf "memref<?x%s>" (describeType elemTy)
+    | TMemRefStatic (size, elemTy) -> sprintf "memref<%dx%s>" size (describeType elemTy)
+    | TMemRefScalar elemTy -> sprintf "memref<%s>" (describeType elemTy)
+    | TVector (count, elemTy) -> sprintf "vector<%dx%s>" count (describeType elemTy)
+    | TIndex -> "index"
+    | TVoid -> "void"
+    | TStruct (fields, Some bytes) ->
+        let fieldStrs = fields |> List.map (fun (n, t) -> sprintf "%s: %s" n (describeType t)) |> String.concat "; "
+        sprintf "struct<%s> (size=%d, align=%d)" fieldStrs bytes.Size bytes.Align
+    | TStruct (fields, None) ->
+        let fieldStrs = fields |> List.map (fun (n, t) -> sprintf "%s: %s" n (describeType t)) |> String.concat "; "
+        sprintf "struct<%s> (unsettled)" fieldStrs
+    | TSeqClock -> "!seq.clock"
+    | TTag caseCount -> sprintf "tag<%d>" caseCount
+    | TOpaqueHandle (handleType, bits, alignment) ->
+        sprintf "opaque<%s, %d-bit, align=%d>" (describeTypeIdentity handleType) bits alignment
+    | TResourceOption representation ->
+        sprintf "resource-option<%s>" (describeValueRepresentation representation)
+
+let describeTypeList (tys: MLIRType list) : string =
+    tys |> List.map describeType |> String.concat ", " |> sprintf "[%s]"
+
+let describeVisibility (visibility: FuncVisibility) : string =
+    match visibility with
+    | Public -> "public"
+    | Private -> "private"
+
+let describeByvalParams (byvalParams: ByvalParam list) : string =
+    byvalParams
+    |> List.map (fun p -> sprintf "param[%d](size=%d, align=%d)" p.ParamIndex p.SizeBytes p.AlignBytes)
+    |> String.concat ", "
+    |> sprintf "[%s]"
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SSA SERIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════
@@ -498,7 +628,7 @@ let memrefOpToString (pointer: Result<int, string>) (op: MemRefOp) : string =
         let elemType =
             match sourceType with
             | TMemRef t | TMemRefStatic (_, t) | TMemRefScalar t -> t
-            | t -> failwithf "memref.subview: Alex emission did not supply a memref source for SSA %s: the source is typed %A" (ssaToString result) t
+            | t -> failwithf "memref.subview: Alex emission did not supply a memref source for SSA %s: the source is typed %s" (ssaToString result) (describeType t)
         let elemStr = typeToString pointer elemType
         let sizeStr =
             match sizes with
@@ -766,6 +896,17 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
             (typeToString pointer source.Type)
             (typeToString pointer result.Type)
     | MLIROp.GlobalArray(name, memrefType, authority) ->
+        let describeNativeLiteral = function
+            | Fidelity.PSG.NativeLiteral.Int(value, _) -> sprintf "Int(%d)" value
+            | Fidelity.PSG.NativeLiteral.UInt(value, _) -> sprintf "UInt(%u)" value
+            | Fidelity.PSG.NativeLiteral.Float(value, _) -> sprintf "Float(%.17g)" value
+            | Fidelity.PSG.NativeLiteral.String content -> sprintf "String(len=%d)" (String.length content)
+            | Fidelity.PSG.NativeLiteral.Bool value -> sprintf "Bool(%b)" value
+            | Fidelity.PSG.NativeLiteral.Char value -> sprintf "Char(0x%04x)" (int value)
+            | Fidelity.PSG.NativeLiteral.Unit -> "Unit"
+            | Fidelity.PSG.NativeLiteral.Decimal value -> sprintf "Decimal(%M)" value
+            | Fidelity.PSG.NativeLiteral.ByteArray bytes -> sprintf "ByteArray(len=%d)" (Array.length bytes)
+            | Fidelity.PSG.NativeLiteral.UInt16Array words -> sprintf "UInt16Array(len=%d)" (Array.length words)
         let values =
             authority.Initializers |> Option.defaultWith (fun () -> invalidOp "Immutable array lacks its source-published initializer.")
             |> List.map (function
@@ -776,10 +917,37 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
                 | Fidelity.PSG.NativeLiteral.Float(value, _) when value > -infinity && value < infinity ->
                     let text = sprintf "%.17g" value
                     if text |> String.exists (fun c -> c = '.' || c = 'E' || c = 'e') then text else text + ".0"
-                | other -> invalidOp (sprintf "Unsupported published array initializer: %A" other))
+                | other -> invalidOp (sprintf "Unsupported published array initializer: %s" (describeNativeLiteral other)))
         sprintf "memref.global \"private\" constant @%s : %s = dense<[%s]> {alignment = %d : i64}"
             name (typeToString pointer memrefType) (String.concat ", " values) authority.Alignment
     | MLIROp.IndexOp iop ->
+        let describeIndexOp = function
+            | IndexOp.IndexConst(r, v) -> sprintf "index.constant %s = %d" (ssaToString r) v
+            | IndexOp.IndexBoolConst(r, v) -> sprintf "index.bool_constant %s = %b" (ssaToString r) v
+            | IndexOp.IndexAdd(r, l, x) -> sprintf "index.add %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexSub(r, l, x) -> sprintf "index.sub %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexMul(r, l, x) -> sprintf "index.mul %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexDivS(r, l, x) -> sprintf "index.divs %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexDivU(r, l, x) -> sprintf "index.divu %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexCeilDivS(r, l, x) -> sprintf "index.ceildivs %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexCeilDivU(r, l, x) -> sprintf "index.ceildivu %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexFloorDivS(r, l, x) -> sprintf "index.floordivs %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexRemS(r, l, x) -> sprintf "index.rems %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexRemU(r, l, x) -> sprintf "index.remu %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexMaxS(r, l, x) -> sprintf "index.maxs %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexMaxU(r, l, x) -> sprintf "index.maxu %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexMinS(r, l, x) -> sprintf "index.mins %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexMinU(r, l, x) -> sprintf "index.minu %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexShl(r, l, x) -> sprintf "index.shl %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexShrS(r, l, x) -> sprintf "index.shrs %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexShrU(r, l, x) -> sprintf "index.shru %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexAnd(r, l, x) -> sprintf "index.and %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexOr(r, l, x) -> sprintf "index.or %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexXor(r, l, x) -> sprintf "index.xor %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexCmp(r, _, l, x) -> sprintf "index.cmp %s = (%s, %s)" (ssaToString r) (ssaToString l) (ssaToString x)
+            | IndexOp.IndexCastS(r, o, src, dst) -> sprintf "index.casts %s = %s : %s -> %s" (ssaToString r) (ssaToString o) (describeType src) (describeType dst)
+            | IndexOp.IndexCastU(r, o, src, dst) -> sprintf "index.castu %s = %s : %s -> %s" (ssaToString r) (ssaToString o) (describeType src) (describeType dst)
+            | IndexOp.IndexSizeOf(r, ty) -> sprintf "index.sizeof %s : %s" (ssaToString r) (describeType ty)
         match iop with
         | IndexOp.IndexConst (result, value) ->
             sprintf "%s = arith.constant %d : index" (ssaToString result) value
@@ -804,7 +972,7 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
         | IndexOp.IndexMul (result, lhs, rhs) ->
             sprintf "%s = index.mul %s, %s" (ssaToString result) (ssaToString lhs) (ssaToString rhs)
         | _ ->
-            failwithf "backend (MLIR text) has no serialization for the index operation %A; it was emitted without one and is never written as a comment" iop
+            failwithf "backend (MLIR text) has no serialization for the index operation %s; it was emitted without one and is never written as a comment" (describeIndexOp iop)
     | MLIROp.Assert (condition, message) ->
         sprintf "cf.assert %s, \"%s\"" (ssaToString condition) (stringAttributeValue message)
     | MLIROp.SCFOp scfOp ->
@@ -847,7 +1015,44 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
     | MLIROp.RawMLIR text -> portableText text
     | _ ->
         // Block and Region have no text form here: reaching one is a stop, never a comment.
-        failwithf "backend (MLIR text) has no serialization for the operation %A; it was emitted without one and is never written as a comment" op
+        failwithf "backend (MLIR text) has no serialization for the operation %s; it was emitted without one and is never written as a comment" (describeMLIROp op)
+
+and private describeMLIROp = function
+    | MLIROp.EmptyBuffer(site, _) -> sprintf "EmptyBuffer(node %d)" (nodeIdValue site)
+    | MLIROp.Utf8Validate(site, _, _) -> sprintf "Utf8Validate(node %d)" (nodeIdValue site)
+    | MLIROp.Utf8SnapshotRetire(site, _) -> sprintf "Utf8SnapshotRetire(node %d)" (nodeIdValue site)
+    | MLIROp.ResourceImport _ -> "ResourceImport"
+    | MLIROp.ResourceCall(site, _, _) -> sprintf "ResourceCall(node %d)" (nodeIdValue site)
+    | MLIROp.ResourceOptionTag(site, _, _) -> sprintf "ResourceOptionTag(node %d)" (nodeIdValue site)
+    | MLIROp.ResourceOptionPayload(site, _, _) -> sprintf "ResourceOptionPayload(node %d)" (nodeIdValue site)
+    | MLIROp.ResourceAlias(site, _) -> sprintf "ResourceAlias(node %d)" (nodeIdValue site)
+    | MLIROp.WritableBufferCall(site, _, _) -> sprintf "WritableBufferCall(node %d)" (nodeIdValue site)
+    | MLIROp.OptionalEntryCall(site, _, _, _) -> sprintf "OptionalEntryCall(node %d)" (nodeIdValue site)
+    | MLIROp.BoundaryBufferCall(site, _, _, _, _) -> sprintf "BoundaryBufferCall(node %d)" (nodeIdValue site)
+    | MLIROp.MmioLoad(site, r, _, bits) -> sprintf "MmioLoad(node %d, %s, i%d)" (nodeIdValue site) (ssaToString r) bits
+    | MLIROp.MmioStore(site, v, _, bits) -> sprintf "MmioStore(node %d, %s, i%d)" (nodeIdValue site) (ssaToString v) bits
+    | MLIROp.MemRefOp _ -> "MemRefOp"
+    | MLIROp.ArithOp _ -> "ArithOp"
+    | MLIROp.SCFOp _ -> "SCFOp"
+    | MLIROp.Assert(cond, msg) -> sprintf "Assert(%s, %s)" (ssaToString cond) msg
+    | MLIROp.NoUnwindFunction _ -> "NoUnwindFunction"
+    | MLIROp.FuncOp _ -> "FuncOp"
+    | MLIROp.IndexOp _ -> "IndexOp"
+    | MLIROp.Block(label, ops) -> sprintf "Block(%s, %d ops)" label ops.Length
+    | MLIROp.Region blocks -> sprintf "Region(%d blocks)" blocks.Length
+    | MLIROp.SpatialModule _ -> "SpatialModule"
+    | MLIROp.GlobalString(name, _, len, _) -> sprintf "GlobalString(%s, len=%d)" name len
+    | MLIROp.GlobalBytePool(name, bytes, _, _) -> sprintf "GlobalBytePool(%s, len=%d)" name bytes.Length
+    | MLIROp.GlobalMemref(name, ty, _) -> sprintf "GlobalMemref(%s : %s)" name (describeType ty)
+    | MLIROp.NativeEntrySlotDecl(name, _, entry, ty) -> sprintf "NativeEntrySlotDecl(%s, node %d : %s)" name (nodeIdValue entry) (describeType ty)
+    | MLIROp.NativeEntrySlotStore(_, entry, dst, _) -> sprintf "NativeEntrySlotStore(node %d, %s)" (nodeIdValue entry) (ssaToString dst.SSA)
+    | MLIROp.NativeEntrySlotLoad(_, entry, src, _) -> sprintf "NativeEntrySlotLoad(node %d, %s)" (nodeIdValue entry) (ssaToString src.SSA)
+    | MLIROp.GlobalArray(name, ty, _) -> sprintf "GlobalArray(%s : %s)" name (describeType ty)
+    | MLIROp.CombOp _ -> "CombOp"
+    | MLIROp.HWOp _ -> "HWOp"
+    | MLIROp.SeqOp _ -> "SeqOp"
+    | MLIROp.SMTOp _ -> "SMTOp"
+    | MLIROp.RawMLIR _ -> "RawMLIR"
 
 /// Serialize a list of operations with proper indentation
 /// Serialize one op; a width failure inside it is re-raised naming the op, so that the
@@ -855,9 +1060,7 @@ and private leafToString (pointer: Result<int, string>) (op: MLIROp) : string =
 let private opToStringNamed (pointer: Result<int, string>) (op: MLIROp) : string =
     try opToString pointer op |> portableText
     with Failure message when Alex.Text.startsWith "Width inference failure" message ->
-        let rendered = sprintf "%A" op
-        let shown = if String.length rendered > 400 then String.init 400 (fun i -> string rendered[i]) + " ..." else rendered
-        failwith (message + "\nWhile serialising: " + shown)
+        failwith (message + "\nWhile serialising: " + describeMLIROp op)
 
 let opsToString (pointer: Result<int, string>) (ops: MLIROp list) (indent: string) : string =
     ops

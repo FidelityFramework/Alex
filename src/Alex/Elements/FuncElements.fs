@@ -55,9 +55,6 @@ let boundaryScalarType = BoundaryAbi.scalarType
 let publishedFuncDecl (declaration: BoundaryImport) : MLIROp =
     MLIROp.FuncOp (FuncOp.BoundaryFuncDecl(declaration, BoundaryAbi.parameters declaration, BoundaryAbi.results declaration))
 
-let publishedFuncDeclIn boundary (declaration: BoundaryImport) : MLIROp =
-    MLIROp.FuncOp (FuncOp.BoundaryFuncDecl(declaration, BoundaryAbi.parametersIn boundary declaration, BoundaryAbi.resultsIn boundary declaration))
-
 let publishedIntrinsicWriteDecl (declaration: IntrinsicWriteImport) : MLIROp =
     MLIROp.FuncOp (FuncOp.IntrinsicWriteDecl declaration)
 
@@ -71,7 +68,8 @@ let pFuncDeclResults (name: string) (argTypes: MLIRType list) (resultTypes: MLIR
                   (visibility: FuncVisibility) : PSGParser<MLIROp> =
     parser {
         do! pResultTypes resultTypes
-        return! fail (Message (sprintf "External declaration '%s' requires a source-published module import ABI (%A -> %A, %A); nested declaration repair is retired" name argTypes resultTypes visibility))
+        return! fail (Message (sprintf "External declaration '%s' requires a source-published module import ABI (%s -> %s, %s); nested declaration repair is retired"
+            name (Alex.Dialects.Core.Serialize.describeTypeList argTypes) (Alex.Dialects.Core.Serialize.describeTypeList resultTypes) (Alex.Dialects.Core.Serialize.describeVisibility visibility)))
     }
 
 let pFuncDecl name argTypes retTy visibility =
@@ -81,7 +79,8 @@ let pFuncDeclByvalResults (name: string) (argTypes: MLIRType list) (resultTypes:
                        (visibility: FuncVisibility) (byvalParams: ByvalParam list) : PSGParser<MLIROp> =
     parser {
         do! pResultTypes resultTypes
-        return! fail (Message (sprintf "External declaration '%s' requires a source-published module import ABI (%A -> %A, %A, %A); nested declaration repair is retired" name argTypes resultTypes visibility byvalParams))
+        return! fail (Message (sprintf "External declaration '%s' requires a source-published module import ABI (%s -> %s, %s, %s); nested declaration repair is retired"
+            name (Alex.Dialects.Core.Serialize.describeTypeList argTypes) (Alex.Dialects.Core.Serialize.describeTypeList resultTypes) (Alex.Dialects.Core.Serialize.describeVisibility visibility) (Alex.Dialects.Core.Serialize.describeByvalParams byvalParams)))
     }
 
 let pFuncDeclByval name argTypes retTy visibility byvalParams =

@@ -9,7 +9,6 @@ open XParsec.Parsers     // getUserState
 open XParsec.Combinators // parser { }
 open Alex.XParsec.PSGCombinators
 open Alex.Dialects.Core.Types
-open Fidelity.PSG
 
 // All Elements use XParsec state for platform/type context
 

@@ -69,6 +69,9 @@ type PSGParserState = {
     CurrentDepth: int
 }
 
+/// Expose the active PSG node's integer identity without surfacing Fidelity.PSG node types to Elements.
+let currentNodeIdValue (state: PSGParserState) : int = NodeId.value state.Current.Id
+
 // ═══════════════════════════════════════════════════════════════════════════
 // PSG PARSER TYPE (5 type parameters - using XParsec's Parser directly)
 // ═══════════════════════════════════════════════════════════════════════════

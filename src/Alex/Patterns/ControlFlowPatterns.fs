@@ -423,7 +423,6 @@ let private pBuildMultipleMatchElimination
                 // result SSA per nested (inner) scf.if. Inner ifs live in the else regions of the
                 // outer ones, so each level needs its own result name and each else region must
                 // terminate with a yield of that level's result.
-                let mutable ssaOffset = tagExtractEnd
                 let (lastArmOps, _, _) = arms.[numArms - 1]
                 let innerResultBase = tagExtractEnd + 2 * (numArms - 1)
                 let levelResultSSA (i: int) =
@@ -446,10 +445,10 @@ let private pBuildMultipleMatchElimination
                     List.foldBack (fun i currentElseOps ->
                         let (armOps, _, _) = arms.[i]
                         let tagIndex = tagValues.[i]
+                        let ssaOffset = tagExtractEnd + 2 * (numArms - 2 - i)
 
                         let tagLitSSA = allSSAs.[ssaOffset]
                         let cmpSSA = allSSAs.[ssaOffset + 1]
-                        ssaOffset <- ssaOffset + 2
 
                         let tagLitOp = MLIROp.ArithOp (ArithOp.ConstI (tagLitSSA, (NumericLiteralI.FromString (string tagIndex)), tagTy))
                         let cmpOp = MLIROp.ArithOp (ArithOp.CmpI (cmpSSA, ICmpPred.Eq, tagSSA, tagLitSSA, tagTy))
