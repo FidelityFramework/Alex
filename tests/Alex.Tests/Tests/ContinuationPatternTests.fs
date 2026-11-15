@@ -110,7 +110,7 @@ let ``scalar and captured-cell frame access serialize typed descriptors`` descri
     let functionOp = MLIROp.FuncOp(FuncOp.FuncDef("frame_component",
         [Arg 0, TMemRefStatic(64, TInt(IntWidth 8)); Arg 1, TInt(IntWidth 1)], [value.Type],
         operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "frame_component" [functionOp]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "frame_component" [functionOp] |> Result.defaultWith failwith
     Assert.Contains("memref.store", text)
     if descriptor then
         Assert.Contains("memref<1xmemref<1xi1>>", text)
@@ -156,7 +156,7 @@ let ``frame borrow preserves the existing scalar cell without copying its payloa
         Assert.DoesNotContain(operations, function MLIROp.MemRefOp(MemRefOp.Load _ | MemRefOp.Alloca _) -> true | _ -> false)
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("borrow_component", [Arg 0, TMemRefStatic(64, TInt(IntWidth 8))], [value.Type],
             operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
-        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "borrow_component" [definition]
+        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "borrow_component" [definition] |> Result.defaultWith failwith
         Assert.Contains("memref.view", text)
         Assert.DoesNotContain("unrealized_conversion_cast", text)
     | other -> failwithf "Settled cell borrow failed: %A" other
@@ -189,7 +189,7 @@ let ``buffer-valued frame slot retains its descriptor through a static-to-dynami
     Assert.Equal(TMemRef(TInt(IntWidth 1)), result.Type)
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("buffer_component", [Arg 0, TMemRefStatic(64, TInt(IntWidth 8)); Arg 1, actual], [result.Type],
         writing @ reading @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))], FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "buffer_component" [definition]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "buffer_component" [definition] |> Result.defaultWith failwith
     Assert.Contains("memref.cast", text)
     Assert.Contains("memref<1xmemref<?xi1>>", text)
     Assert.DoesNotContain("unrealized_conversion_cast", text)
@@ -227,7 +227,7 @@ let ``continuation dispatch uses the selector range without changing the graph``
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("dispatch_component",
             [Arg 0, TInt(IntWidth 8); Arg 1, TInt(IntWidth 1); Arg 2, TInt(IntWidth 1)], [value.Type],
             operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
-        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "dispatch_component" [definition]
+        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "dispatch_component" [definition] |> Result.defaultWith failwith
         Assert.Contains((if unsigned then "index.castu" else "index.casts"), text)
         Assert.Contains("scf.index_switch", text)
     | other -> failwithf "Settled dispatch failed: %A" other
@@ -304,7 +304,7 @@ let ``fresh enumerators allocate distinct state and copy complete capture descri
     Assert.DoesNotContain(8I, offsets) // The current field is neither read nor copied.
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("enumerator_component", [Arg 0, TMemRefStatic(1, TInt(IntWidth 1))], [result.Type],
         operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))], FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "enumerator_component" [definition]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "enumerator_component" [definition] |> Result.defaultWith failwith
     Assert.Contains("memref<1xmemref<1xi1>>", text)
     Assert.DoesNotContain("unrealized_conversion_cast", text)
 
@@ -400,7 +400,7 @@ let ``dispatch witness pulls declared child positions or identifies a missing ch
         Assert.Equal<Set<NodeId>>(Set.ofList [selector.Id; left.Id; right.Id], visited.Value)
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("dispatch_witness", [], [value.Type],
             output.InlineOps @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
-        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "dispatch_witness" [definition]
+        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "dispatch_witness" [definition] |> Result.defaultWith failwith
         Assert.Contains("scf.index_switch", text)
         Assert.Contains("case 0", text)
     | other -> failwithf "Unexpected dispatch witness result: %A" other
@@ -423,7 +423,7 @@ let ``empty activation storage has zero extent and admits no slot access`` () =
     let resultType = TInt(IntWidth 32)
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("empty_activation", [], [resultType],
         operations @ [MLIROp.ArithOp(ArithOp.ConstI(zero, 0I, resultType)); MLIROp.FuncOp(FuncOp.Return([{ SSA = zero; Type = resultType }]))], FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "empty_activation" [definition]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "empty_activation" [definition] |> Result.defaultWith failwith
     Assert.Contains("memref<0xi8>", text)
     MLIRAccumulator.bindNode allocation.Id value.SSA value.Type operands
     let impossible: ContinuationSlot =
@@ -466,7 +466,7 @@ let ``factory constructor initializes its supplied destination without allocatin
         Assert.DoesNotContain(operations, function MLIROp.MemRefOp(MemRefOp.Alloca _ | MemRefOp.AllocStatic _) -> true | _ -> false)
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("factory_component", [Arg 0, TMemRefStatic(1, TInt(IntWidth 1)); Arg 1, frameType], [value.Type],
             operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))], FuncVisibility.Public))
-        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "factory_component" [definition]
+        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "factory_component" [definition] |> Result.defaultWith failwith
         Assert.Contains("memref.store", text)
         Assert.DoesNotContain("memref.alloc", text)
     | other -> failwithf "Unexpected supplied-destination result: %A" other
@@ -517,7 +517,7 @@ let private ownedRegionFixture () =
         Zipper.create graph owner.Id |> require "Missing owned region fixture"
         |> atChild generator.Id |> atChild body.Id
     // A formal has an assigned argument before any source read witnesses it.
-    let assigned = Alex.Traversal.Values.resultOf (coeffects 64).TargetPlatform graph [generator.Id] formal.Id
+    let assigned = Alex.Traversal.Values.resultOf (coeffects 64).TargetPlatform graph [generator.Id] formal.Id |> Result.defaultWith failwith
     MLIRAccumulator.registerSSAType assigned (TMemRefStatic(parent.Bytes, TInt(IntWidth 8))) operands
     position, child, first, second, assigned, operands
 
@@ -542,7 +542,7 @@ let ``owned child sites view distinct settled parent regions without allocating`
     Assert.NotEqual(one.SSA, two.SSA)
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("owned_regions_component", [parentSSA, TMemRefStatic(128, TInt(IntWidth 8))], [two.Type],
         firstOps @ secondOps @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = two.SSA; Type = two.Type }]))], FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "owned_regions_component" [definition]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "owned_regions_component" [definition] |> Result.defaultWith failwith
     Assert.DoesNotContain("memref.alloc", text)
     Assert.DoesNotContain("memref.load", text)
 

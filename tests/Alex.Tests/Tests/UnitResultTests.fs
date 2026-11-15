@@ -155,6 +155,6 @@ let ``effectful unit conditional serializes its branches and unit value`` () =
     let parameters = [Arg 0, TInt(IntWidth 1); Arg 1, cellType; Arg 2, unitType; Arg 3, unitType; Arg 4, TIndex]
     let body = operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))]
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("unit_effects", parameters, [result.Type], body, FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "unit_component" [definition]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "unit_component" [definition] |> Result.defaultWith failwith
     Assert.Contains("scf.if", text)
     Assert.Contains("arith.constant 0 : i32", text)

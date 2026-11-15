@@ -28,7 +28,10 @@ let private witnessRecordCore (ctx: WitnessContext) (node: SemanticNode) : Witne
     | Some ((fields, copyFrom), _) ->
         // RecordExpr: field value nodes are already walked in post-order.
         // Recall each field value SSA from accumulator.
-        let structTy = mapTypeAt node.Id ctx
+        match mapTypeAt node.Id ctx with
+        | Result.Error err ->
+            WitnessOutput.error $"RecordExpr: {err}"
+        | Result.Ok structTy ->
 
         let componentRows = Components.hasRows ctx.Graph node.Id
         let dataFields = fields |> List.filter (fun (name, value) -> not (Components.recordInputIsCallable ctx.Graph node.Id name value))
@@ -71,7 +74,10 @@ let private witnessRecordCore (ctx: WitnessContext) (node: SemanticNode) : Witne
         match node.Kind with
         | SemanticKind.TupleExpr elements ->
             // Map tuple type to TStruct with Item1, Item2, ... fields
-            let structTy = mapTypeAt node.Id ctx
+            match mapTypeAt node.Id ctx with
+            | Result.Error err ->
+                WitnessOutput.error $"TupleExpr: {err}"
+            | Result.Ok structTy ->
 
             // Recall each element's SSA from the accumulator (children already walked in post-order)
             let fieldValues =

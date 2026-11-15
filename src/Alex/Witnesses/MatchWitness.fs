@@ -55,7 +55,8 @@ let private terminalAdmitted (ctx: WitnessContext) (node: SemanticNode) arms : R
             projection.PatternRequirements.TryFind node.Id |> Option.bind projection.Requirements.TryFind
         match requirement, ctx.Zipper.Path with
         | Some contract, step :: _ ->
-            Result.Ok (
+            mapTypeAt contract.Site ctx
+            |> Result.map (fun expectedTy ->
                 step.Parent = contract.Frontier && step.Port = OccurrencePort.StructuralChild
                 && step.Ordinal = 1 && step.Extent = 2
                 && (ctx.Graph.SourceReadings.Ports.TryFind (step.Parent, step.Port)
@@ -65,7 +66,7 @@ let private terminalAdmitted (ctx: WitnessContext) (node: SemanticNode) arms : R
                         && account.Positions.TryFind 1 = Some node.Id))
                 && Set.contains contract.Site ctx.TraversalVisited.Value
                 && (MLIRAccumulator.recallNode contract.Site ctx.Accumulator |> Option.exists (fun (_, ty) ->
-                    ty = mapTypeAt contract.Site ctx)))
+                    ty = expectedTy)))
         | _ -> Result.Ok false
     | _ -> Result.Ok true
 
@@ -119,13 +120,14 @@ let private witnessMatchWith (getCombinator: unit -> (WitnessContext -> Semantic
             let result =
                 if isUnit then Result.Ok None
                 else
-                    let resultType = mapTypeAt node.Id ctx
-                    match tryMatchWithDiagnostics (getNodeSSAs node.Id) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok (ssa :: _, _) -> Result.Ok (Some (ssa, resultType))
-                    | Result.Ok ([], _) ->
-                        Result.Error $"PSG settlement (SSA assignment) did not settle a result value for expression-valued CaseElimination node {NodeId.value node.Id}"
-                    | Result.Error reason ->
-                        Result.Error $"PSG settlement (SSA assignment) did not settle a result value for expression-valued CaseElimination node {NodeId.value node.Id}: {reason}"
+                    mapTypeAt node.Id ctx
+                    |> Result.bind (fun resultType ->
+                        match tryMatchWithDiagnostics (getNodeSSAs node.Id) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok (ssa :: _, _) -> Result.Ok (Some (ssa, resultType))
+                        | Result.Ok ([], _) ->
+                            Result.Error $"PSG settlement (SSA assignment) did not settle a result value for expression-valued CaseElimination node {NodeId.value node.Id}"
+                        | Result.Error reason ->
+                            Result.Error $"PSG settlement (SSA assignment) did not settle a result value for expression-valued CaseElimination node {NodeId.value node.Id}: {reason}")
 
             match result with
             | Result.Error reason ->

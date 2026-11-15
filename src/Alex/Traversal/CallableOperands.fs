@@ -28,7 +28,7 @@ let hasUnitResult (graph: Revision) body =
     graph.Emission.Numeric.OccurrenceRepresentations.TryFind body = Some(Result.Ok(ValueRepresentation.Scalar SettledSlot.Unit))
 
 let isUnitResultToken (graph: Revision) body (_, actualType) =
-    hasUnitResult graph body && actualType = Alex.CodeGeneration.TypeMapping.representationType (ValueRepresentation.Scalar SettledSlot.Unit)
+    hasUnitResult graph body && Result.Ok actualType = Alex.CodeGeneration.TypeMapping.representationType (ValueRepresentation.Scalar SettledSlot.Unit)
 
 /// The sole logical unit formal is retained by the declaration and omitted only
 /// from its exact source-published native convention.
@@ -217,10 +217,8 @@ and private componentsSeen (ctx: WitnessContext) seen permitted value : Result<M
             | Some(Result.Error reason) ->
                 Result.Error (sprintf "Callable signature data participant %d has an unresolved source-published physical representation: %s" (NodeId.value id) reason)
             | Some(Result.Ok _) ->
-                try
-                    let ty = mapTypeAt id ctx
-                    Result.Ok(if ty = TVoid then [] else [ty])
-                with ex -> Result.Error (Alex.Text.exceptionMessage ex)
+                mapTypeAt id ctx
+                |> Result.map (fun ty -> if ty = TVoid then [] else [ty])
 
 let project ctx occurrence = projectSeen ctx Set.empty occurrence
 let components ctx value = componentsSeen ctx Set.empty (fun _ -> false) value
@@ -358,13 +356,6 @@ let thunkDeclaration (ctx: WitnessContext) implementation =
         | Result.Error reason ->
             Result.Error (sprintf "Baker lazy thunk settlement did not settle the physical boundary of declaration %d: %s" (NodeId.value implementation) reason)
     | _ -> Result.Ok None
-
-/// Option view for callers without a diagnostic channel. A thunk that owns the
-/// declaration but cannot be projected raises its located reason.
-let tryThunkDeclaration (ctx: WitnessContext) implementation =
-    match thunkDeclaration ctx implementation with
-    | Result.Ok declaration -> declaration
-    | Result.Error reason -> invalidOp reason
 
 /// The caller supplies values it actually witnessed at this occurrence. Equal
 /// implementation identities never justify replacing the environment operand.

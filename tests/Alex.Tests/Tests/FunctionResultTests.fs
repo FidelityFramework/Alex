@@ -53,7 +53,7 @@ let ``separate code and environment returns survive direct and indirect calls`` 
          MLIROp.ArithOp(ArithOp.AddI(total.SSA, first.SSA, second.SSA, integer))]
     let consumer = definition pointerBits "consume_callable_results" [env.SSA, env.Type; argument.SSA, argument.Type] body [total]
     let operations = [implementation; factory; codeIdentity; consumer]
-    let source = Alex.Dialects.Core.Serialize.moduleToString (Ok pointerBits) "function_results" operations
+    let source = Alex.Dialects.Core.Serialize.moduleToString (Ok pointerBits) "function_results" operations |> Result.defaultWith failwith
     Assert.Contains("func.call @make_callable", source)
     Assert.Contains("call_indirect", source)
     Assert.Contains("return", source)
@@ -66,13 +66,14 @@ let ``module declaration preserves result lists in nounwind calls`` () =
                       [f (FuncOp.FuncCall(returned, "foreign_callable", [value (Arg 0) environment])); f (FuncOp.Return returned)], FuncVisibility.Public))
     let collected = [declaration; wrapper]
     Assert.Equal(declaration, collected.Head)
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "nounwind_results" collected
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "nounwind_results" collected |> Result.defaultWith failwith
     Assert.Contains("@foreign_callable", text)
 
 [<Fact>]
 let ``function code SSA has no implicit packed storage size`` () =
-    let error = Assert.Throws<System.Exception>(fun () -> mlirTypeSizeWith (Ok 64) callback |> ignore)
-    Assert.Contains("no admitted data-storage layout", error.Message)
+    match mlirTypeSizeWith (Ok 64) callback with
+    | Result.Error msg -> Assert.Contains("no admitted data-storage layout", msg)
+    | Result.Ok _ -> failwith "Function code SSA should have no implicit packed storage size"
 
 [<Theory>]
 [<InlineData(false)>]

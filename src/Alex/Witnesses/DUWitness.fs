@@ -69,16 +69,19 @@ let private witnessDUCore (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
     | Some ((duValueId, caseIndex, _caseName, _), _) ->
         match MLIRAccumulator.recallNode duValueId ctx.Accumulator with
         | Some (duSSA, duType) ->
-            let unionIdentity = sourceTypeAt ctx.Graph duValueId
-            let payloadType = mapTypeAt node.Id ctx
-            let pattern =
-                match duType with
-                | TResourceOption _ ->
-                    Alex.Patterns.MemoryPatterns.pResourceOptionRead node.Id duValueId { SSA = duSSA; Type = duType } (Some caseIndex)
-                | _ -> pBuildDUEliminate node.Id duSSA duType unionIdentity payloadType
-            match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-            | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-            | Result.Error diagnostic ->
+            match sourceTypeAt ctx.Graph duValueId, mapTypeAt node.Id ctx with
+            | Result.Ok unionIdentity, Result.Ok payloadType ->
+                let pattern =
+                    match duType with
+                    | TResourceOption _ ->
+                        Alex.Patterns.MemoryPatterns.pResourceOptionRead node.Id duValueId { SSA = duSSA; Type = duType } (Some caseIndex)
+                    | _ -> pBuildDUEliminate node.Id duSSA duType unionIdentity payloadType
+                match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                | Result.Error diagnostic ->
+                    WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "DU") (Some "DUEliminate")
+                        (sprintf "DUEliminate case %d: %s" caseIndex diagnostic)
+            | Result.Error diagnostic, _ | _, Result.Error diagnostic ->
                 WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "DU") (Some "DUEliminate")
                     (sprintf "DUEliminate case %d: %s" caseIndex diagnostic)
         | None ->
@@ -99,27 +102,32 @@ let private witnessDUCore (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
             | Some payloadId ->
                 match MLIRAccumulator.recallNode payloadId ctx.Accumulator with
                 | Some (ssa, ty) ->
-                    let (ops, adapted, adaptedTy) = adaptOperand ctx.Coeffects ctx.Graph node.Id payloadId ssa ty
-                    Result.Ok (ops, [{ SSA = adapted; Type = adaptedTy }])
-                | None -> Result.Error payloadId
+                    match adaptOperand ctx.Coeffects ctx.Graph node.Id payloadId ssa ty with
+                    | Result.Ok (ops, adapted, adaptedTy) -> Result.Ok (ops, [{ SSA = adapted; Type = adaptedTy }])
+                    | Result.Error reason -> Result.Error (Choice2Of2 reason)
+                | None -> Result.Error (Choice1Of2 payloadId)
             | None -> Result.Ok ([], [])
 
         match payloadReading with
-        | Result.Error payloadId ->
+        | Result.Error (Choice1Of2 payloadId) ->
             WitnessOutput.errorCoded AX2001 (Some node.Id) (Some "DU") (Some "DUConstruct")
                 (sprintf "PSG settlement did not witness the payload of DUConstruct %d case %d: payload node %d has no witnessed value"
                     (NodeId.value node.Id) caseIndex (NodeId.value payloadId))
+        | Result.Error (Choice2Of2 reason) ->
+            WitnessOutput.error $"DUConstruct: {reason}"
         | Result.Ok (meetOps, payload) ->
 
-        let duTy = mapTypeAt node.Id ctx
-
-        let construction = pBuildDUConstruct node.Id tag payload duTy
-        let construction =
-            if Components.hasRows ctx.Graph node.Id then Components.pWithConstruction ctx node.Id node.Kind construction
-            else construction
-        match tryMatchWithDiagnostics construction ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-        | Result.Ok ((ops, result), _) -> { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
-        | Result.Error diagnostic -> WitnessOutput.error $"DUConstruct: {diagnostic}"
+        match mapTypeAt node.Id ctx with
+        | Result.Error err ->
+            WitnessOutput.error $"DUConstruct: {err}"
+        | Result.Ok duTy ->
+            let construction = pBuildDUConstruct node.Id tag payload duTy
+            let construction =
+                if Components.hasRows ctx.Graph node.Id then Components.pWithConstruction ctx node.Id node.Kind construction
+                else construction
+            match tryMatchWithDiagnostics construction ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+            | Result.Ok ((ops, result), _) -> { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
+            | Result.Error diagnostic -> WitnessOutput.error $"DUConstruct: {diagnostic}"
 
     | None -> WitnessOutput.skip
 

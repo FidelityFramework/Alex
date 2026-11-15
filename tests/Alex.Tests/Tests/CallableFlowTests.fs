@@ -139,7 +139,7 @@ let ``ordinary multi-target formal forwards its actual code operand through a ve
     let body = [MLIROp.FuncOp(FuncOp.FuncCallIndirect([result], code.SSA, [{ SSA = Arg 1; Type = boolean }]))
                 MLIROp.FuncOp(FuncOp.Return [result])]
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("higher_order_flow", [Arg 0, code.Type; Arg 1, boolean], [boolean], body, FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok bits) "callable_flow" [definition]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok bits) "callable_flow" [definition] |> Result.defaultWith failwith
     Assert.Contains("call_indirect", text)
     Assert.DoesNotContain("unrealized_conversion_cast", text)
     Assert.DoesNotContain("memref", text)

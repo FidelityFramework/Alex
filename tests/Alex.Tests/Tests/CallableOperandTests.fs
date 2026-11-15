@@ -315,7 +315,7 @@ let ``callable component yields code and matching environment together through s
                       Arg 3, (Operands.code right).Type; Arg 4, (heldEnvironment right).Type; Arg 5, boolean]
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("callable_selection_component", parameters, [boolean],
                         operations @ [call; MLIROp.FuncOp(FuncOp.Return [result])], FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "callable_selection" [definition]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "callable_selection" [definition] |> Result.defaultWith failwith
     Assert.Contains("call_indirect", text)
     Assert.DoesNotContain("unrealized_conversion_cast", text)
     Assert.DoesNotContain("memref<2xindex>", text)

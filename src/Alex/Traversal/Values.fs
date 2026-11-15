@@ -59,26 +59,27 @@ let private callableFacts (graph: Revision) =
 /// classifying parameter/environment conventions belong to source settlement.
 /// Only the current emitted function supplies block arguments. A lexical outer
 /// formal requires its witnessed capture; it is never another local Arg value.
-let valuesOf (_platform: Alex.Target.TargetPlatform) (graph: Revision) (owners: NodeId list) (nodeId: NodeId) : SSA list =
+let valuesOf (_platform: Alex.Target.TargetPlatform) (graph: Revision) (owners: NodeId list) (nodeId: NodeId) : Result<SSA list, string> =
     let facts = callableFacts graph
     match facts.AliasTargets.TryFind nodeId with
-    | None -> invalidOp (sprintf "PSG settlement (WitnessEmission.Callable AliasTargets) did not settle an alias endpoint for source value %d" (NodeId.value nodeId))
+    | None -> Result.Error (sprintf "PSG settlement (WitnessEmission.Callable AliasTargets) did not settle an alias endpoint for source value %d" (NodeId.value nodeId))
     | Some target ->
         let components =
             owners |> List.tryHead |> Option.bind (fun owner -> facts.Arguments.TryFind owner |> Option.bind (Map.tryFind target))
         match components with
-        | Some ordinals -> List.map Arg ordinals
+        | Some ordinals -> Result.Ok (List.map Arg ordinals)
         | None when facts.Arguments.Values |> Seq.exists (Map.containsKey target) ->
-            invalidOp (sprintf "PSG settlement (WitnessEmission.Callable Arguments) did not settle an owner for source formal %d at this Huet occurrence (value %d)" (NodeId.value target) (NodeId.value nodeId))
-        | None -> values target
+            Result.Error (sprintf "PSG settlement (WitnessEmission.Callable Arguments) did not settle an owner for source formal %d at this Huet occurrence (value %d)" (NodeId.value target) (NodeId.value nodeId))
+        | None -> Result.Ok (values target)
 
 /// The result value of a node: the last of its values.
-let resultOf (platform: Alex.Target.TargetPlatform) (graph: Revision) (owners: NodeId list) (nodeId: NodeId) : SSA =
+let resultOf (platform: Alex.Target.TargetPlatform) (graph: Revision) (owners: NodeId list) (nodeId: NodeId) : Result<SSA, string> =
     match valuesOf platform graph owners nodeId with
-    | [] -> invalidOp (sprintf "PSG settlement (OrdinaryDemand) omitted formal %d, which has no physical operand to recall" (NodeId.value nodeId))
-    | [Arg ordinal] -> Arg ordinal
-    | Arg _ :: _ -> invalidOp (sprintf "Alex recalled multi-component formal %d as one value; all of its physical operands must be recalled" (NodeId.value nodeId))
-    | values -> List.last values
+    | Result.Error reason -> Result.Error reason
+    | Result.Ok [] -> Result.Error (sprintf "PSG settlement (OrdinaryDemand) omitted formal %d, which has no physical operand to recall" (NodeId.value nodeId))
+    | Result.Ok [Arg ordinal] -> Result.Ok (Arg ordinal)
+    | Result.Ok (Arg _ :: _) -> Result.Error (sprintf "Alex recalled multi-component formal %d as one value; all of its physical operands must be recalled" (NodeId.value nodeId))
+    | Result.Ok values -> Result.Ok (List.last values)
 
 /// A unit-typed body: the function returns no value and its return needs a zero constant.
 let isUnitTyped (graph: Revision) (nodeId: NodeId) : bool =

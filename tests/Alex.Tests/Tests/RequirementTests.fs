@@ -204,7 +204,7 @@ let ``a selected singleton returns its existing body carrier without an invented
         Assert.NotEqual(inventedJoin, value.SSA)
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("selected_body", [Arg 0, inputCarrier; Arg 1, value.Type],
             [value.Type], [MLIROp.FuncOp(FuncOp.Return [value])], FuncVisibility.Private))
-        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "selected_match" [definition]
+        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "selected_match" [definition] |> Result.defaultWith failwith
         Assert.Contains("return %arg1 : i1", text)
     | _, other -> failwithf "Selected body lost its carrier: %A" other
 
@@ -213,7 +213,7 @@ let ``portable requirement diagnostics preserve escaped UTF8 and embedded contro
     let message = "quoted \"message\" \\ newline\nUnicode λ 雪 NUL\000end"
     let declaration = MLIROp.FuncOp(FuncOp.FuncDef("diagnostic_bytes", [Arg 0, TInt(IntWidth 1)], [],
         [MLIROp.Assert(Arg 0, message); MLIROp.FuncOp(FuncOp.Return [])], FuncVisibility.Private))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "diagnostic_bytes" [declaration]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "diagnostic_bytes" [declaration] |> Result.defaultWith failwith
     Assert.Contains("\\22message\\22", text)
     Assert.Contains("\\CE\\BB", text)
     Assert.Contains("\\00end", text)

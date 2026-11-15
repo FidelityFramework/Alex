@@ -112,27 +112,35 @@ let private nativeAlternative (graph: Revision) (row: CallableAggregateValue)
         | Result.Ok(entry, _, nativeType) ->
             let lifetime = [entry.Lifetime.Module; entry.Lifetime.Binding; entry.Lifetime.Implementation] |> Set.ofList
             let heldLifetime = carrier.Lifetime |> List.filter (fun part -> part.Role = ParticipantRole.CallableLifetime) |> List.map _.Node |> Set.ofList
-            let arguments = contract.ParameterRepresentations |> List.map (snd >> representationType)
-            let result = representationType contract.ResultRepresentation
-            let receivingResults =
-                match Operands.closedNativeDefinition graph entry.Implementation with
-                | Result.Ok(Some(_, signature)) when signature.Result.IsNone &&
-                    TypeIdentity.isUnit contract.ResultType && contract.ResultRepresentation = ValueRepresentation.Scalar SettledSlot.Unit -> Result.Ok []
-                | Result.Ok(Some _) -> Result.Ok(if result = TVoid then [] else [result])
-                | Result.Ok None -> Result.Error "lacks its source-published closed implementation signature."
-                | Result.Error reason -> Result.Error reason
-            match receivingResults with
-            | Result.Error reason -> error reason
-            | Result.Ok receivingResults ->
-                let receivingType = TFunc(arguments, receivingResults)
-                if entry.Implementation <> carrier.Implementation || entry.Formals <> (carrier.Parameters |> List.map (fun (_, _, id) -> id)) ||
-                   entry.Body <> carrier.Result || lifetime <> heldLifetime ||
-                   not (Set.isSubset (Set.ofList [row.Occurrence; row.Aggregate; carrier.Occurrence; arm.Formation]) entry.Transport) then
-                    error "lost its exact current entry formation, transport, declaration or program-image lifetime."
-                elif List.map fst contract.ParameterRepresentations <> (if unitAdapter then [] else [0 .. entry.Formals.Length - 1]) ||
-                     contract.ParameterTypes.Length <> entry.Formals.Length || receivingType <> nativeType then
-                    error "receiving contract differs from the complete native invocation ABI."
-                else Result.Ok carrier
+            let argumentsResult =
+                (Result.Ok [], contract.ParameterRepresentations)
+                ||> List.fold (fun acc (_, rep) ->
+                    match acc, representationType rep with
+                    | Result.Ok items, Result.Ok item -> Result.Ok (item :: items)
+                    | Result.Error e, _ | _, Result.Error e -> Result.Error e)
+                |> Result.map List.rev
+            match argumentsResult, representationType contract.ResultRepresentation with
+            | Result.Error reason, _ | _, Result.Error reason -> error reason
+            | Result.Ok arguments, Result.Ok result ->
+                let receivingResults =
+                    match Operands.closedNativeDefinition graph entry.Implementation with
+                    | Result.Ok(Some(_, signature)) when signature.Result.IsNone &&
+                        TypeIdentity.isUnit contract.ResultType && contract.ResultRepresentation = ValueRepresentation.Scalar SettledSlot.Unit -> Result.Ok []
+                    | Result.Ok(Some _) -> Result.Ok(if result = TVoid then [] else [result])
+                    | Result.Ok None -> Result.Error "lacks its source-published closed implementation signature."
+                    | Result.Error reason -> Result.Error reason
+                match receivingResults with
+                | Result.Error reason -> error reason
+                | Result.Ok receivingResults ->
+                    let receivingType = TFunc(arguments, receivingResults)
+                    if entry.Implementation <> carrier.Implementation || entry.Formals <> (carrier.Parameters |> List.map (fun (_, _, id) -> id)) ||
+                       entry.Body <> carrier.Result || lifetime <> heldLifetime ||
+                       not (Set.isSubset (Set.ofList [row.Occurrence; row.Aggregate; carrier.Occurrence; arm.Formation]) entry.Transport) then
+                        error "lost its exact current entry formation, transport, declaration or program-image lifetime."
+                    elif List.map fst contract.ParameterRepresentations <> (if unitAdapter then [] else [0 .. entry.Formals.Length - 1]) ||
+                         contract.ParameterTypes.Length <> entry.Formals.Length || receivingType <> nativeType then
+                        error "receiving contract differs from the complete native invocation ABI."
+                    else Result.Ok carrier
 
 let private alternative (graph: Revision) (row: CallableAggregateValue) (arm: CallableAggregateAlternative) =
     let projection = graph.Emission.Callable
@@ -362,10 +370,13 @@ let private pReceivingType (row: CallableAggregateValue) = parser {
     let expected = [0 .. contract.ParameterTypes.Length - 1] |> List.filter (fun ordinal -> not (List.contains ordinal contract.OmittedParameters))
     do! ensure (List.map fst contract.ParameterRepresentations = expected)
             "Callable aggregate receiving contract has no exact physical parameter inventory."
-    let arguments = contract.ParameterRepresentations |> List.map (snd >> representationType)
+    let! arguments =
+        contract.ParameterRepresentations
+        |> List.map (snd >> pRepresentationType)
+        |> Alex.XParsec.Extensions.sequence
     do! ensure (arguments |> List.forall ((<>) TVoid))
             "Callable aggregate receiving convention omitted no parameter at a physical unit slot."
-    let result = representationType contract.ResultRepresentation
+    let! result = pRepresentationType contract.ResultRepresentation
     return TFunc(arguments, if result = TVoid then [] else [result])
 }
 
@@ -379,8 +390,11 @@ let private pStorage (row: CallableAggregateValue) (value: Val) = parser {
         match state.Graph.Emission.Numeric.OccurrenceRepresentations.TryFind row.Aggregate with
         | Some(Result.Ok representation) -> preturn representation
         | _ -> fail (Message "Callable component storage has no published aggregate representation.")
-    let parent = { value with Type = physicalStorageType state.Platform.TargetArch value.Type }
-    do! ensure (parent.Type = (representationType representation |> physicalStorageType state.Platform.TargetArch))
+    let! parentPhysType = pPhysicalStorageType state.Platform.TargetArch value.Type
+    let parent = { value with Type = parentPhysType }
+    let! repType = pRepresentationType representation
+    let! expectedParentType = pPhysicalStorageType state.Platform.TargetArch repType
+    do! ensure (parent.Type = expectedParentType)
             "Callable component storage differs from its published enclosing data representation."
     // The authored ordinal route and each published parent placement determine
     // the views. This fold walks no source nodes and computes no byte layout.
@@ -410,7 +424,8 @@ let private pStorage (row: CallableAggregateValue) (value: Val) = parser {
                     let! view = pMemRefView result.SSA parent.SSA (name 61) parent.Type result.Type
                     return operations @ [literal; view], result, child
             | ValueRepresentation.Record _ | ValueRepresentation.Union _ ->
-                let childType = representationType child |> physicalStorageType state.Platform.TargetArch
+                let! childRepType = pRepresentationType child
+                let! childType = pPhysicalStorageType state.Platform.TargetArch childRepType
                 let result = { SSA = name 50; Type = childType }
                 let! loads = pTypedExtractView result.SSA parent.SSA offset (name 51) (name 52) (name 53) childType parent.Type
                 return operations @ loads, result, child
@@ -593,7 +608,7 @@ let private pReadOrdinaryComponent (ctx: WitnessContext) occurrence (row: Callab
                     "Callable aggregate selection has no source-settled common code and environment convention."
             let name = Values.aggregateComponent occurrence row.Slot alternative.Ordinal
             let code = { SSA = name 14; Type = Operands.functionType shape }
-            let symbol = Alex.CodeGeneration.CallableSymbols.lambda state.Graph implementation false
+            let! symbol = pFromResult (Alex.CodeGeneration.CallableSymbols.lambda state.Graph implementation false)
             let! constant = pFuncConstant code.SSA symbol code.Type
             let! environment =
                 match alternative.EnvironmentPlacement, Operands.environmentType shape with

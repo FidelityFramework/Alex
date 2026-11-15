@@ -62,7 +62,8 @@ let pPublishedDispatchSelector site operand result : PSGParser<MLIROp list * Val
         | Some transport when transport.Operand = operand -> preturn transport
         | _ -> fail (Message "Dispatch selector lacks its exact source-published index transport.")
     let! value, valueType = pRecallNode operand
-    do! ensure (valueType = scalarCarrierType transport.Carrier && state.Platform.TargetArch.Pointer = Ok transport.PointerBits)
+    let! expectedCarrierType = pScalarCarrierType transport.Carrier
+    do! ensure (valueType = expectedCarrierType && state.Platform.TargetArch.Pointer = Ok transport.PointerBits)
             "Dispatch selector or target differs from its source-published index transport."
     let! operation =
         if transport.Unsigned then pIndexCastU result value valueType TIndex

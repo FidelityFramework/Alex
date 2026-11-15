@@ -76,6 +76,10 @@ let private analyzeShared (context: CliContext) = async {
                 let target = definition.AbbreviatedType
                 if target.HasTypeDefinition && target.TypeDefinition.TryFullName = Some "System.Object" then Ok [ ObjectDependency ]
                 else Error (sprintf "type step %d cannot establish the intrinsic obj target" depth)
+              elif typ.IsAbbreviation && assembly = "FSharp.Core" && definition.DisplayName = "exn" then
+                let target = definition.AbbreviatedType
+                if target.HasTypeDefinition && target.TypeDefinition.TryFullName = Some "System.Exception" then Ok [ BclDependency target.TypeDefinition ]
+                else Error (sprintf "type step %d cannot establish the intrinsic exn target" depth)
               else
                 match children (), classifyEntity definition with
                 | Error reason, _ | _, Error reason -> Error reason
@@ -87,7 +91,7 @@ let private analyzeShared (context: CliContext) = async {
       try walk 0 alias.AbbreviatedType with error -> Error error.Message
     let checkEntity range (entity: FSharpEntity) =
       let result =
-        if entity.IsFSharpAbbreviation && entity.Assembly.SimpleName <> "FSharp.Core" then
+        if entity.IsFSharpAbbreviation && (entity.Assembly.SimpleName <> "FSharp.Core" || entity.DisplayName = "exn") then
           inspectAlias entity |> Result.mapError (fun reason -> sprintf "Cannot inspect alias '%s': %s" entity.DisplayName reason)
         else classifyEntity entity |> Result.map (fun isBcl -> if isBcl then [ BclDependency entity ] else [])
       match result with
@@ -141,6 +145,28 @@ let private analyzeShared (context: CliContext) = async {
           Range = symbolUse.Range
           Fixes = []
         }
+      let isExceptionOperator =
+        match symbolUse.Symbol with
+        | :? FSharpMemberOrFunctionOrValue as value ->
+          let isThrowOperator =
+            match value.CompiledName with
+            | "FailWith" | "PrintFormatToStringThenFail" | "InvalidArg" | "InvalidOp" | "NullArg" | "Raise" | "Reraise" -> true
+            | _ -> false
+          let isFSharpOperators =
+            value.DeclaringEntity |> Option.exists (fun entity ->
+              entity.TryFullName = Some "Microsoft.FSharp.Core.Operators" ||
+              entity.TryFullName = Some "Microsoft.FSharp.Core.ExtraTopLevelOperators")
+          isThrowOperator && isFSharpOperators
+        | _ -> false
+      if isExceptionOperator then
+        diagnostics.Add {
+          Type = "Clef production boundary"
+          Message = "Clef production code must not throw or catch CLR exceptions."
+          Code = "AXC008"
+          Severity = Severity.Error
+          Range = symbolUse.Range
+          Fixes = []
+        }
       let entity =
         match symbolUse.Symbol with
         | :? FSharpEntity as entity -> Some entity
@@ -152,7 +178,7 @@ let private analyzeShared (context: CliContext) = async {
           && (value.TryFullName = Some "System" || value.TryFullName = Some "System.Numerics"
               || value.TryFullName = Some "System.Numerics.BigInteger")
           && integerLiteralRanges.Contains symbolUse.Range
-        if not isReferenceIdentity && not literalRepresentation && not (symbolUse.IsFromDefinition && value.IsFSharpAbbreviation) then
+        if not isReferenceIdentity && not isExceptionOperator && not literalRepresentation && not (symbolUse.IsFromDefinition && value.IsFSharpAbbreviation) then
           checkEntity symbolUse.Range value)
     for declaration in context.CheckFileResults.OpenDeclarations do
       match declaration.Range with
@@ -215,6 +241,15 @@ let private analyzeShared (context: CliContext) = async {
           override _.WalkExpr(_, expression) =
             match expression with
             | SynExpr.Null range -> rejectNull range
+            | SynExpr.TryWith(range = range) ->
+              diagnostics.Add {
+                Type = "Clef production boundary"
+                Message = "Clef production code must not throw or catch CLR exceptions."
+                Code = "AXC008"
+                Severity = Severity.Error
+                Range = range
+                Fixes = []
+              }
             | SynExpr.Const(SynConst.String(text, _, range), _) when hasReflectionFormat text ->
               rejectReflectionFormat range
             | SynExpr.InterpolatedString(contents, _, range) ->
@@ -1930,16 +1965,8 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
       { File = "Witnesses/VarRefWitness.fs"; Target = "witnessVarRef.assignmentTarget"; MaxCount = 1 }
     ]
     let axa007Pins : DebtPin list = [
-      { File = "Traversal/Values.fs"; Target = "valuesOf"; MaxCount = 1 }
       { File = "Dialects/Core/Types.fs"; Target = "conditionalTagSelectionAt"; MaxCount = 1 }
-      { File = "CodeGeneration/TypeMapping.fs"; Target = "scalarCarrierAt"; MaxCount = 2 }
       { File = "CodeGeneration/TypeMapping.fs"; Target = "pointerTypeAt"; MaxCount = 1 }
-      { File = "CodeGeneration/TypeMapping.fs"; Target = "typeOfIdentity"; MaxCount = 1 }
-      { File = "CodeGeneration/TypeMapping.fs"; Target = "sourceTypeAt"; MaxCount = 1 }
-      { File = "CodeGeneration/CallableSymbols.fs"; Target = "lambda"; MaxCount = 1 }
-      { File = "Traversal/PSGZipper.fs"; Target = "requireNode"; MaxCount = 1 }
-      { File = "XParsec/PSGCombinators.fs"; Target = "lastValueNode"; MaxCount = 1 }
-      { File = "XParsec/PSGCombinators.fs"; Target = "findLastValueNode"; MaxCount = 1 }
       { File = "Traversal/CoverageValidation.fs"; Target = "validateCoverageWith"; MaxCount = 2 }
       { File = "Traversal/CallableOperands.fs"; Target = "closedNativeDefinition"; MaxCount = 1 }
       { File = "Traversal/CallableOperands.fs"; Target = "parametersAtCall"; MaxCount = 1 }

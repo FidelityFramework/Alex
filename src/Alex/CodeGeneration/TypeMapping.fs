@@ -8,16 +8,16 @@ open Alex.Dialects.Core.Types
 let numericProjection (graph: Revision) =
     graph.Emission.Numeric
 
-let scalarCarrierAt (graph: Revision) (nodeId: NodeId) : ScalarCarrier option =
+let scalarCarrierAt (graph: Revision) (nodeId: NodeId) : Result<ScalarCarrier option, string> =
     let publication = numericProjection graph
     match publication.Values.TryFind nodeId with
-    | Some carrier -> Some carrier
+    | Some carrier -> Ok(Some carrier)
     | None ->
         match publication.Unresolved.TryFind nodeId with
-        | Some reason -> failwithf "TypeMapping: Numeric carrier at node %d is unresolved: %s" (NodeId.value nodeId) reason
+        | Some reason -> Error(sprintf "TypeMapping: Numeric carrier at node %d is unresolved: %s" (NodeId.value nodeId) reason)
         | None when publication.Required.Contains nodeId ->
-            failwithf "TypeMapping: source Numeric publication omitted the required carrier at node %d" (NodeId.value nodeId)
-        | None -> None
+            Error(sprintf "TypeMapping: source Numeric publication omitted the required carrier at node %d" (NodeId.value nodeId))
+        | None -> Ok None
 
 let settledScalarType (slot: SettledSlot) : MLIRType option = SettledScalar.tryType slot
 
@@ -32,9 +32,11 @@ let isResourceOccurrence (graph: Revision) nodeId =
     graph.Emission.Numeric.OccurrenceRepresentations.TryFind nodeId
     |> Option.exists (function Ok representation -> isResourceRepresentation representation | Error _ -> false)
 
-let scalarCarrierType (carrier: ScalarCarrier) : MLIRType =
-    settledScalarType carrier.Slot
-    |> Option.defaultWith (fun () -> failwithf "TypeMapping: source carrier at node %d has no admitted scalar physical form: %s" (NodeId.value carrier.Site) (Alex.Dialects.Core.Serialize.describeSettledSlot carrier.Slot))
+let scalarCarrierType (carrier: ScalarCarrier) : Result<MLIRType, string> =
+    match settledScalarType carrier.Slot with
+    | Some ty -> Ok ty
+    | None ->
+        Error(sprintf "TypeMapping: source carrier at node %d has no admitted scalar physical form: %s" (NodeId.value carrier.Site) (Alex.Dialects.Core.Serialize.describeSettledSlot carrier.Slot))
 
 let rec tryRepresentationType = function
     | ValueRepresentation.Scalar slot ->
@@ -75,14 +77,12 @@ let rec tryRepresentationType = function
     | ValueRepresentation.Tag _ -> Error "TypeMapping: source tag has no cases"
 
 let representationType rep =
-    match tryRepresentationType rep with
-    | Ok ty -> ty
-    | Error reason -> failwith reason
+    tryRepresentationType rep
 
 let private read what = function
     | Some(Ok form) -> representationType form
-    | Some(Error reason) -> failwithf "TypeMapping: %s has no source-published representation: %s" what reason
-    | None -> failwithf "TypeMapping: source publication omitted %s" what
+    | Some(Error reason) -> Error(sprintf "TypeMapping: %s has no source-published representation: %s" what reason)
+    | None -> Error(sprintf "TypeMapping: source publication omitted %s" what)
 
 /// The native entry and import own the physical function type. Numeric's
 /// callable refusal is not an entry representation and remains unchanged.
@@ -99,7 +99,11 @@ let nativeEntrySlotType (graph: Revision) (storage: ProgramStorageEntry) =
                 && entry.Loading = loading.Identity
                 && imported.Library = loading.Contract.Library
                 ->
-                Ok(entry, TFunc(BoundaryAbi.parameters imported, BoundaryAbi.results imported))
+                match BoundaryAbi.parameters imported, BoundaryAbi.results imported with
+                | Ok parameters, Ok results ->
+                    Ok(entry, TFunc(parameters, results))
+                | Error reason, _ | _, Error reason ->
+                    Error reason
             | _ -> Error "Native entry slot has no matching current import and selected loading account."
         | _ -> Error "Native entry slot has no matching current source formation."
     | _ -> Error "Native entry slot requires its source-issued native entry storage shape."
@@ -143,9 +147,7 @@ let tryValueTypeAt (graph: Revision) (nodeId: NodeId) : Result<MLIRType, string>
         | None -> Error(sprintf "TypeMapping: source publication omitted value occurrence %d" (NodeId.value nodeId))
 
 let valueTypeAt (graph: Revision) (nodeId: NodeId) =
-    match tryValueTypeAt graph nodeId with
-    | Ok ty -> ty
-    | Error reason -> failwith reason
+    tryValueTypeAt graph nodeId
 
 /// A pointer occurrence must publish its scalar form directly. Generic callable
 /// component unwrapping cannot establish this contract for the occurrence.
@@ -153,32 +155,39 @@ let pointerTypeAt (graph: Revision) (nodeId: NodeId) =
     match (numericProjection graph).OccurrenceRepresentations.TryFind nodeId with
     | Some(Ok(ValueRepresentation.Scalar(SettledSlot.Pointer 1) as form)) -> representationType form
     | Some(Ok _) ->
-        failwithf "TypeMapping: value occurrence %d has no source-published scalar pointer representation" (NodeId.value nodeId)
+        Error(sprintf "TypeMapping: value occurrence %d has no source-published scalar pointer representation" (NodeId.value nodeId))
     | other -> read (sprintf "value occurrence %d" (NodeId.value nodeId)) other
 
 let typeOfIdentity (graph: Revision) (identity: TypeIdentity) =
     (numericProjection graph).TypeRepresentations.TryFind identity |> read "type identity"
 
-let sourceTypeAt (graph: Revision) (nodeId: NodeId) =
-    (numericProjection graph).SourceTypes.TryFind nodeId
-    |> Option.defaultWith (fun () -> failwithf "TypeMapping: source publication omitted type identity at %d" (NodeId.value nodeId))
+let sourceTypeAt (graph: Revision) (nodeId: NodeId) : Result<TypeIdentity, string> =
+    match (numericProjection graph).SourceTypes.TryFind nodeId with
+    | Some identity -> Ok identity
+    | None -> Error(sprintf "TypeMapping: source publication omitted type identity at %d" (NodeId.value nodeId))
 
 let settledLayoutFor (graph: Revision) (identity: TypeIdentity) =
     (numericProjection graph).Layouts.TryFind identity
 
-let settledLayoutAt graph nodeId = settledLayoutFor graph (sourceTypeAt graph nodeId)
+let settledLayoutAt graph nodeId =
+    sourceTypeAt graph nodeId
+    |> Result.map (settledLayoutFor graph)
 
-let nodeWidth graph nodeId =
+let nodeWidth graph nodeId : Result<IntWidth option, string> =
     match scalarCarrierAt graph nodeId with
-    | Some { Slot = SettledSlot.Integer(bits, _) } when bits > 0 -> Some(IntWidth bits)
-    | Some { Slot = SettledSlot.Integer _ } -> failwith "TypeMapping: source integer width is not positive"
-    | _ -> None
+    | Error reason -> Error reason
+    | Ok(Some { Slot = SettledSlot.Integer(bits, _) }) when bits > 0 -> Ok(Some(IntWidth bits))
+    | Ok(Some { Slot = SettledSlot.Integer _ }) -> Error "TypeMapping: source integer width is not positive"
+    | Ok _ -> Ok None
 
-let requireNodeWidth graph nodeId =
-    nodeWidth graph nodeId |> Option.defaultWith (fun () -> failwithf "TypeMapping: no published integer carrier at %d" (NodeId.value nodeId))
+let requireNodeWidth graph nodeId : Result<IntWidth, string> =
+    match nodeWidth graph nodeId with
+    | Ok(Some width) -> Ok width
+    | Ok None -> Error(sprintf "TypeMapping: no published integer carrier at %d" (NodeId.value nodeId))
+    | Error reason -> Error reason
 
 /// A container's physical byte view follows its published aggregate placement.
 let physicalStorageType (_arch: Architecture) = function
-    | TStruct(_, Some bytes) -> TMemRefStatic(bytes.Size, TInt(IntWidth 8))
-    | TStruct _ -> failwith "TypeMapping: an aggregate storage view requires complete source byte placement"
-    | ty -> ty
+    | TStruct(_, Some bytes) -> Ok(TMemRefStatic(bytes.Size, TInt(IntWidth 8)))
+    | TStruct _ -> Error "TypeMapping: an aggregate storage view requires complete source byte placement"
+    | ty -> Ok ty

@@ -313,7 +313,7 @@ let ``ordinary field projection in a mixed record remains ordinary`` () =
         { graph with Nodes = graph.Nodes.Add(flagRead.Id, flagRead); Emission = { graph.Emission with Numeric = numeric } }
         |> seal [2; 3; 5] (closedSupports @ [22, [4; 6; 22]])
     Assert.Empty(Integrity.check graph)
-    let aggregateType = mapTypeAt aggregate.Id (context graph flagRead.Id operands)
+    let aggregateType = mapTypeAt aggregate.Id (context graph flagRead.Id operands) |> Result.defaultWith failwith
     MLIRAccumulator.bindNode aggregate.Id (Arg 2) aggregateType operands
     let output = observe false graph flagRead operands
     match output.Result with

@@ -54,8 +54,9 @@ let internal pResourceOptionReadAt site sourceId (source: Val) (caseIndex: int o
         match boundary.Calls[access.Acquisition].Resource with
         | Some(BoundaryResourceUse.AcquireNullable acquisition) -> preturn acquisition
         | _ -> fail (Message "Resource Option read lacks its original nullable conversion.")
+    let! sourceIdType = pValueTypeAt sourceId
     do! ensure
-            (source.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph sourceId
+            (source.Type = sourceIdType
              && (match source.Type with TResourceOption _ -> true | _ -> false))
             "Resource Option read differs from its source-settled subject representation."
     let! resultType =
@@ -67,7 +68,7 @@ let internal pResourceOptionReadAt site sourceId (source: Val) (caseIndex: int o
         | Some selected -> parser {
             do! ensure (selected = acquisition.SomeCase && not access.Selection.IsEmpty)
                     "Resource payload read lacks its exact source-selected nonnull alternative."
-            let ty = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph site
+            let! ty = pValueTypeAt site
             do! ensure
                     (match ty with
                      | TOpaqueHandle(handleType, bits, alignment) ->
@@ -199,7 +200,7 @@ let pArenaAlloc (nodeId: NodeId) (_arenaSSA: SSA) (_sizeSSA: SSA) (_arenaType: M
 let pMemRefShape (nodeId: NodeId) (arch: Architecture) (ty: MLIRType) : PSGParser<int * MLIRType> =
     match ty with
     | TMemRefStatic (count, elemType) -> preturn (count, elemType)
-    | TStruct _ -> preturn (mlirTypeSize arch ty, TInt (IntWidth 8))
+    | TStruct _ -> pMlirTypeSize arch ty |>> fun sz -> (sz, TInt (IntWidth 8))
     | _ -> fail (Message $"PSG settlement (Layouts) did not settle static storage for the allocated value at node {NodeId.value nodeId}: its carrier {ty} is neither a static memref nor a settled struct")
 
 /// One symbol convention for a source-admitted static allocation and its reads.
@@ -220,8 +221,9 @@ let programStorageType arch graph (entry: ProgramStorageEntry) =
     | ProgramStorageShape.ValueView _ ->
         let site = match entry.Identity with ProgramStorageIdentity.Allocation id | ProgramStorageIdentity.BindingSlot id -> id
         valueTypeAt graph site
-        |> physicalStorageType arch
-        |> fun value -> Some(TMemRefStatic(1, value))
+        |> Result.bind (physicalStorageType arch)
+        |> Result.toOption
+        |> Option.map (fun value -> TMemRefStatic(1, value))
     // A program callable cell without a retained environment is its one index
     // discriminator (Farscape #109). A retained environment is a second object
     // with its own declaration, which this inventory shape does not yet carry.
@@ -271,12 +273,14 @@ let private pCheckedCapacity citizen bytes required reason : PSGParser<unit> = p
 let private pEmptySnapshot (construction: CheckedStringConstruction) (empty: MemoryEmptySnapshotWitness) : PSGParser<unit> = parser {
     let! state = getUserState
     let memory = state.Graph.Emission.Memory
+    let! emptySourceType = pSourceTypeAt empty.Site
+    let! emptyValueType = pValueTypeAt empty.Site
     do! ensure
             (empty.Snapshot = construction.Snapshot && empty.Owner = construction.Owner
              && memory.Required.Contains empty.Site && not (memory.Unresolved.ContainsKey empty.Site)
              && memory.Operations.TryFind empty.Site = Some(MemoryWitnessOperation.EmptySnapshot empty)
-             && sourceTypeAt state.Graph empty.Site = empty.SourceType
-             && valueTypeAt state.Graph empty.Site = TMemRef(TInt(IntWidth 8)))
+             && emptySourceType = empty.SourceType
+             && emptyValueType = TMemRef(TInt(IntWidth 8)))
             "Empty snapshot lacks its exact current source producer, snapshot and result identity."
     let! validation =
         match memory.Operations.TryFind construction.Validation with
@@ -353,7 +357,8 @@ let pAllocValue (nodeId: NodeId) (ssa: SSA) (ty: MLIRType) : PSGParser<MLIROp> =
         let memory = state.Graph.Emission.Memory
         match memory.Operations.TryFind nodeId with
         | Some(MemoryWitnessOperation.ConstructedValue allocation) ->
-            do! ensure (allocation.Site = nodeId && allocation.SourceType = sourceTypeAt state.Graph nodeId)
+            let! nodeSourceType = pSourceTypeAt nodeId
+            do! ensure (allocation.Site = nodeId && allocation.SourceType = nodeSourceType)
                     "Constructed value differs from its source-issued allocation identity and type."
             let! size, alignment =
                 match state.Graph.Emission.Numeric.Layouts.TryFind allocation.SourceType with
@@ -424,10 +429,11 @@ let pRetireResultAt receiver actual (value: Val) : PSGParser<MLIROp list> = pars
             | Some(Result.Ok retirement) -> preturn retirement
             | Some(Result.Error reason) -> fail (Message ("Result retirement remains source-pending: " + reason))
             | None -> fail (Message "Result retirement lacks its source-owned allocation and retirement relation.")
+        let! actualValueType = pValueTypeAt actual
         do! ensure (retirement.Application = result.Occurrence && retirement.Actual = actual
                     && retirement.Receiver = receiver
                     && (result.Tag |> Option.exists (fun tag -> tag.Constructor = retirement.Construction))
-                    && value.Type = valueTypeAt state.Graph actual)
+                    && value.Type = actualValueType)
                 "Result retirement changed its exact returned instance or receiving exit."
         let! operation = pDealloc value.SSA value.Type
         return [operation]
@@ -474,10 +480,10 @@ let pDUCaseAt (nodeId: NodeId) (destination: Val) (identity: TypeIdentity) (tag:
 /// insertion as an explicit Baker destination. Inactive payloads are untouched.
 let pDUCase (nodeId: NodeId) (tag: int64) (payload: Val list) (ty: MLIRType) : PSGParser<MLIROp list * TransferResult> =
     parser {
-        let! state = getUserState
         let! result = getNodeSSA nodeId
         let! allocation = pAllocValue nodeId result ty
-        let! writes, _ = pDUCaseAt nodeId { SSA = result; Type = ty } (sourceTypeAt state.Graph nodeId) tag payload
+        let! nodeSourceType = pSourceTypeAt nodeId
+        let! writes, _ = pDUCaseAt nodeId { SSA = result; Type = ty } nodeSourceType tag payload
         return allocation :: writes, TRValue { SSA = result; Type = ty }
     }
 
@@ -489,7 +495,7 @@ let pDUCase (nodeId: NodeId) (tag: int64) (payload: Val list) (ty: MLIRType) : P
 let pMemCopy (resultSSA: SSA) (destSSA: SSA) (srcSSA: SSA) (countSSA: SSA) : PSGParser<MLIROp list * TransferResult> =
     parser {
         let! state = getUserState
-        let platformWordTy = state.Platform.PlatformWordType
+        let! platformWordTy = pFromResult state.Platform.PlatformWordType
         let args = [
             { SSA = destSSA; Type = platformWordTy }
             { SSA = srcSSA; Type = platformWordTy }
@@ -586,7 +592,8 @@ let private pMemoryExtent site source element resultCarrier unsigned : PSGParser
     let! buffer = pMemoryBuffer source element
     let! ssas = getNodeSSAs site
     do! ensure (ssas.Length >= 3) "Memory extent lacks its physical operand names."
-    let result = { SSA = List.last ssas; Type = scalarCarrierType resultCarrier }
+    let! resCarrierType = pScalarCarrierType resultCarrier
+    let result = { SSA = List.last ssas; Type = resCarrierType }
     let! dimension = pIndexConst ssas.[0] 0L
     let! length = pMemRefDim ssas.[1] buffer.SSA ssas.[0] buffer.Type
     let! adaptation =
@@ -597,7 +604,8 @@ let private pMemoryExtent site source element resultCarrier unsigned : PSGParser
 
 let private pMemoryIndex result (bounds: MemoryBoundsWitness) : PSGParser<MLIROp * SSA> = parser {
     let! index, ty = pRecallNode bounds.Index
-    do! ensure (ty = scalarCarrierType bounds.IndexCarrier)
+    let! idxCarrierType = pScalarCarrierType bounds.IndexCarrier
+    do! ensure (ty = idxCarrierType)
             "Array index disagrees with its source-published carrier."
     let! adaptation =
         if bounds.IndexUnsigned then pIndexCastU result index ty TIndex
@@ -698,11 +706,14 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
                     | _ -> false)
                 "UTF-8 validation lacks its exact source-issued checked-text outcome."
         let! snapshot = pMemoryBuffer construction.Snapshot (TInt(IntWidth 8))
-        do! ensure (snapshot.Type = representationType validation.SourceCarrier)
+        let! srcCarrierType = pRepresentationType validation.SourceCarrier
+        do! ensure (snapshot.Type = srcCarrierType)
                 "UTF-8 validation differs from its source-published snapshot carrier."
         let! resultSSA = getNodeSSA validation.Site
-        let result = { SSA = resultSSA; Type = valueTypeAt state.Graph validation.Site }
-        do! ensure (result.Type = representationType (ValueRepresentation.Scalar SettledSlot.Bool))
+        let! valSiteType = pValueTypeAt validation.Site
+        let result = { SSA = resultSSA; Type = valSiteType }
+        let! boolRepType = pRepresentationType (ValueRepresentation.Scalar SettledSlot.Bool)
+        do! ensure (result.Type = boolRepType)
                 "UTF-8 validation lacks its settled boolean result carrier."
         return [Utf8Validate(validation.Site, snapshot, result)], [], TRValue result
     | Some (MemoryWitnessOperation.SnapshotRetirement retirement) ->
@@ -759,7 +770,7 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
                         && (retirement.Site = lifetime.SomeCarrierRetirement || retirement.Site = lifetime.NoneCarrierRetirement)))
                 "Checked result retirement differs from its exact caller value or cleanup occurrence."
         let! ssa, recalledType = pRecallNode retirement.Value
-        let expected = valueTypeAt state.Graph retirement.Value
+        let! expected = pValueTypeAt retirement.Value
         do! ensure (recalledType = expected) "Checked result retirement differs from its published caller value representation."
         let! physical =
             match MLIRAccumulator.recallSSAType ssa state.Accumulator with
@@ -810,27 +821,34 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
         | None -> do! preturn ()
         let! element=pMemorySlot view.Element
         let! source=pMemoryBuffer view.Source element
-        let sourceType,resultType=representationType view.SourceCarrier,representationType view.ResultCarrier
+        let! sourceType = pRepresentationType view.SourceCarrier
+        let! resultType = pRepresentationType view.ResultCarrier
         do! ensure (source.Type=sourceType) "String view source differs from its exact published physical carrier."
         if sourceType=resultType then return [],[],TRValue source
         else
             match view.SourceCarrier,view.ResultCarrier with
-            | ValueRepresentation.Buffer(Some _,sourceElement),ValueRepresentation.Buffer(None,resultElement)
-                when representationType sourceElement=representationType resultElement ->
-                let! result=getNodeSSA view.Site
-                let! cast=pMemRefCast result source.SSA sourceType resultType
-                return [cast],[],TRValue {SSA=result;Type=resultType}
+            | ValueRepresentation.Buffer(Some _,sourceElement),ValueRepresentation.Buffer(None,resultElement) ->
+                let! srcElemType = pRepresentationType sourceElement
+                let! resElemType = pRepresentationType resultElement
+                if srcElemType = resElemType then
+                    let! result=getNodeSSA view.Site
+                    let! cast=pMemRefCast result source.SSA sourceType resultType
+                    return [cast],[],TRValue {SSA=result;Type=resultType}
+                else
+                    return! fail (Message "String view has no published matching buffer-carrier transport.")
             | _ -> return! fail (Message "String view has no published matching buffer-carrier transport.")
     | Some (MemoryWitnessOperation.ArrayAllocation allocation) ->
         do! ensure (allocation.Site = state.Current.Id)
                 "Array allocation names a different source occurrence."
         let! element = pMemorySlot allocation.Element
         let! count, countType = pRecallNode allocation.Count
-        do! ensure (countType = scalarCarrierType allocation.CountCarrier)
+        let! cntCarrierType = pScalarCarrierType allocation.CountCarrier
+        do! ensure (countType = cntCarrierType)
                 "Array count differs from its source-published carrier."
         let! ssas = getNodeSSAs allocation.Site
         let result = { SSA = List.last ssas; Type = TMemRef element }
-        do! ensure (result.Type = valueTypeAt state.Graph allocation.Site)
+        let! allocSiteType = pValueTypeAt allocation.Site
+        do! ensure (result.Type = allocSiteType)
                 "Array allocation differs from its source-published result carrier."
         let! countCast =
             if allocation.IndexUnsigned then pIndexCastU ssas.[0] count countType TIndex

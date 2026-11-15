@@ -105,7 +105,7 @@ let ``conditional guard descends through its actual occurrence and recalls the e
     let operations = ScopeContext.getOps scope.Value
     let functionBody = operations @ [MLIROp.FuncOp(FuncOp.Return [{ SSA = result; Type = resultType }])]
     let declaration = MLIROp.FuncOp(FuncOp.FuncDef("conditional_occurrence", [Arg 0, TInt(IntWidth 1)], [resultType], functionBody, FuncVisibility.Private))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "conditional_occurrence" [declaration]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "conditional_occurrence" [declaration] |> Result.defaultWith failwith
     Assert.Contains("scf.if %arg0", text)
 
 [<Fact>]

@@ -186,7 +186,7 @@ module WritableBuffer =
                 Assert.Equal(TInt(IntWidth 64),fromType)
                 Assert.Equal(TInt(IntWidth 32),toType)
                 Assert.Equal({SSA=adapted;Type=toType},result)
-                Assert.Equal(NeedsTargetRealization,moduleText (Ok 64) None [WritableBufferCall(actual,values,Some raw)])
+                Assert.Equal(Result.Ok NeedsTargetRealization,moduleText (Ok 64) None [WritableBufferCall(actual,values,Some raw)])
                 raw.SSA
             | other -> failwithf "Writable signed result lost its original raw SSA/adaptation: %A" other)
         Assert.NotEqual(rawResults[0],rawResults[1])
@@ -199,7 +199,7 @@ module WritableBuffer =
         let imported=graph.Emission.Boundary.Imports[id 13]
         Assert.Equal<MLIRType list>(
             [TInt(IntWidth 32);TMemRef(TInt(IntWidth 8));TInt(IntWidth 64)],
-            BoundaryAbi.parametersIn graph.Emission.Boundary imported)
+            BoundaryAbi.parametersIn graph.Emission.Boundary imported |> Result.defaultWith failwith)
         let rawResults = [3;4] |> List.map(fun site ->
             match observe site graph with
             | Result.Ok(([ArithOp(ArithOp.TruncI(fd,fdSource,fdFrom,fdTo));
@@ -216,7 +216,7 @@ module WritableBuffer =
                 Assert.Equal(TInt(IntWidth 64),fromType)
                 Assert.Equal(TInt(IntWidth 32),toType)
                 Assert.Equal({SSA=adapted;Type=toType},result)
-                Assert.Equal(NeedsTargetRealization,moduleText (Ok 64) None [WritableBufferCall(actual,values,Some raw)])
+                Assert.Equal(Result.Ok NeedsTargetRealization,moduleText (Ok 64) None [WritableBufferCall(actual,values,Some raw)])
                 raw.SSA
             | other -> failwithf "POSIX writable call lost its ordered native vector or published adaptation: %A" other)
         Assert.NotEqual(rawResults[0],rawResults[1])
@@ -299,7 +299,7 @@ module WritableBuffer =
     [<Fact>]
     let ``writable buffer retains neutral carrier ordered arguments and distinct call sites`` () =
         let graph,imported=fixture false
-        Assert.Equal<MLIRType list>([TMemRef(TInt(IntWidth 8));TInt(IntWidth 64)],BoundaryAbi.parametersIn graph.Emission.Boundary imported)
+        Assert.Equal<MLIRType list>([TMemRef(TInt(IntWidth 8));TInt(IntWidth 64)],BoundaryAbi.parametersIn graph.Emission.Boundary imported |> Result.defaultWith failwith)
         for site in [3;4] do
             match observe site graph with
             | Result.Ok(([WritableBufferCall(actual,values,None)],TRVoid),_) ->
@@ -343,9 +343,9 @@ module WritableBuffer =
     let ``writable buffer declaration and call explicitly defer portable target text`` declaration =
         let graph,imported=fixture false
         let operation=
-            if declaration then FuncOp(BoundaryFuncDecl(imported,BoundaryAbi.parametersIn graph.Emission.Boundary imported,[]))
+            if declaration then FuncOp(BoundaryFuncDecl(imported,BoundaryAbi.parametersIn graph.Emission.Boundary imported |> Result.defaultWith failwith,[]))
             else WritableBufferCall(id 3,[{SSA=Arg 0;Type=TMemRef(TInt(IntWidth 8))};{SSA=Arg 1;Type=TInt(IntWidth 64)}],None)
-        Assert.Equal(NeedsTargetRealization,moduleText (Ok 64) (Some "writable_component") [operation])
+        Assert.Equal(Result.Ok NeedsTargetRealization,moduleText (Ok 64) (Some "writable_component") [operation])
 
 /// Component rows consumed by the existing published-memory owner. Source
 /// admission and complete returned-arm proofs are exercised in the source repo.
@@ -583,8 +583,8 @@ module ReturnedCheckedText =
         match observe 1 (fixture ()) (fun value -> value) with
         | Ok(([IndexOp _;MemRefOp(Alloc(_,_,TInt(IntWidth 8),Some 16)) as operation],[],TRValue _),_) ->
             match moduleText (Ok 64) None [operation] with
-            | Available text -> Assert.Contains("{alignment = 16 : i64}",text)
-            | NeedsTargetRealization -> failwith "Neutral allocation must retain portable text"
+            | Result.Ok(Available text) -> Assert.Contains("{alignment = 16 : i64}",text)
+            | other -> failwithf "Neutral allocation must retain portable text: %A" other
         | other -> failwithf "Returned snapshot lost its allocation alignment: %A" other
 
     [<Fact>]
@@ -731,7 +731,7 @@ module ReturnedCheckedText =
                 Assert.Equal(id 1,site)
                 Assert.Equal(TMemRef(TInt(IntWidth 8)),value.Type)
                 Assert.Equal(value,result)
-                Assert.Equal(NeedsTargetRealization,moduleText (Ok 64) None [operation])
+                Assert.Equal(Result.Ok NeedsTargetRealization,moduleText (Ok 64) None [operation])
             | other -> failwithf "Empty producer lost its explicit neutral value: %A" other
 
         [<Theory>]
@@ -965,7 +965,7 @@ let ``MMIO address transport preserves the exact published integer`` operation b
         Assert.Equal(address, actual)
         Assert.Equal(TIndex, ty)
         Assert.Equal({ SSA = result; Type = TIndex }, value)
-        let text = moduleToString (Ok pointerBits) "exact_mmio_address" [instruction]
+        let text = moduleToString (Ok pointerBits) "exact_mmio_address" [instruction] |> Result.defaultWith failwith
         Assert.Contains("arith.constant " + decimal + " : index", text)
     | other -> failwithf "Published MMIO integer was changed: %A" other
 
@@ -993,12 +993,12 @@ let ``MMIO requires the pointer representation at each occurrence`` constructor 
         | "wrapped-pointer" -> rows.Add(occurrence, Ok(ValueRepresentation.CallableComponent(occurrence, ValueRepresentation.Scalar(SettledSlot.Pointer 1))))
         | other -> failwithf "Unknown pointer-row defect %s" other
     let graph = { graph with Emission = { graph.Emission with Numeric = { graph.Emission.Numeric with OccurrenceRepresentations = rows } } }
-    let observe () = matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[site]) 64 operands
-    let error = Assert.Throws<System.Exception>(fun () -> observe () |> ignore)
     let expected =
         if defect = "missing" then sprintf "TypeMapping: source publication omitted value occurrence %d" (NodeId.value occurrence)
         else sprintf "TypeMapping: value occurrence %d has no source-published scalar pointer representation" (NodeId.value occurrence)
-    Assert.Equal(expected, error.Message)
+    match matchAt Alex.Patterns.MmioPatterns.pMmioIntrinsic (focus graph graph.Nodes[site]) 64 operands with
+    | Result.Error msg -> Assert.Equal(expected, msg)
+    | Result.Ok other -> failwithf "Admitted invalid MMIO pointer representation: %A" other
     Assert.Empty operands.AllOps
     Assert.Equal(None, MLIRAccumulator.recallNode site operands)
 
@@ -1037,7 +1037,7 @@ let ``integer literal transport retains unsigned maximum and signed negative val
     | Result.Ok (([MLIROp.ArithOp(ArithOp.ConstI(_, actual, TInt(IntWidth 64))) as instruction], _), _) ->
         Assert.Equal(expected, actual)
         let decimal = expected.ToString(System.Globalization.CultureInfo.InvariantCulture)
-        Assert.Contains("arith.constant " + decimal + " : i64", moduleToString (Ok 64) "exact_literal" [instruction])
+        Assert.Contains("arith.constant " + decimal + " : i64", moduleToString (Ok 64) "exact_literal" [instruction] |> Result.defaultWith failwith)
     | other -> failwithf "Integer literal changed its mathematical value: %A" other
 
 [<Theory>]
@@ -1049,9 +1049,9 @@ let ``integer literal transport retains unsigned maximum and signed negative val
 [<InlineData("\"\\6Clvm.store\"() : () -> ()")>]
 [<InlineData("\"llvm\\2Estore\" // retained comment\r\n () : () -> ()")>]
 let ``portable serialization refuses LLVM dialect escape fragments`` (text: string) =
-    let error = Assert.Throws<System.ArgumentException>(fun () ->
-        moduleText (Ok 64) (Some "portable") [MLIROp.RawMLIR text] |> ignore)
-    Assert.Contains("ALEX004", error.Message)
+    match moduleText (Ok 64) (Some "portable") [MLIROp.RawMLIR text] with
+    | Result.Error msg -> Assert.Contains("ALEX004", msg)
+    | Result.Ok _ -> failwith "Admitted LLVM dialect escape fragment"
 
 [<Theory>]
 [<InlineData("func.func private @llvm.libraryFunction()")>]
@@ -1061,17 +1061,16 @@ let ``portable serialization refuses LLVM dialect escape fragments`` (text: stri
 [<InlineData("func.func private @ordinary() attributes {clef.note = \"llvm.load\"}")>]
 let ``portable serialization preserves names comments and quoted data`` (text: string) =
     match moduleText (Ok 64) None [MLIROp.RawMLIR text] with
-    | Available actual -> Assert.Equal("module {\n  " + text + "\n}", actual)
-    | NeedsTargetRealization -> failwith "Ordinary portable text acquired a target requirement"
+    | Result.Ok(Available actual) -> Assert.Equal("module {\n  " + text + "\n}", actual)
+    | other -> failwithf "Ordinary portable text acquired a target requirement or error: %A" other
 
 let private deferredMmio =
     MLIROp.MmioLoad(NodeId 3, Alex.Traversal.Values.meetValue (NodeId 3) 0, Arg 0, 8)
 
 [<Fact>]
 let ``MMIO retains its source intent and explicitly defers target text`` () =
-    Assert.Equal(NeedsTargetRealization, moduleText (Ok 64) (Some "portable") [deferredMmio])
-    Assert.ThrowsAny<System.Exception>(fun () -> moduleToString (Ok 64) "portable" [deferredMmio] |> ignore)
-    |> ignore
+    Assert.Equal(Result.Ok NeedsTargetRealization, moduleText (Ok 64) (Some "portable") [deferredMmio])
+    Assert.True((moduleToString (Ok 64) "portable" [deferredMmio]).IsError)
 
 [<Theory>]
 [<InlineData(false)>]
@@ -1081,16 +1080,18 @@ let ``target deferral cannot mask a later LLVM escape inside a region`` (solver:
     let nested =
         if solver then MLIROp.SMTOp(SMTSolver [deferredMmio; poison])
         else MLIROp.FuncOp(FuncDef("portable", [Arg 0, TIndex], [], [deferredMmio; poison], FuncVisibility.Public))
-    let error = Assert.Throws<System.ArgumentException>(fun () -> moduleText (Ok 64) (Some "portable") [nested] |> ignore)
-    Assert.Contains("ALEX004", error.Message)
+    match moduleText (Ok 64) (Some "portable") [nested] with
+    | Result.Error msg -> Assert.Contains("ALEX004", msg)
+    | Result.Ok _ -> failwith "Target deferral masked a later LLVM escape"
 
 [<Theory>]
 [<InlineData(false)>]
 [<InlineData(true)>]
 let ``portable module headers refuse LLVM syntax before target deferral`` (withMmio: bool) =
     let body = if withMmio then [deferredMmio] else []
-    let error = Assert.Throws<System.ArgumentException>(fun () -> moduleText (Ok 64) (Some "unsafe { !llvm.ptr") body |> ignore)
-    Assert.Contains("ALEX004", error.Message)
+    match moduleText (Ok 64) (Some "unsafe { !llvm.ptr") body with
+    | Result.Error msg -> Assert.Contains("ALEX004", msg)
+    | Result.Ok _ -> failwith "Portable module header admitted LLVM syntax"
 
 [<Theory>]
 [<InlineData(false)>]
@@ -1099,17 +1100,18 @@ let ``portable function headers sanitize syntax before target deferral`` (withMm
     let body = if withMmio then [deferredMmio] else []
     let operation = MLIROp.FuncOp(FuncDef("unsafe() -> !llvm.ptr", [], [], body, FuncVisibility.Public))
     match moduleText (Ok 64) (Some "portable") [operation] with
-    | Available actual ->
+    | Result.Ok(Available actual) ->
         Assert.False(withMmio)
         Assert.DoesNotContain("!llvm.ptr", actual)
         Assert.Contains("func.func @unsafe_______llvm.ptr(", actual)
-    | NeedsTargetRealization -> Assert.True(withMmio)
+    | Result.Ok NeedsTargetRealization -> Assert.True(withMmio)
+    | Result.Error msg -> failwith msg
 
 [<Fact>]
 let ``portable headers preserve LLVM named symbols`` () =
     match moduleText (Ok 64) (Some "llvm.library") [MLIROp.RawMLIR "func.func private @llvm.libraryFunction()"] with
-    | Available actual -> Assert.Equal("module @llvm.library {\n  func.func private @llvm.libraryFunction()\n}", actual)
-    | NeedsTargetRealization -> failwith "A portable module symbol acquired a target requirement"
+    | Result.Ok(Available actual) -> Assert.Equal("module @llvm.library {\n  func.func private @llvm.libraryFunction()\n}", actual)
+    | other -> failwithf "A portable module symbol acquired a target requirement or error: %A" other
 
 [<Theory>]
 [<InlineData(0, false)>]
@@ -1121,10 +1123,11 @@ let ``target deferral preserves width checking on every portable leaf`` (bits: i
     let body = if beforeMmio then [conversion; deferredMmio] else [deferredMmio; conversion]
     let operation = MLIROp.FuncOp(FuncDef("portable", [], [], body, FuncVisibility.Public))
     if bits > 0 then
-        Assert.Equal(NeedsTargetRealization, moduleText (Ok 64) (Some "portable") [operation])
+        Assert.Equal(Result.Ok NeedsTargetRealization, moduleText (Ok 64) (Some "portable") [operation])
     else
-        let error = Assert.ThrowsAny<System.Exception>(fun () -> moduleText (Ok 64) (Some "portable") [operation] |> ignore)
-        Assert.Contains("unresolved or nonpositive integer width", error.Message)
+        match moduleText (Ok 64) (Some "portable") [operation] with
+        | Result.Error msg -> Assert.Contains("unresolved or nonpositive integer width", msg)
+        | Result.Ok _ -> failwith "Admitted nonpositive integer width"
 
 [<Fact>]
 let ``portable hardware frame preserves declared argument names`` () =
@@ -1132,5 +1135,5 @@ let ``portable hardware frame preserves declared argument names`` () =
     let body = [MLIROp.HWOp(HWOutput [Arg 0, ty])]
     let operation = MLIROp.HWOp(HWModule("hardware", ["input", ty], ["output", ty], body))
     Assert.Equal(
-        Available "module @portable {\n  hw.module @hardware(in %input: i32, out output: i32) {\n    hw.output %input : i32\n}\n}",
+        Result.Ok(Available "module @portable {\n  hw.module @hardware(in %input: i32, out output: i32) {\n    hw.output %input : i32\n}\n}"),
         moduleText (Ok 64) (Some "portable") [operation])

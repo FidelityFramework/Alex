@@ -22,7 +22,7 @@ open Fidelity.PSG
 let pBuildLiteral (lit: NativeLiteral) (ssa: SSA) (_arch: Architecture) : PSGParser<MLIROp list * TransferResult> =
     parser {
         let! state = getUserState
-        let ty = valueTypeAt state.Graph state.Current.Id
+        let! ty = pValueTypeAt state.Current.Id
 
         match lit with
         | NativeLiteral.Unit ->
@@ -83,14 +83,16 @@ let pWithUnitResult (nodeId: NodeId) (body: PSGParser<MLIROp list * TransferResu
 /// Read the settled pool and entry directly; no string encoding or placement occurs here.
 let stringPoolView (pool: Fidelity.PSG.StaticStringPool)
                    (entry: Fidelity.PSG.StaticStringEntry)
-                   (ssas: SSA list) : MLIROp list * TransferResult =
-    if ssas.Length < 4 then invalidArg "ssas" "String pool view needs four SSAs."
-    let storageTy = TMemRefStatic (pool.Size, TInt (IntWidth 8))
-    let contentTy = TMemRefStatic (entry.Length, TInt (IntWidth 8))
-    let dynamicTy = TMemRef (TInt (IntWidth 8))
-    [ MLIROp.MemRefOp (MemRefOp.GetGlobal (ssas[0], pool.Symbol, storageTy))
-      MLIROp.IndexOp (IndexOp.IndexConst (ssas[3], int64 entry.Offset))
-      // View moves the data pointer, preserving an identity layout for memref.cast.
-      MLIROp.MemRefOp (MemRefOp.View (ssas[1], ssas[0], ssas[3], storageTy, contentTy))
-      MLIROp.MemRefOp (MemRefOp.Cast (ssas[2], ssas[1], contentTy, dynamicTy)) ],
-    TRValue { SSA = ssas[2]; Type = dynamicTy }
+                   (ssas: SSA list) : Result<MLIROp list * TransferResult, string> =
+    if ssas.Length < 4 then Result.Error "String pool view needs four SSAs."
+    else
+        let storageTy = TMemRefStatic (pool.Size, TInt (IntWidth 8))
+        let contentTy = TMemRefStatic (entry.Length, TInt (IntWidth 8))
+        let dynamicTy = TMemRef (TInt (IntWidth 8))
+        Result.Ok (
+            [ MLIROp.MemRefOp (MemRefOp.GetGlobal (ssas[0], pool.Symbol, storageTy))
+              MLIROp.IndexOp (IndexOp.IndexConst (ssas[3], int64 entry.Offset))
+              // View moves the data pointer, preserving an identity layout for memref.cast.
+              MLIROp.MemRefOp (MemRefOp.View (ssas[1], ssas[0], ssas[3], storageTy, contentTy))
+              MLIROp.MemRefOp (MemRefOp.Cast (ssas[2], ssas[1], contentTy, dynamicTy)) ],
+            TRValue { SSA = ssas[2]; Type = dynamicTy })

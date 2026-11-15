@@ -91,12 +91,19 @@ let private witnessContinuationDispatch getCombinator (ctx: WitnessContext) (nod
                 if isLazyValue ctx node then pLazyDispatch ctx selector branches fallback
                 elif isSequenceValue ctx node then pSequenceDispatch ctx selector branches fallback
                 else
-                    let isUnit = Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id
-                    let result =
-                        if isUnit then None
-                        else Some (Alex.Traversal.Values.value node.Id 0, mapTypeAt node.Id ctx)
-                    let dispatch = pBuildContinuationDispatch node.Id selector branches fallback result
-                    if isUnit then Alex.Patterns.LiteralPatterns.pWithUnitResult node.Id dispatch else dispatch
+                        XParsec.Combinators.parser {
+                            let isUnit = Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id
+                            let! result =
+                                if isUnit then pFromResult (Result.Ok None)
+                                else
+                                    XParsec.Combinators.parser {
+                                        let! ty = pValueTypeAt node.Id
+                                        return Some (Alex.Traversal.Values.value node.Id 0, ty)
+                                    }
+                            let dispatch = pBuildContinuationDispatch node.Id selector branches fallback result
+                            if isUnit then return! Alex.Patterns.LiteralPatterns.pWithUnitResult node.Id dispatch
+                            else return! dispatch
+                        }
             match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
             | Result.Ok ((operations, transfer), _) ->
                 { InlineOps = selectorOps @ operations; TopLevelOps = []; Result = transfer }
@@ -158,27 +165,30 @@ let private witnessControlFlowWith (getCombinator: unit -> (WitnessContext -> Se
                     | Some elseId, Some operations ->
                         pSequenceConditional ctx { SSA = condSSA; Type = condType } thenId thenOps elseId operations
                     | _ -> XParsec.Parsers.fail (XParsec.Message "Sequence conditional requires both settled branches.")
-                elif isCallableValue ctx node then
-                    match elseIdOpt, elseOps with
-                    | Some elseId, Some operations ->
-                        pCallableConditional ctx { SSA = condSSA; Type = condType } thenId thenOps elseId operations
-                    | _ -> XParsec.Parsers.fail (XParsec.Message "Callable conditional requires both settled branches.")
                 else
-                    let isUnit = Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id
-                    let build result = pBuildConditional condSSA thenOps elseOps thenId elseIdOpt result node.Id
-                    if isUnit then Alex.Patterns.LiteralPatterns.pWithUnitResult node.Id (build None)
-                    else
-                        let resultType = mapTypeAt node.Id ctx
-                        // A valued conditional carries its derived result value; an absent one is
-                        // a settlement defect, never a unit conditional.
-                        XParsec.Combinators.parser {
-                            let! ssas = getNodeSSAs node.Id
-                            match ssas with
-                            | ssa :: _ -> return! build (Some (ssa, resultType))
-                            | [] ->
-                                return! XParsec.Parsers.fail (XParsec.Message
-                                    $"PSG settlement did not derive a result value for valued IfThenElse {NodeId.value node.Id}")
-                        }
+                    match isCallableValue ctx node with
+                    | Result.Error reason -> XParsec.Parsers.fail (XParsec.Message reason)
+                    | Result.Ok true ->
+                        match elseIdOpt, elseOps with
+                        | Some elseId, Some operations ->
+                            pCallableConditional ctx { SSA = condSSA; Type = condType } thenId thenOps elseId operations
+                        | _ -> XParsec.Parsers.fail (XParsec.Message "Callable conditional requires both settled branches.")
+                    | Result.Ok false ->
+                        let isUnit = Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id
+                        let build result = pBuildConditional condSSA thenOps elseOps thenId elseIdOpt result node.Id
+                        if isUnit then Alex.Patterns.LiteralPatterns.pWithUnitResult node.Id (build None)
+                        else
+                            // A valued conditional carries its derived result value; an absent one is
+                            // a settlement defect, never a unit conditional.
+                            XParsec.Combinators.parser {
+                                let! resultType = pValueTypeAt node.Id
+                                let! ssas = getNodeSSAs node.Id
+                                match ssas with
+                                | ssa :: _ -> return! build (Some (ssa, resultType))
+                                | [] ->
+                                    return! XParsec.Parsers.fail (XParsec.Message
+                                        $"PSG settlement did not derive a result value for valued IfThenElse {NodeId.value node.Id}")
+                            }
             match tryMatchWithDiagnostics pattern ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
             | Result.Ok ((ops, transferResult), _) ->
                 { InlineOps = ops; TopLevelOps = []; Result = transferResult }

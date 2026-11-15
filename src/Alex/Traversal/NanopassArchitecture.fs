@@ -78,11 +78,11 @@ let private validateNumericResult (graph: Revision) nodeId result =
             match publication.Values.TryFind nodeId with
             | None -> Result.Error (sprintf "Source Numeric publication omitted the required result carrier for node %d" (NodeId.value nodeId))
             | Some carrier ->
-                try
-                    let expected = Alex.CodeGeneration.TypeMapping.scalarCarrierType carrier
+                match Alex.CodeGeneration.TypeMapping.scalarCarrierType carrier with
+                | Result.Ok expected ->
                     if value.Type = expected then Result.Ok ()
                     else Result.Error (sprintf "Witness result at node %d has carrier %s; source Numeric publication requires %s" (NodeId.value nodeId) (Alex.Dialects.Core.Serialize.describeType value.Type) (Alex.Dialects.Core.Serialize.describeType expected))
-                with error -> Result.Error (Alex.Text.exceptionMessage error)
+                | Result.Error reason -> Result.Error reason
         | _ -> Result.Error (sprintf "Witness result at node %d omitted its source-published scalar value" (NodeId.value nodeId))
     else Result.Ok ()
 

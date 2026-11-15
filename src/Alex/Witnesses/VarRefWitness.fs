@@ -207,14 +207,17 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
                         // An occurrence-bound formal still has its parameter
                         // carrier. Transcribe this read's settled refinement,
                         // just as on the coeffect lookup path below.
-                        let (ops, readSSA, readTy) = adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id ssa ty
-                        { InlineOps = ops; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                        match adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id ssa ty with
+                        | Result.Ok (ops, readSSA, readTy) ->
+                            { InlineOps = ops; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                        | Result.Error err ->
+                            WitnessOutput.error $"VarRef '{name}': {err}"
                     | None ->
                         // A formal's value and carrier are source-published.
                         let patternBindingPattern =
                             parser {
                                 let! ssa = getNodeSSA bindingId
-                                let ty = mapTypeAt bindingId ctx
+                                let! ty = pValueTypeAt bindingId
                                 let! (meetOps, readSSA, readTy) = pAdapt node.Id node.Id ssa ty
                                 return (meetOps, TRValue { SSA = readSSA; Type = readTy })
                             }
@@ -238,7 +241,7 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
                     elif account.IsProgramSlotIntent then
                         // Module-level value: reload from its slot (valid in any function)
                         // the slot's element type at the binding's range width on fabric
-                        let represented = try Result.Ok(mapTypeAt bindingId ctx) with ex -> Result.Error (Alex.Text.exceptionMessage ex)
+                        let represented = mapTypeAt bindingId ctx
                         match represented with
                         | Result.Error reason ->
                             WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "VarRef") (Some "program storage")
@@ -248,8 +251,11 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
                             match tryMatchWithDiagnostics (pGlobalSlotLoad bindingId node.Id globalName valueTy)
                                           ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
                             | Result.Ok ((ops, TRValue v), _) ->
-                                let (meetOps, readSSA, readTy) = adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id v.SSA v.Type
-                                { InlineOps = ops @ meetOps; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                                match adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id v.SSA v.Type with
+                                | Result.Ok (meetOps, readSSA, readTy) ->
+                                    { InlineOps = ops @ meetOps; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                                | Result.Error err ->
+                                    WitnessOutput.error $"VarRef '{name}': {err}"
                             | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
                             | Result.Error diagnostic -> WitnessOutput.error $"VarRef '{name}': {diagnostic}"
                     elif account.IsPartialApplication then
@@ -278,8 +284,11 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
                                     | Result.Ok ((ops, TRValue v), _) ->
                                         // the cell's width, then this read's own (ruling 3: a read
                                         // refined under a guard truncates; at a boundary it extends)
-                                        let (meetOps, readSSA, readTy) = adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id v.SSA v.Type
-                                        { InlineOps = ops @ meetOps; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                                        match adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id v.SSA v.Type with
+                                        | Result.Ok (meetOps, readSSA, readTy) ->
+                                            { InlineOps = ops @ meetOps; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                                        | Result.Error err ->
+                                            WitnessOutput.error $"VarRef '{name}': {err}"
                                     | Result.Ok ((ops, result), _) ->
                                         { InlineOps = ops; TopLevelOps = []; Result = result }
                                     | Result.Error diagnostic ->
@@ -288,8 +297,11 @@ let private witnessVarRef (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
                                     WitnessOutput.error $"VarRef '{name}': Mutable cell has unexpected type {ty}"
                             else
                                 // Immutable value (including buffers): forward, at this read's own width
-                                let (meetOps, readSSA, readTy) = adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id ssa ty
-                                { InlineOps = meetOps; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                                match adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id ssa ty with
+                                | Result.Ok (meetOps, readSSA, readTy) ->
+                                    { InlineOps = meetOps; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                                | Result.Error err ->
+                                    WitnessOutput.error $"VarRef '{name}': {err}"
                         | None ->
                             WitnessOutput.error $"VarRef '{name}': Binding not yet witnessed"
 

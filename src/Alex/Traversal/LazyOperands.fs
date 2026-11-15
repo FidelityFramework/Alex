@@ -29,14 +29,13 @@ let project (ctx: WitnessContext) occurrence : Result<Shape, string> =
     if projection.LazyValues.Contains occurrence then
         match projection.LazyOccurrences.TryFind occurrence |> Option.bind projection.Lazies.TryFind with
         | Some contract ->
-            try
-                let layout = contract.Layout
-                let environment = TMemRefStatic(layout.Bytes, TInt(IntWidth 8))
-                let result = mapTypeAt contract.ThunkBody ctx
+            let layout = contract.Layout
+            let environment = TMemRefStatic(layout.Bytes, TInt(IntWidth 8))
+            mapTypeAt contract.ThunkBody ctx
+            |> Result.map (fun result ->
                 let results = if result = TVoid then [] else [result]
-                Result.Ok { Occurrence = occurrence; Layout = layout; EnvironmentType = environment
-                            FunctionType = TFunc([environment], results) }
-            with ex -> Result.Error (Alex.Text.exceptionMessage ex)
+                { Occurrence = occurrence; Layout = layout; EnvironmentType = environment
+                  FunctionType = TFunc([environment], results) })
         | _ -> Result.Error "Lazy occurrence has no source-published thunk boundary."
     else Result.Error "Lazy occurrence has no complete source layout and lifetime contract."
 

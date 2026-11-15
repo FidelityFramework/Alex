@@ -79,8 +79,8 @@ let private witness (ctx: WitnessContext) (node: SemanticNode) =
                 failure node "thunk identity"
                     $"Baker lazy memoization did not keep thunk {NodeId.value thunk} of lazy value {NodeId.value node.Id} resident in the graph"
             | Some thunkNode ->
-                let symbol = Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph thunkNode false
                 observe ctx node (parser {
+                    let! symbol = pFromResult (Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph thunkNode false)
                     let! operations, result = pRecallLazyEnvironment environment layout
                     match result with
                     | TRValue environment ->

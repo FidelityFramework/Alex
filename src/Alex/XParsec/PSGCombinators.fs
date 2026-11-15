@@ -97,14 +97,10 @@ type PSGParser<'T> = Parser<'T, char, PSGParserState, ReadableString, ReadableSt
 /// declares, read from the context CCS filled (plan D8, L-10). Where the
 /// description declares no Register this fails with CCS8203's text; Composer
 /// never supplies a width of its own.
-let platformWordType (state: PSGParserState) : MLIRType =
-    state.Platform.PlatformWordType
-
-/// The word width in bits: the declared Register width, or CCS8203's text.
-let platformWordBits (state: PSGParserState) : int =
-    match state.Platform.TargetArch.Register with
-    | Ok bits -> bits
-    | Error message -> failwith message
+let pFromResult (result: Result<'T, string>) : PSGParser<'T> =
+    match result with
+    | Result.Ok value -> preturn value
+    | Result.Error message -> fail (Message message)
 
 /// The range CCS wrote on a node at saturation (Dimensional_Range_Design.md §1; RangeAnalysis):
 /// read here, never computed. `None` for a node that is not an integer, boolean or char.
@@ -113,82 +109,138 @@ let nodeRange (graph: Revision) (nodeId: NodeId) : ValueRange option =
 
 /// Exact correspondence with a published form, including every nested field.
 /// A missing width is a mismatch; this operation never completes a type.
-let requireValueType (graph: Revision) (nodeId: NodeId) (ty: MLIRType) : MLIRType =
-    let expected = valueTypeAt graph nodeId
-    if ty <> expected then
-        failwithf "Value occurrence %d has carrier %s instead of its source-published carrier %s" (NodeId.value nodeId) (Alex.Dialects.Core.Serialize.describeType ty) (Alex.Dialects.Core.Serialize.describeType expected)
-    ty
+let requireValueType (graph: Revision) (nodeId: NodeId) (ty: MLIRType) : Result<MLIRType, string> =
+    match valueTypeAt graph nodeId with
+    | Result.Error reason -> Result.Error reason
+    | Result.Ok expected ->
+        if ty <> expected then
+            Result.Error (sprintf "Value occurrence %d has carrier %s instead of its source-published carrier %s" (NodeId.value nodeId) (Alex.Dialects.Core.Serialize.describeType ty) (Alex.Dialects.Core.Serialize.describeType expected))
+        else
+            Result.Ok ty
+
+let pRequireValueType (nodeId: NodeId) (ty: MLIRType) : PSGParser<MLIRType> =
+    parser {
+        let! state = getUserState
+        return! pFromResult (requireValueType state.Graph nodeId ty)
+    }
+
+let pValueTypeAt (nodeId: NodeId) : PSGParser<MLIRType> =
+    parser {
+        let! state = getUserState
+        return! pFromResult (valueTypeAt state.Graph nodeId)
+    }
+
+let pSourceTypeAt (nodeId: NodeId) : PSGParser<TypeIdentity> =
+    parser {
+        let! state = getUserState
+        return! pFromResult (sourceTypeAt state.Graph nodeId)
+    }
+
+let pPointerTypeAt (nodeId: NodeId) : PSGParser<MLIRType> =
+    parser {
+        let! state = getUserState
+        return! pFromResult (pointerTypeAt state.Graph nodeId)
+    }
+
+let pSettledLayoutAt (nodeId: NodeId) : PSGParser<SettledLayout option> =
+    parser {
+        let! state = getUserState
+        return! pFromResult (settledLayoutAt state.Graph nodeId)
+    }
+
+let pRepresentationType (rep: ValueRepresentation) : PSGParser<MLIRType> =
+    pFromResult (representationType rep)
+
+let pScalarCarrierType (carrier: ScalarCarrier) : PSGParser<MLIRType> =
+    pFromResult (scalarCarrierType carrier)
+
+let pPhysicalStorageType (arch: Architecture) (ty: MLIRType) : PSGParser<MLIRType> =
+    pFromResult (physicalStorageType arch ty)
+
+let pDeclaredWordWidth (arch: Architecture) : PSGParser<IntWidth> =
+    pFromResult (declaredWordWidth arch)
+
+let pDeclaredPointerBytes (arch: Architecture) : PSGParser<int> =
+    pFromResult (declaredPointerBytes arch)
+
+let pMlirTypeSize (arch: Architecture) (ty: MLIRType) : PSGParser<int> =
+    pFromResult (mlirTypeSize arch ty)
+
+let pStructFieldOffset (structTy: MLIRType) (fieldIndex: int) : PSGParser<int> =
+    pFromResult (structFieldOffset structTy fieldIndex)
 
 /// The value a derived meet produces: the extension by the operand's sign or the truncation of a
 /// refined read that SSAAssignment derived for this consumer and operand (Coeffects.Meet). The
 /// witness transcribes it; nothing is decided here.
 let private floatType = function
-    | 32 -> TFloat F32
-    | 64 -> TFloat F64
-    | bits -> failwithf "Unsupported floating boundary width %d" bits
+    | 32 -> Result.Ok (TFloat F32)
+    | 64 -> Result.Ok (TFloat F64)
+    | bits -> Result.Error (sprintf "Unsupported floating boundary width %d" bits)
 
-let meetOp (meet: Meet) (result: SSA) (value: SSA) : MLIROp =
+let meetOp (meet: Meet) (result: SSA) (value: SSA) : Result<MLIROp, string> =
     match meet.Adapt with
-    | MeetKind.ExtendUnsigned -> MLIROp.ArithOp (ArithOp.ExtUI (result, value, TInt (IntWidth meet.From), TInt (IntWidth meet.To)))
-    | MeetKind.ExtendSigned -> MLIROp.ArithOp (ArithOp.ExtSI (result, value, TInt (IntWidth meet.From), TInt (IntWidth meet.To)))
-    | MeetKind.Truncate -> MLIROp.ArithOp (ArithOp.TruncI (result, value, TInt (IntWidth meet.From), TInt (IntWidth meet.To)))
-    | MeetKind.ExtendFloat -> MLIROp.ArithOp (ArithOp.ExtF (result, value, floatType meet.From, floatType meet.To))
-    | MeetKind.TruncateFloat -> MLIROp.ArithOp (ArithOp.TruncF (result, value, floatType meet.From, floatType meet.To))
+    | MeetKind.ExtendUnsigned -> Result.Ok (MLIROp.ArithOp (ArithOp.ExtUI (result, value, TInt (IntWidth meet.From), TInt (IntWidth meet.To))))
+    | MeetKind.ExtendSigned -> Result.Ok (MLIROp.ArithOp (ArithOp.ExtSI (result, value, TInt (IntWidth meet.From), TInt (IntWidth meet.To))))
+    | MeetKind.Truncate -> Result.Ok (MLIROp.ArithOp (ArithOp.TruncI (result, value, TInt (IntWidth meet.From), TInt (IntWidth meet.To))))
+    | MeetKind.ExtendFloat ->
+        match floatType meet.From, floatType meet.To with
+        | Result.Ok fromTy, Result.Ok toTy -> Result.Ok (MLIROp.ArithOp (ArithOp.ExtF (result, value, fromTy, toTy)))
+        | Result.Error reason, _ | _, Result.Error reason -> Result.Error reason
+    | MeetKind.TruncateFloat ->
+        match floatType meet.From, floatType meet.To with
+        | Result.Ok fromTy, Result.Ok toTy -> Result.Ok (MLIROp.ArithOp (ArithOp.TruncF (result, value, fromTy, toTy)))
+        | Result.Error reason, _ | _, Result.Error reason -> Result.Error reason
 
 /// The last value a node evaluates to: through a block's last child and an annotation (the node
 /// a value operand is derived and recalled at).
-let rec private lastValueNode (graph: Revision) (id: NodeId) : NodeId =
+let rec private lastValueNode (graph: Revision) (id: NodeId) : Result<NodeId, string> =
     match Revision.tryNode id graph with
     | Some { Kind = SemanticKind.Sequential ids } ->
         match List.tryLast ids with
         | Some last -> lastValueNode graph last
-        | None -> id
+        | None -> Result.Ok id
     | Some { Kind = SemanticKind.TypeAnnotation (inner, _) } -> lastValueNode graph inner
-    | Some _ -> id
-    | None -> failwithf "adaptOperand: PSG settlement did not settle the operand node %d: it is not in the graph" (NodeId.value id)
+    | Some _ -> Result.Ok id
+    | None -> Result.Error (sprintf "adaptOperand: PSG settlement did not settle the operand node %d: it is not in the graph" (NodeId.value id))
 
 /// Adapt an operand's value to the slot it meets at `consumer`: the meet SSAAssignment derived
 /// for (consumer, operand), or the value unchanged where none was derived (the widths agree).
 /// The operand is looked up at the node the witness recalled and at its last value.
 /// Returns the ops to emit before the consumer, and the value and type the consumer reads.
-let adaptOperand (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (graph: Revision) (consumer: NodeId) (operand: NodeId) (value: SSA) (ty: MLIRType) : MLIROp list * SSA * MLIRType =
-    let found =
+let adaptOperand (coeffects: Alex.Traversal.TransferTypes.TransferCoeffects) (graph: Revision) (consumer: NodeId) (operand: NodeId) (value: SSA) (ty: MLIRType) : Result<MLIROp list * SSA * MLIRType, string> =
+    let foundResult =
         match Alex.Traversal.TransferTypes.meetFor graph consumer operand with
-        | Some found -> Some found
-        | None -> Alex.Traversal.TransferTypes.meetFor graph consumer (lastValueNode graph operand)
-    match found with
-    | Some (meet, result) ->
+        | Some found -> Result.Ok (Some found)
+        | None ->
+            lastValueNode graph operand
+            |> Result.map (Alex.Traversal.TransferTypes.meetFor graph consumer)
+    match foundResult with
+    | Result.Error reason -> Result.Error reason
+    | Result.Ok (Some (meet, result)) ->
         match ty with
-        | TInt (IntWidth from) when from = meet.From -> ([ meetOp meet result value ], result, TInt (IntWidth meet.To))
-        | TFloat _ when ty = floatType meet.From -> ([meetOp meet result value], result, floatType meet.To)
+        | TInt (IntWidth from) when from = meet.From ->
+            meetOp meet result value
+            |> Result.map (fun op -> [ op ], result, TInt (IntWidth meet.To))
+        | TFloat _ when Result.Ok ty = floatType meet.From ->
+            match meetOp meet result value, floatType meet.To with
+            | Result.Ok op, Result.Ok toTy -> Result.Ok ([ op ], result, toTy)
+            | Result.Error reason, _ | _, Result.Error reason -> Result.Error reason
         | _ ->
-            failwithf "adaptOperand: the meet derived for node %d's operand %d adapts i%d, but the operand arrives as %s; the derivation and the emission disagree"
-                (NodeId.value consumer) (NodeId.value operand) meet.From (Alex.Dialects.Core.Serialize.describeType ty)
-    | None -> ([], value, ty)
+            Result.Error (
+                sprintf "adaptOperand: the meet derived for node %d's operand %d adapts i%d, but the operand arrives as %s; the derivation and the emission disagree"
+                    (NodeId.value consumer) (NodeId.value operand) meet.From (Alex.Dialects.Core.Serialize.describeType ty))
+    | Result.Ok None -> Result.Ok ([], value, ty)
 
 /// The monadic form of `adaptOperand`.
 let pAdapt (consumer: NodeId) (operand: NodeId) (value: SSA) (ty: MLIRType) : PSGParser<MLIROp list * SSA * MLIRType> =
     parser {
         let! state = getUserState
-        return adaptOperand state.Coeffects state.Graph consumer operand value ty
+        return! pFromResult (adaptOperand state.Coeffects state.Graph consumer operand value ty)
     }
-
-/// Read the current occurrence's exact published scalar or aggregate carrier.
-let requireCurrentType (state: PSGParserState) (ty: MLIRType) : MLIRType =
-    requireValueType state.Graph state.Current.Id ty
 
 /// Get the target architecture
 let targetArch (state: PSGParserState) : Architecture =
     state.Platform.TargetArch
-
-/// Get the appropriate return type for main function
-/// This uses platform word size, NOT hard-coded i32
-let mainReturnType (state: PSGParserState) : MLIRType =
-    state.Platform.PlatformWordType
-
-/// Get the appropriate type for nativeint/unativeint
-let nativeIntType (state: PSGParserState) : MLIRType =
-    state.Platform.PlatformWordType
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SSA COEFFECT EXTRACTION (monadic access to pre-computed SSAs)
@@ -200,7 +252,7 @@ let nativeIntType (state: PSGParserState) : MLIRType =
 let getNodeSSA (nodeId: NodeId) : PSGParser<Alex.Dialects.Core.Types.SSA> =
     parser {
         let! state = getUserState
-        return Alex.Traversal.Values.resultOf state.Coeffects.TargetPlatform state.Graph (Alex.Traversal.PSGZipper.enclosingLambdaIds state.Zipper) nodeId
+        return! pFromResult (Alex.Traversal.Values.resultOf state.Coeffects.TargetPlatform state.Graph (Alex.Traversal.PSGZipper.enclosingLambdaIds state.Zipper) nodeId)
     }
 
 /// Extract all SSAs for a node from coeffects (monadic)
@@ -209,7 +261,7 @@ let getNodeSSA (nodeId: NodeId) : PSGParser<Alex.Dialects.Core.Types.SSA> =
 let getNodeSSAs (nodeId: NodeId) : PSGParser<Alex.Dialects.Core.Types.SSA list> =
     parser {
         let! state = getUserState
-        return Alex.Traversal.Values.valuesOf state.Coeffects.TargetPlatform state.Graph (Alex.Traversal.PSGZipper.enclosingLambdaIds state.Zipper) nodeId
+        return! pFromResult (Alex.Traversal.Values.valuesOf state.Coeffects.TargetPlatform state.Graph (Alex.Traversal.PSGZipper.enclosingLambdaIds state.Zipper) nodeId)
     }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -235,7 +287,7 @@ let getTargetPlatform : PSGParser<Alex.Target.TargetPlatform> =
 
 /// Read the exact representation of the named source value occurrence.
 let pValueType (nodeId: NodeId) : PSGParser<MLIRType> =
-    getUserState |>> fun state -> valueTypeAt state.Graph nodeId
+    pValueTypeAt nodeId
 
 /// Set current node in state
 let setCurrentNode (node: SemanticNode) : PSGParser<unit> =
@@ -858,10 +910,10 @@ let pPublishedAdapt (consumer: NodeId) (operand: NodeId) (adaptation: Meet optio
         | None -> return [], value
         | Some meet ->
             do! ensure (meet.Consumer = consumer && meet.Operand = operand) "Published adaptation names different source participants."
-            let fromType =
+            let! fromType =
                 match meet.Adapt with
-                | MeetKind.ExtendFloat | MeetKind.TruncateFloat -> floatType meet.From
-                | _ -> TInt(IntWidth meet.From)
+                | MeetKind.ExtendFloat | MeetKind.TruncateFloat -> pFromResult (floatType meet.From)
+                | _ -> preturn (TInt(IntWidth meet.From))
             do! ensure (value.Type = fromType) "Published adaptation disagrees with the witnessed operand type."
             let! operations, result, resultType = pAdapt consumer operand value.SSA value.Type
             return operations, { SSA = result; Type = resultType }
@@ -919,7 +971,7 @@ let tryMatchWithTrace (parser: PSGParser<'T>) (graph: Revision) (node: SemanticN
 /// Sequential nodes are structural scaffolding that organize the PSG tree.
 /// They are NOT witnesses and do not bind results.
 /// This pattern extracts the actual value-producing node from Sequential nesting.
-let rec findLastValueNode nodeId graph =
+let rec findLastValueNode nodeId graph : Result<NodeId, string> =
     match Revision.tryNode nodeId graph with
     | Some node ->
         match node.Kind with
@@ -927,9 +979,9 @@ let rec findLastValueNode nodeId graph =
             // Sequential is structural - recursively find last value child
             match List.tryLast childIds with
             | Some lastChild -> findLastValueNode lastChild graph
-            | None -> nodeId  // Empty sequential - return self (caller will handle TRVoid)
+            | None -> Result.Ok nodeId  // Empty sequential - return self (caller will handle TRVoid)
         | SemanticKind.TypeAnnotation (wrappedId, _) ->
             // TypeAnnotation is transparent - unwrap to the actual value node
             findLastValueNode wrappedId graph
-        | _ -> nodeId  // Non-transparent node is the actual value node
-    | None -> failwithf "findLastValueNode: PSG settlement did not settle the value node %d: it is not in the graph" (NodeId.value nodeId)
+        | _ -> Result.Ok nodeId  // Non-transparent node is the actual value node
+    | None -> Result.Error (sprintf "findLastValueNode: PSG settlement did not settle the value node %d: it is not in the graph" (NodeId.value nodeId))

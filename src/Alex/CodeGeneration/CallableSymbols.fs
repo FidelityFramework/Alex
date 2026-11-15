@@ -14,8 +14,8 @@ let private render = function
 let tryBinding (graph: Revision) (id: NodeId) : string option =
     graph.Emission.Callable.Symbols.TryFind id |> Option.map render
 
-let lambda (graph: Revision) (node: SemanticNode) _hasClosureLayout : string =
+let lambda (graph: Revision) (node: SemanticNode) _hasClosureLayout : Result<string, string> =
     match tryBinding graph node.Id with
-    | Some symbol -> symbol
+    | Some symbol -> Ok symbol
     | None ->
-        invalidOp (sprintf "PSG settlement (WitnessEmission) did not settle a declaration symbol for the callable code at node %d" (NodeId.value node.Id))
+        Error (sprintf "PSG settlement (WitnessEmission) did not settle a declaration symbol for the callable code at node %d" (NodeId.value node.Id))

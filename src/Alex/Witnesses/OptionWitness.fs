@@ -35,22 +35,23 @@ let private witnessOption (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
                 | Some (rawSSA, rawType) ->
                     // the payload at its slot's width (its derived meet); the option at its
                     // settled size (the graph's layout of the option type)
-                    let (meetOps, valSSA, valType) = adaptOperand ctx.Coeffects ctx.Graph node.Id childId rawSSA rawType
-                    let value = { SSA = valSSA; Type = valType }
-                    let optionTy = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pOptionSome node.Id value optionTy) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Option.Some: {diagnostic}"
+                    match adaptOperand ctx.Coeffects ctx.Graph node.Id childId rawSSA rawType, mapTypeAt node.Id ctx with
+                    | Result.Ok (meetOps, valSSA, valType), Result.Ok optionTy ->
+                        let value = { SSA = valSSA; Type = valType }
+                        match tryMatchWithDiagnostics (pOptionSome node.Id value optionTy) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Option.Some: {diagnostic}"
+                    | Result.Error err, _ | _, Result.Error err -> WitnessOutput.error $"Option.Some: {err}"
                 | None -> WitnessOutput.error "Option.Some: Value not yet witnessed"
             | _ -> WitnessOutput.error $"Option.Some: Expected 1 child, got {node.Children.Length}"
 
         | "None" ->
-            let optionType = mapTypeAt node.Id ctx
-
-            match tryMatchWithDiagnostics (pOptionNone node.Id optionType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-            | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-            | Result.Error diagnostic -> WitnessOutput.error $"Option.None: {diagnostic}"
+            match mapTypeAt node.Id ctx with
+            | Result.Ok optionType ->
+                match tryMatchWithDiagnostics (pOptionNone node.Id optionType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                | Result.Error diagnostic -> WitnessOutput.error $"Option.None: {diagnostic}"
+            | Result.Error err -> WitnessOutput.error $"Option.None: {err}"
 
         | "isSome" ->
             match node.Children with
@@ -79,11 +80,12 @@ let private witnessOption (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (optSSA, _) ->
-                    let valueType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pOptionGet node.Id optSSA valueType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Option.get: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok valueType ->
+                        match tryMatchWithDiagnostics (pOptionGet node.Id optSSA valueType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Option.get: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Option.get: {err}"
                 | None -> WitnessOutput.error "Option.get: Option not yet witnessed"
             | _ -> WitnessOutput.error $"Option.get: Expected 1 child, got {node.Children.Length}"
 

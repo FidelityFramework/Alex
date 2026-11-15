@@ -47,15 +47,17 @@ let private witnessStructural (ctx: WitnessContext) (node: SemanticNode) : Witne
             | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
             | Result.Error reason -> WitnessOutput.error $"Sequence-valued block: {reason}"
 
-    | SemanticKind.Sequential childIds when isCallableValue ctx node ->
-        match List.tryLast childIds with
-        | None -> WitnessOutput.error "Callable sequence has no final value occurrence."
-        | Some source ->
-            match tryMatchWithDiagnostics (pCallableForward ctx source) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-            | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-            | Result.Error reason -> WitnessOutput.error $"Callable sequence: {reason}"
-
     | SemanticKind.Sequential childIds ->
+        match isCallableValue ctx node with
+        | Result.Error reason -> WitnessOutput.error $"Callable sequence: {reason}"
+        | Result.Ok true ->
+            match List.tryLast childIds with
+            | None -> WitnessOutput.error "Callable sequence has no final value occurrence."
+            | Some source ->
+                match tryMatchWithDiagnostics (pCallableForward ctx source) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                | Result.Error reason -> WitnessOutput.error $"Callable sequence: {reason}"
+        | Result.Ok false ->
         // Sequential: value is the LAST child's value (F# semantics: a; b; c evaluates to c)
         // Children already witnessed in post-order. Forward last child's result if it has one.
         // This is critical for match arm conditions (Sequential containing IfThenElse)
@@ -68,8 +70,11 @@ let private witnessStructural (ctx: WitnessContext) (node: SemanticNode) : Witne
             | Some (ssa, ty) ->
                 // The block and its final child have distinct published slots.
                 // Transcribe their settled meet before the common result check.
-                let operations, value, resultType = adaptOperand ctx.Coeffects ctx.Graph node.Id lastChildId ssa ty
-                { InlineOps = operations; TopLevelOps = []; Result = TRValue { SSA = value; Type = resultType } }
+                match adaptOperand ctx.Coeffects ctx.Graph node.Id lastChildId ssa ty with
+                | Result.Ok (operations, value, resultType) ->
+                    { InlineOps = operations; TopLevelOps = []; Result = TRValue { SSA = value; Type = resultType } }
+                | Result.Error err ->
+                    WitnessOutput.error $"Sequential: {err}"
             | None when Alex.Traversal.Values.isUnitTyped ctx.Graph node.Id ->
                 // A unit-typed block's last child produces no value
                 { InlineOps = []; TopLevelOps = []; Result = TRVoid }
@@ -109,8 +114,11 @@ let private witnessStructural (ctx: WitnessContext) (node: SemanticNode) : Witne
                 match MLIRAccumulator.recallNode elementId ctx.Accumulator with
                 | Some (ssa, ty) ->
                     // the element's width, then this read's own (its derived meet)
-                    let (meetOps, readSSA, readTy) = adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id ssa ty
-                    { InlineOps = meetOps; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                    match adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id ssa ty with
+                    | Result.Ok (meetOps, readSSA, readTy) ->
+                        { InlineOps = meetOps; TopLevelOps = []; Result = TRValue { SSA = readSSA; Type = readTy } }
+                    | Result.Error err ->
+                        WitnessOutput.error $"TupleGet: {err}"
                 | None ->
                     WitnessOutput.error (sprintf "TupleGet: element %d (node %d) not in accumulator" index (NodeId.value elementId))
             | SemanticKind.TupleExpr elements ->

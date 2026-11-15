@@ -28,11 +28,11 @@ let pMmioIntrinsic : PSGParser<MLIROp list * TransferResult> = parser {
     let bits = evidence.Bits
     do! ensure (bits = 8 || bits = 16 || bits = 32) "Unsupported MMIO access width"
     if isReg then
-        let addressTy = pointerTypeAt state.Graph node.Id
+        let! addressTy = pPointerTypeAt node.Id
         return [MLIROp.ArithOp (ArithOp.ConstI (s 0, evidence.Address, addressTy))], TRValue { SSA = s 0; Type = addressTy }
     else
         do! ensure (args.Length = (if isRead then 1 else 2)) "Invalid MMIO accessor arity"
-        let publishedTy = pointerTypeAt state.Graph args.Head
+        let! publishedTy = pPointerTypeAt args.Head
         let! address, addressTy = pRecallNode args.Head
         do! ensure (addressTy = publishedTy) "MMIO handle differs from its published pointer representation"
         let elementTy = TInt (IntWidth bits)

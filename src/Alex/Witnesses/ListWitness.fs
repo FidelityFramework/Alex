@@ -29,11 +29,12 @@ let private witnessList (ctx: WitnessContext) (node: SemanticNode) : WitnessOutp
     | Some (info, _) ->
         match info.Operation with
         | "empty" ->
-            let listType = mapTypeAt node.Id ctx
-
-            match tryMatchWithDiagnostics (pListEmpty node.Id listType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-            | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-            | Result.Error diagnostic -> WitnessOutput.error $"List.empty: {diagnostic}"
+            match mapTypeAt node.Id ctx with
+            | Result.Ok listType ->
+                match tryMatchWithDiagnostics (pListEmpty node.Id listType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                | Result.Error diagnostic -> WitnessOutput.error $"List.empty: {diagnostic}"
+            | Result.Error err -> WitnessOutput.error $"List.empty: {err}"
 
         | "isEmpty" ->
             match node.Children with
@@ -51,11 +52,12 @@ let private witnessList (ctx: WitnessContext) (node: SemanticNode) : WitnessOutp
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (listSSA, _) ->
-                    let elementType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pListHead node.Id listSSA elementType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"List.head: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok elementType ->
+                        match tryMatchWithDiagnostics (pListHead node.Id listSSA elementType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"List.head: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"List.head: {err}"
                 | None -> WitnessOutput.error "List.head: List not yet witnessed"
             | _ -> WitnessOutput.error $"List.head: Expected 1 child, got {node.Children.Length}"
 
@@ -64,11 +66,12 @@ let private witnessList (ctx: WitnessContext) (node: SemanticNode) : WitnessOutp
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (listSSA, _) ->
-                    let tailType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pListTail node.Id listSSA tailType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"List.tail: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok tailType ->
+                        match tryMatchWithDiagnostics (pListTail node.Id listSSA tailType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"List.tail: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"List.tail: {err}"
                 | None -> WitnessOutput.error "List.tail: List not yet witnessed"
             | _ -> WitnessOutput.error $"List.tail: Expected 1 child, got {node.Children.Length}"
 
@@ -79,11 +82,12 @@ let private witnessList (ctx: WitnessContext) (node: SemanticNode) : WitnessOutp
                 | Some (headSSA, headType), Some (tailSSA, tailType) ->
                     let head = { SSA = headSSA; Type = headType }
                     let tail = { SSA = tailSSA; Type = tailType }
-                    let listType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pListCons node.Id head tail listType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"List.cons: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok listType ->
+                        match tryMatchWithDiagnostics (pListCons node.Id head tail listType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"List.cons: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"List.cons: {err}"
                 | _ -> WitnessOutput.error "List.cons: Head or tail not yet witnessed"
             | _ -> WitnessOutput.error $"List.cons: Expected 2 children, got {node.Children.Length}"
 

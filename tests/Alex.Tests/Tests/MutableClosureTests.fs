@@ -378,7 +378,7 @@ let ``witnessed closure cell and snapshot serialize their cell and dispatch`` po
     let implementations =
         [f.Initial, false; f.Replacement, true] |> List.map (fun (source, value) ->
             let carrier = f.Graph.Codata.CallableCarriers[source]
-            let symbol = Alex.CodeGeneration.CallableSymbols.lambda f.Graph f.Graph.Nodes[carrier.Implementation] false
+            let symbol = Alex.CodeGeneration.CallableSymbols.lambda f.Graph f.Graph.Nodes[carrier.Implementation] false |> Result.defaultWith failwith
             let result = { SSA = V(NodeId.value carrier.Implementation, 0); Type = boolean }
             MLIROp.FuncOp(FuncOp.FuncDef(symbol, [Arg 0, unitType], [boolean],
                 [MLIROp.ArithOp(ArithOp.ConstI(result.SSA, (if value then 1I else 0I), boolean))
@@ -386,7 +386,7 @@ let ``witnessed closure cell and snapshot serialize their cell and dispatch`` po
     let inputOps =
         [f.Initial; f.Replacement] |> List.map (fun source ->
             let carrier = f.Graph.Codata.CallableCarriers[source]
-            let symbol = Alex.CodeGeneration.CallableSymbols.lambda f.Graph f.Graph.Nodes[carrier.Implementation] false
+            let symbol = Alex.CodeGeneration.CallableSymbols.lambda f.Graph f.Graph.Nodes[carrier.Implementation] false |> Result.defaultWith failwith
             MLIROp.FuncOp(FuncOp.FuncConstant((inputValue source).SSA, symbol, codeType)))
     // Invoke both actual function operands after the write.
     let savedResult = { SSA = V(900001, 0); Type = boolean }
@@ -398,7 +398,7 @@ let ``witnessed closure cell and snapshot serialize their cell and dispatch`` po
                 MLIROp.FuncOp(FuncOp.FuncCallIndirect([currentResult], (Operands.code current).SSA, [unitArgument]))
                 MLIROp.FuncOp(FuncOp.Return [savedResult; currentResult])]
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("closure_snapshot", [], [boolean; boolean], body, FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok pointerBits) "mutable_closure_component" (implementations @ [definition])
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok pointerBits) "mutable_closure_component" (implementations @ [definition]) |> Result.defaultWith failwith
     Assert.Contains("memref<1xindex>", text)
     Assert.Contains("scf.index_switch", text)
     Assert.Contains("call_indirect", text)

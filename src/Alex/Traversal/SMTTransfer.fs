@@ -29,7 +29,7 @@ open Fidelity.PSG
 
 /// Transcribe one obligation into an isolated smt.solver scope.
 /// SSA numbering is fresh per scope (solver regions are isolated).
-let private scope (ob: ObligationInfo) : MLIROp list =
+let private scope (ob: ObligationInfo) : Result<MLIROp list, string> =
     let mutable n = -1
     let v () = n <- n + 1; Alex.Traversal.Values.solverValue n   // fresh per isolated solver scope: the SMT module, not the program graph
     let smt op = MLIROp.SMTOp op
@@ -51,27 +51,28 @@ let private scope (ob: ObligationInfo) : MLIROp list =
     // facts, a/b <= c/d is exactly a*d <= c*b when b,d > 0. Transcribe the
     // products of integer constants rather than evaluating the comparison;
     // this preserves the source QF_LRA claim in a QF_LIA solver scope.
-    let rationalComparisons (pairs: (ExactRational * ExactRational) list) : MLIROp list =
-        let mutable statements: MLIROp list = []
-        let constant value =
-            let ssa = v ()
-            statements <- (smt (SMTBigIntConstant(ssa, value))) :: statements
-            ssa
-        let product numerator denominator =
-            let a, b, output = constant numerator, constant denominator, v ()
-            statements <- (smt (SMTIntMul(output, a, b))) :: statements
-            output
-        let clauses = pairs |> List.map (fun (left, right) ->
-            if left.Denominator <= 0I || right.Denominator <= 0I then
-                invalidArg "ob" (sprintf "Obligation '%s' requires positive rational denominators." ob.Id)
-            let l = product left.Numerator right.Denominator
-            let r = product right.Numerator left.Denominator
-            let clause = v ()
-            statements <- (smt (SMTIntCmp(clause, SmtLe, l, r))) :: statements
-            clause)
-        let conjunction = v ()
-        statements <- (smt (SMTAnd(conjunction, clauses))) :: statements
-        anchor conjunction (List.rev statements)
+    let rationalComparisons (pairs: (ExactRational * ExactRational) list) : Result<MLIROp list, string> =
+        if pairs |> List.exists (fun (left, right) -> left.Denominator <= 0I || right.Denominator <= 0I) then
+            Error (sprintf "Obligation '%s' requires positive rational denominators." ob.Id)
+        else
+            let mutable statements: MLIROp list = []
+            let constant value =
+                let ssa = v ()
+                statements <- (smt (SMTBigIntConstant(ssa, value))) :: statements
+                ssa
+            let product numerator denominator =
+                let a, b, output = constant numerator, constant denominator, v ()
+                statements <- (smt (SMTIntMul(output, a, b))) :: statements
+                output
+            let clauses = pairs |> List.map (fun (left, right) ->
+                let l = product left.Numerator right.Denominator
+                let r = product right.Numerator left.Denominator
+                let clause = v ()
+                statements <- (smt (SMTIntCmp(clause, SmtLe, l, r))) :: statements
+                clause)
+            let conjunction = v ()
+            statements <- (smt (SMTAnd(conjunction, clauses))) :: statements
+            Ok (anchor conjunction (List.rev statements))
 
     let integerComparisons (pairs: (bigint * bigint) list) : MLIROp list =
         let mutable statements: MLIROp list = []
@@ -87,71 +88,83 @@ let private scope (ob: ObligationInfo) : MLIROp list =
 
     // A finite postorder fold formats the canonical logical expression. It
     // never traverses the program graph or re-enters an elaboration pass.
-    let resource (projection: Result<ResourceProof.Projection, string>) =
-        let projection = projection |> Result.defaultWith (fun reason -> invalidArg "ob" (sprintf "Obligation '%s': %s" ob.Id reason))
-        let sort = function ResourceProof.Sort.Boolean -> SMTBool | ResourceProof.Sort.Integer -> SMTInt
-        let variables = projection.Declarations |> List.map (fun (name, ty) -> name, (v (), sort ty)) |> Map.ofList
-        let declarations = variables |> Map.toList |> List.map (fun (name, (value, ty)) -> smt (SMTDeclareFun(value, name, ty)))
-        let children = function
-            | ResourceProof.Expr.Boolean _ | ResourceProof.Expr.Integer _ | ResourceProof.Expr.Variable _ -> []
-            | ResourceProof.Expr.Not value -> [value]
-            | ResourceProof.Expr.And values | ResourceProof.Expr.Or values | ResourceProof.Expr.Add values -> values
-            | ResourceProof.Expr.Implies(left, right) | ResourceProof.Expr.Equal(left, right)
-            | ResourceProof.Expr.LessThan(left, right) | ResourceProof.Expr.LessOrEqual(left, right)
-            | ResourceProof.Expr.Multiply(left, right) | ResourceProof.Expr.Modulo(left, right) -> [left; right]
-            | ResourceProof.Expr.IfThenElse(condition, left, right) -> [condition; left; right]
-        let ordered =
-            [projection.Premises, false; projection.Conclusion, false]
-            |> List.unfold (function
-                | [] -> None
-                | (expression, true) :: rest -> Some(Some expression, rest)
-                | (expression, false) :: rest ->
-                    Some(None, (children expression |> List.map (fun child -> child, false)) @ ((expression, true) :: rest)))
-            |> List.choose id
-        let values, bodies =
-            ordered
-            |> List.fold (fun (values, bodies) expression ->
-                if Map.containsKey expression values then values, bodies
-                else
-                    let child expression = Map.find expression values
-                    let output = v ()
-                    let boolean value =
-                        let zero, equal = v (), if value then output else v ()
-                        [smt (SMTBigIntConstant(zero, 0I)); smt (SMTEq(equal, zero, zero, SMTInt))]
-                        @ (if value then [] else [smt (SMTNot(output, equal))])
-                    let inferred expression =
-                        ResourceProof.sortOf projection.Declarations expression
-                        |> Result.map sort
-                        |> Result.defaultWith (fun reason -> invalidArg "ob" reason)
-                    let value, body =
-                        match expression with
-                        | ResourceProof.Expr.Variable name -> fst variables[name], []
-                        | ResourceProof.Expr.Integer value -> output, [smt (SMTBigIntConstant(output, value))]
-                        | ResourceProof.Expr.Boolean value -> output, boolean value
-                        | ResourceProof.Expr.Not value -> output, [smt (SMTNot(output, child value))]
-                        | ResourceProof.Expr.And [] -> output, boolean true
-                        | ResourceProof.Expr.Or [] -> output, boolean false
-                        | ResourceProof.Expr.And [value] | ResourceProof.Expr.Or [value] -> child value, []
-                        | ResourceProof.Expr.And operands -> output, [smt (SMTAnd(output, List.map child operands))]
-                        | ResourceProof.Expr.Or operands -> output, [smt (SMTOr(output, List.map child operands))]
-                        | ResourceProof.Expr.Implies(left, right) ->
-                            let negated = v ()
-                            output, [smt (SMTNot(negated, child left)); smt (SMTOr(output, [negated; child right]))]
-                        | ResourceProof.Expr.Equal(left, right) -> output, [smt (SMTEq(output, child left, child right, inferred left))]
-                        | ResourceProof.Expr.LessThan(left, right) -> output, [smt (SMTIntCmp(output, SmtLt, child left, child right))]
-                        | ResourceProof.Expr.LessOrEqual(left, right) -> output, [smt (SMTIntCmp(output, SmtLe, child left, child right))]
-                        | ResourceProof.Expr.Multiply(left, right) -> output, [smt (SMTIntMul(output, child left, child right))]
-                        | ResourceProof.Expr.Modulo(left, right) -> output, [smt (SMTIntMod(output, child left, child right))]
-                        | ResourceProof.Expr.Add [] -> output, [smt (SMTBigIntConstant(output, 0I))]
-                        | ResourceProof.Expr.Add (first :: remaining) ->
-                            remaining |> List.fold (fun (left, body) right ->
-                                let sum = v ()
-                                sum, body @ [smt (SMTIntAdd(sum, left, child right))]) (child first, [])
-                        | ResourceProof.Expr.IfThenElse(condition, left, right) ->
-                            output, [smt (SMTIte(output, child condition, child left, child right, inferred expression))]
-                    Map.add expression value values, body :: bodies) (Map.empty, [])
-        anchor values[projection.Conclusion]
-            (declarations @ (bodies |> List.rev |> List.concat) @ [smt (SMTAssert values[projection.Premises])])
+    let resource (projection: Result<ResourceProof.Projection, string>) : Result<MLIROp list, string> =
+        match projection with
+        | Error reason -> Error (sprintf "Obligation '%s': %s" ob.Id reason)
+        | Ok projection ->
+            let sort = function ResourceProof.Sort.Boolean -> SMTBool | ResourceProof.Sort.Integer -> SMTInt
+            let variables = projection.Declarations |> List.map (fun (name, ty) -> name, (v (), sort ty)) |> Map.ofList
+            let declarations = variables |> Map.toList |> List.map (fun (name, (value, ty)) -> smt (SMTDeclareFun(value, name, ty)))
+            let children = function
+                | ResourceProof.Expr.Boolean _ | ResourceProof.Expr.Integer _ | ResourceProof.Expr.Variable _ -> []
+                | ResourceProof.Expr.Not value -> [value]
+                | ResourceProof.Expr.And values | ResourceProof.Expr.Or values | ResourceProof.Expr.Add values -> values
+                | ResourceProof.Expr.Implies(left, right) | ResourceProof.Expr.Equal(left, right)
+                | ResourceProof.Expr.LessThan(left, right) | ResourceProof.Expr.LessOrEqual(left, right)
+                | ResourceProof.Expr.Multiply(left, right) | ResourceProof.Expr.Modulo(left, right) -> [left; right]
+                | ResourceProof.Expr.IfThenElse(condition, left, right) -> [condition; left; right]
+            let ordered =
+                [projection.Premises, false; projection.Conclusion, false]
+                |> List.unfold (function
+                    | [] -> None
+                    | (expression, true) :: rest -> Some(Some expression, rest)
+                    | (expression, false) :: rest ->
+                        Some(None, (children expression |> List.map (fun child -> child, false)) @ ((expression, true) :: rest)))
+                |> List.choose id
+            let folded =
+                ordered
+                |> List.fold (fun stateResult expression ->
+                    match stateResult with
+                    | Error _ as err -> err
+                    | Ok (values, bodies) ->
+                        if Map.containsKey expression values then Ok (values, bodies)
+                        else
+                            let child expression = Map.find expression values
+                            let output = v ()
+                            let boolean value =
+                                let zero, equal = v (), if value then output else v ()
+                                [smt (SMTBigIntConstant(zero, 0I)); smt (SMTEq(equal, zero, zero, SMTInt))]
+                                @ (if value then [] else [smt (SMTNot(output, equal))])
+                            let inferred expression =
+                                ResourceProof.sortOf projection.Declarations expression
+                                |> Result.map sort
+                            let stepResult =
+                                match expression with
+                                | ResourceProof.Expr.Variable name -> Ok (fst variables[name], [])
+                                | ResourceProof.Expr.Integer value -> Ok (output, [smt (SMTBigIntConstant(output, value))])
+                                | ResourceProof.Expr.Boolean value -> Ok (output, boolean value)
+                                | ResourceProof.Expr.Not value -> Ok (output, [smt (SMTNot(output, child value))])
+                                | ResourceProof.Expr.And [] -> Ok (output, boolean true)
+                                | ResourceProof.Expr.Or [] -> Ok (output, boolean false)
+                                | ResourceProof.Expr.And [value] | ResourceProof.Expr.Or [value] -> Ok (child value, [])
+                                | ResourceProof.Expr.And operands -> Ok (output, [smt (SMTAnd(output, List.map child operands))])
+                                | ResourceProof.Expr.Or operands -> Ok (output, [smt (SMTOr(output, List.map child operands))])
+                                | ResourceProof.Expr.Implies(left, right) ->
+                                    let negated = v ()
+                                    Ok (output, [smt (SMTNot(negated, child left)); smt (SMTOr(output, [negated; child right]))])
+                                | ResourceProof.Expr.Equal(left, right) ->
+                                    inferred left |> Result.map (fun ty -> output, [smt (SMTEq(output, child left, child right, ty))])
+                                | ResourceProof.Expr.LessThan(left, right) -> Ok (output, [smt (SMTIntCmp(output, SmtLt, child left, child right))])
+                                | ResourceProof.Expr.LessOrEqual(left, right) -> Ok (output, [smt (SMTIntCmp(output, SmtLe, child left, child right))])
+                                | ResourceProof.Expr.Multiply(left, right) -> Ok (output, [smt (SMTIntMul(output, child left, child right))])
+                                | ResourceProof.Expr.Modulo(left, right) -> Ok (output, [smt (SMTIntMod(output, child left, child right))])
+                                | ResourceProof.Expr.Add [] -> Ok (output, [smt (SMTBigIntConstant(output, 0I))])
+                                | ResourceProof.Expr.Add (first :: remaining) ->
+                                    Ok (
+                                        remaining |> List.fold (fun (left, body) right ->
+                                            let sum = v ()
+                                            sum, body @ [smt (SMTIntAdd(sum, left, child right))]) (child first, []))
+                                | ResourceProof.Expr.IfThenElse(condition, left, right) ->
+                                    inferred expression |> Result.map (fun ty -> output, [smt (SMTIte(output, child condition, child left, child right, ty))])
+                            match stepResult with
+                            | Ok (value, body) -> Ok (Map.add expression value values, body :: bodies)
+                            | Error reason -> Error reason) (Ok (Map.empty, []))
+            match folded with
+            | Error reason -> Error reason
+            | Ok (values, bodies) ->
+                Ok (
+                    anchor values[projection.Conclusion]
+                        (declarations @ (bodies |> List.rev |> List.concat) @ [smt (SMTAssert values[projection.Premises])]))
 
     let boolConst (value: bool) : SSA * MLIROp list =
         let zero, eqOut = v (), v ()
@@ -192,10 +205,10 @@ let private scope (ob: ObligationInfo) : MLIROp list =
         let body = (clauses |> List.collect snd) @ [ smt (SMTAnd(conjunction, List.map fst clauses)) ]
         anchor conjunction body
 
-    let ops =
+    let opsResult : Result<MLIROp list, string> =
         match ob.Body with
         | ObligationBody.Pending _ ->
-            invalidArg "ob" "A Pending obligation has no solver scope."
+            Error "A Pending obligation has no solver scope."
         | ObligationBody.ZeroCopyBufferExtent model ->
             let maxCount, maxCountOps = intConst model.MaximumCount
             let elemBytes, elemBytesOps = int64Const model.ElementBytes
@@ -209,11 +222,12 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 @ [ smt (SMTIntMul(scaledMax, maxCount, elemBytes)) ]
                 @ capOps
                 @ [ smt (SMTIntCmp(boundOut, SmtLe, scaledMax, cap)) ]
-            anchorClauses
-                [ cmpVal SmtLe 0I model.MinimumCount
-                  cmpVal SmtLe model.MinimumCount model.MaximumCount
-                  scaledClause
-                  cmpInt SmtGt model.ElementBytes 0 ]
+            Ok (
+                anchorClauses
+                    [ cmpVal SmtLe 0I model.MinimumCount
+                      cmpVal SmtLe model.MinimumCount model.MaximumCount
+                      scaledClause
+                      cmpInt SmtGt model.ElementBytes 0 ])
         | ObligationBody.BufferRetentionDomination model ->
             let acq = model.AcquireOrder
             let modeClauses =
@@ -225,7 +239,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                       cmpInt SmtGt releaseCount 0
                       eqInt32 releaseCount model.RetirementOrders.Length ]
                     @ (model.RetirementOrders |> List.map (fun ord -> cmpInt SmtLt acq ord))
-            anchorClauses (cmpInt SmtGe acq 0 :: modeClauses)
+            Ok (anchorClauses (cmpInt SmtGe acq 0 :: modeClauses))
         | ObligationBody.UncountedPathTermination model ->
             let modeClause =
                 match model.Mode with
@@ -237,11 +251,12 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     let one, oneOps = int64Const 1
                     let sum, eqOut = v (), v ()
                     eqOut, capOps @ lenOps @ oneOps @ [ smt (SMTIntAdd(sum, len, one)); smt (SMTEq(eqOut, cap, sum, SMTInt)) ]
-            anchorClauses
-                [ cmpVal SmtGe model.ByteLength 0I
-                  boolConst model.RequiresNoInteriorNul
-                  boolConst model.RequiresTrailingNul
-                  modeClause ]
+            Ok (
+                anchorClauses
+                    [ cmpVal SmtGe model.ByteLength 0I
+                      boolConst model.RequiresNoInteriorNul
+                      boolConst model.RequiresTrailingNul
+                      modeClause ])
         | ObligationBody.BorrowedResultViewScope model ->
             let callOrd = model.CallOrder
             let invClauses = model.InvalidationOrders |> List.map (fun inv -> cmpInt SmtGt inv callOrd)
@@ -249,11 +264,12 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 model.ReadOrders |> List.collect (fun rd ->
                     cmpInt SmtGe rd callOrd
                     :: (model.InvalidationOrders |> List.map (fun inv -> cmpInt SmtLt rd inv)))
-            anchorClauses
-                ([ cmpInt SmtGe callOrd 0
-                   boolConst model.NullToNoneBoundary
-                   cmpInt SmtGt model.InvalidationOrders.Length 0 ]
-                 @ invClauses @ readClauses)
+            Ok (
+                anchorClauses
+                    ([ cmpInt SmtGe callOrd 0
+                       boolConst model.NullToNoneBoundary
+                       cmpInt SmtGt model.InvalidationOrders.Length 0 ]
+                     @ invClauses @ readClauses))
         | ObligationBody.BufferAbsenceArgumentConversion model -> BufferAbsenceArgumentProof.project model |> resource
         | ObligationBody.SnapshotBorrowBound(count, snapshot, copy, allocation, minimum, maximum, elementBytes, allocationCapacity) ->
             SnapshotBorrowProof.ofBounds count snapshot copy allocation minimum maximum elementBytes allocationCapacity |> resource
@@ -262,58 +278,57 @@ let private scope (ob: ObligationInfo) : MLIROp list =
         | ObligationBody.OptionalEntryArgumentConversion model -> OptionalEntryArgumentProof.project model |> resource
         | ObligationBody.OptionalEntryAbsenceArgumentConversion model -> OptionalEntryArgumentProof.projectAbsence model |> resource
         | ObligationBody.ForeignResultCoverage model ->
-            let projection =
-                ForeignResultCoverage.ofModel model
-                |> Result.defaultWith (fun reason -> invalidArg "ob" (sprintf "Obligation '%s': %s" ob.Id reason))
+            ForeignResultCoverage.ofModel model
+            |> Result.mapError (fun reason -> sprintf "Obligation '%s': %s" ob.Id reason)
+            |> Result.map (fun projection ->
+                let declaredTerms = ForeignResultCoverage.declaredTerms projection
 
-            let declaredTerms = ForeignResultCoverage.declaredTerms projection
+                let declared =
+                    declaredTerms
+                    |> List.map (fun item -> item, (v (), ForeignResultCoverage.termName item))
+                    |> Map.ofList
 
-            let declared =
-                declaredTerms
-                |> List.map (fun item -> item, (v (), ForeignResultCoverage.termName item))
-                |> Map.ofList
+                let declarations =
+                    declaredTerms
+                    |> List.map (fun item ->
+                        let value, name = declared[item]
+                        smt (SMTDeclareFun(value, name, SMTInt)))
 
-            let declarations =
-                declaredTerms
-                |> List.map (fun item ->
-                    let value, name = declared[item]
-                    smt (SMTDeclareFun(value, name, SMTInt)))
+                let term =
+                    function
+                    | ForeignResultCoverage.Term.Constant value ->
+                        let name = v ()
+                        name, [ smt (SMTBigIntConstant(name, value)) ]
+                    | variable -> fst declared[variable], []
+                // Structural formatting of the canonical predicate, not graph
+                // analysis or a second coverage formula.
+                let rec predicate =
+                    function
+                    | ForeignResultCoverage.Predicate.LessOrEqual(left, right) ->
+                        let left, leftOps = term left
+                        let right, rightOps = term right
+                        let value = v ()
+                        value, leftOps @ rightOps @ [ smt (SMTIntCmp(value, SmtLe, left, right)) ]
+                    | ForeignResultCoverage.Predicate.And [] ->
+                        let zero, value = v (), v ()
+                        value, [ smt (SMTBigIntConstant(zero, 0I)); smt (SMTEq(value, zero, zero, SMTInt)) ]
+                    | ForeignResultCoverage.Predicate.And clauses ->
+                        let values = clauses |> List.map predicate
+                        let value = v ()
+                        value, (values |> List.collect snd) @ [ smt (SMTAnd(value, List.map fst values)) ]
+                    | ForeignResultCoverage.Predicate.Implies(premise, conclusion) ->
+                        let premise, premiseOps = predicate premise
+                        let conclusion, conclusionOps = predicate conclusion
+                        let negated, value = v (), v ()
 
-            let term =
-                function
-                | ForeignResultCoverage.Term.Constant value ->
-                    let name = v ()
-                    name, [ smt (SMTBigIntConstant(name, value)) ]
-                | variable -> fst declared[variable], []
-            // Structural formatting of the canonical predicate, not graph
-            // analysis or a second coverage formula.
-            let rec predicate =
-                function
-                | ForeignResultCoverage.Predicate.LessOrEqual(left, right) ->
-                    let left, leftOps = term left
-                    let right, rightOps = term right
-                    let value = v ()
-                    value, leftOps @ rightOps @ [ smt (SMTIntCmp(value, SmtLe, left, right)) ]
-                | ForeignResultCoverage.Predicate.And [] ->
-                    let zero, value = v (), v ()
-                    value, [ smt (SMTBigIntConstant(zero, 0I)); smt (SMTEq(value, zero, zero, SMTInt)) ]
-                | ForeignResultCoverage.Predicate.And clauses ->
-                    let values = clauses |> List.map predicate
-                    let value = v ()
-                    value, (values |> List.collect snd) @ [ smt (SMTAnd(value, List.map fst values)) ]
-                | ForeignResultCoverage.Predicate.Implies(premise, conclusion) ->
-                    let premise, premiseOps = predicate premise
-                    let conclusion, conclusionOps = predicate conclusion
-                    let negated, value = v (), v ()
+                        value,
+                        premiseOps
+                        @ conclusionOps
+                        @ [ smt (SMTNot(negated, premise)); smt (SMTOr(value, [ negated; conclusion ])) ]
 
-                    value,
-                    premiseOps
-                    @ conclusionOps
-                    @ [ smt (SMTNot(negated, premise)); smt (SMTOr(value, [ negated; conclusion ])) ]
-
-            let premise, premiseOps = predicate (ForeignResultCoverage.refutationPremises projection)
-            let conclusion, body = predicate projection.Conclusion
-            anchor conclusion (declarations @ premiseOps @ body @ [ smt (SMTAssert premise) ])
+                let premise, premiseOps = predicate (ForeignResultCoverage.refutationPremises projection)
+                let conclusion, body = predicate projection.Conclusion
+                anchor conclusion (declarations @ premiseOps @ body @ [ smt (SMTAssert premise) ]))
         | ObligationBody.ProgramInitializationOrder(initializerOrdinal, initializerCount, useOrdinals) ->
             let constant (value: int) =
                 let name = v ()
@@ -329,12 +344,13 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     [smt (SMTIntCmp(after, SmtLt, ordinal, usePhase))
                      smt (SMTIntCmp(bounded, SmtLe, usePhase, count))])
             let conclusion = v ()
-            anchor conclusion
-                (ordinalOps @ countOps @ zeroOps @
-                 [smt (SMTIntCmp(nonnegative, SmtLe, zero, ordinal))
-                  smt (SMTIntCmp(inPlan, SmtLt, ordinal, count))] @
-                 (uses |> List.collect snd) @
-                 [smt (SMTAnd(conclusion, nonnegative :: inPlan :: (uses |> List.collect fst)))])
+            Ok (
+                anchor conclusion
+                    (ordinalOps @ countOps @ zeroOps @
+                     [smt (SMTIntCmp(nonnegative, SmtLe, zero, ordinal))
+                      smt (SMTIntCmp(inPlan, SmtLt, ordinal, count))] @
+                     (uses |> List.collect snd) @
+                     [smt (SMTAnd(conclusion, nonnegative :: inPlan :: (uses |> List.collect fst)))]))
         | ObligationBody.FiniteLoopTrip model ->
             let mutable statements: MLIROp list = []
             let constant value =
@@ -354,14 +370,14 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                            cmp (if model.Inclusive then SmtGt else SmtGe) ending limit]
             let conclusion = v ()
             statements <- (smt (SMTAnd(conclusion, clauses))) :: statements
-            anchor conclusion (List.rev statements)
+            Ok (anchor conclusion (List.rev statements))
         | ObligationBody.FiniteSequencePull model ->
             let steps = model.Steps |> List.map (fun step -> step.Label, step) |> Map.ofList
             let wellShaped =
                 not model.Steps.IsEmpty && steps.Count = model.Steps.Length &&
                 steps.ContainsKey model.Entry &&
                 (model.Steps |> List.forall (fun step -> step.Successors |> List.forall steps.ContainsKey))
-            if not wellShaped then integerComparisons [1I, 0I]
+            if not wellShaped then Ok (integerComparisons [1I, 0I])
             else
                 let constant value =
                     let result = v ()
@@ -386,7 +402,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                                       (plus (constant weight) (constant steps[successor].Remaining))
                                       (constant step.Remaining) ]
                 let conclusion = v ()
-                anchor conclusion ((clauses |> List.collect snd) @ [smt (SMTAnd(conclusion, List.map fst clauses))])
+                Ok (anchor conclusion ((clauses |> List.collect snd) @ [smt (SMTAnd(conclusion, List.map fst clauses))]))
         | ObligationBody.AdditiveLoopInvariant model ->
             let mutable statements: MLIROp list = []
             let constant value =
@@ -435,7 +451,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let conclusion = conjunction [cmp SmtGe count zero; cmp SmtLe lo hi; cmp SmtLe dlo dhi
                                           cmp SmtLe lower upper; cmp SmtLe lower lo; cmp SmtLe hi upper
                                           implies domain enclosed; implies stepDomain preserved]
-            anchor conclusion (List.rev statements)
+            Ok (anchor conclusion (List.rev statements))
         | ObligationBody.FiniteAdditiveEffects(initial, contributions, lower, upper) ->
             let mutable statements: MLIROp list = []
             let constant value =
@@ -471,7 +487,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             statements <- (smt (SMTNot(negated, premise))) :: statements
             statements <- (smt (SMTOr(implication, [negated; enclosed]))) :: statements
             let conclusion = conjunction (implication :: counts)
-            anchor conclusion (List.rev statements)
+            Ok (anchor conclusion (List.rev statements))
         | ObligationBody.FiniteLinearRecurrence model ->
             let dimension = model.InitialLower.Length
             let vectorShape values = List.length values = dimension
@@ -481,7 +497,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 vectorShape model.Lower && vectorShape model.Upper &&
                 matrixShape model.CoefficientLower && matrixShape model.CoefficientUpper &&
                 (model.Powers |> List.forall (fun step -> matrixShape step.Matrix))
-            if not wellShaped then integerComparisons [1I, 0I]
+            if not wellShaped then Ok (integerComparisons [1I, 0I])
             else
                 let mutable statements: MLIROp list = []
                 let constant value =
@@ -544,7 +560,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 statements <- (smt (SMTAnd(conclusion, List.rev clauses))) :: statements
                 // Malformed or false supplied certificates remain refutable;
                 // no global assumption can conceal an inconsistent premise.
-                anchor conclusion (List.rev statements)
+                Ok (anchor conclusion (List.rev statements))
         | ObligationBody.MappedElementSpan model ->
             let mutable statements: MLIROp list = []
             let declare name =
@@ -585,29 +601,31 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                            cmp SmtLe ending maximum; equal (binary SMTIntMod start elementAlignment) zero]
             let conclusion = v ()
             statements <- (smt (SMTAnd(conclusion, clauses))) :: statements
-            anchor conclusion (List.rev statements)
+            Ok (anchor conclusion (List.rev statements))
         | ObligationBody.IntegerLiteralRange (value, lower, upper) ->
-            integerComparisons [ lower, value; value, upper ]
+            Ok (integerComparisons [ lower, value; value, upper ])
         | ObligationBody.IntegerRepresentationCoverage (lower, upper, minimum, maximum) ->
-            integerComparisons [ minimum, lower; lower, upper; upper, maximum ]
+            Ok (integerComparisons [ minimum, lower; lower, upper; upper, maximum ])
         | ObligationBody.IntegerDivisorNonzero (lower, upper) ->
             let lo, hi, zero = v (), v (), v ()
             let ordered, negative, positive, excludesZero, conclusion = v (), v (), v (), v (), v ()
-            anchor conclusion
-                [ smt (SMTBigIntConstant(lo, lower)); smt (SMTBigIntConstant(hi, upper)); smt (SMTBigIntConstant(zero, 0I))
-                  smt (SMTIntCmp(ordered, SmtLe, lo, hi))
-                  smt (SMTIntCmp(negative, SmtLt, hi, zero)); smt (SMTIntCmp(positive, SmtGt, lo, zero))
-                  smt (SMTOr(excludesZero, [negative; positive]))
-                  smt (SMTAnd(conclusion, [ordered; excludesZero])) ]
+            Ok (
+                anchor conclusion
+                    [ smt (SMTBigIntConstant(lo, lower)); smt (SMTBigIntConstant(hi, upper)); smt (SMTBigIntConstant(zero, 0I))
+                      smt (SMTIntCmp(ordered, SmtLe, lo, hi))
+                      smt (SMTIntCmp(negative, SmtLt, hi, zero)); smt (SMTIntCmp(positive, SmtGt, lo, zero))
+                      smt (SMTOr(excludesZero, [negative; positive]))
+                      smt (SMTAnd(conclusion, [ordered; excludesZero])) ])
         | ObligationBody.IntegerShiftCount (lower, upper, bits) ->
             let lo, hi, zero, width = v (), v (), v (), v ()
             let positive, nonnegative, ordered, belowWidth, conclusion = v (), v (), v (), v (), v ()
-            anchor conclusion
-                [ smt (SMTBigIntConstant(lo, lower)); smt (SMTBigIntConstant(hi, upper))
-                  smt (SMTBigIntConstant(zero, 0I)); smt (SMTBigIntConstant(width, (NumericLiteralI.FromString (string bits))))
-                  smt (SMTIntCmp(positive, SmtGt, width, zero)); smt (SMTIntCmp(nonnegative, SmtLe, zero, lo))
-                  smt (SMTIntCmp(ordered, SmtLe, lo, hi)); smt (SMTIntCmp(belowWidth, SmtLt, hi, width))
-                  smt (SMTAnd(conclusion, [positive; nonnegative; ordered; belowWidth])) ]
+            Ok (
+                anchor conclusion
+                    [ smt (SMTBigIntConstant(lo, lower)); smt (SMTBigIntConstant(hi, upper))
+                      smt (SMTBigIntConstant(zero, 0I)); smt (SMTBigIntConstant(width, (NumericLiteralI.FromString (string bits))))
+                      smt (SMTIntCmp(positive, SmtGt, width, zero)); smt (SMTIntCmp(nonnegative, SmtLe, zero, lo))
+                      smt (SMTIntCmp(ordered, SmtLe, lo, hi)); smt (SMTIntCmp(belowWidth, SmtLt, hi, width))
+                      smt (SMTAnd(conclusion, [positive; nonnegative; ordered; belowWidth])) ])
         | ObligationBody.SpatialKernelPartition(elements, grain, columns, slices, depth, iterations) ->
             let mutable statements: MLIROp list = []
             let constant value =
@@ -644,7 +662,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                   yield equal (List.tryLast ends |> Option.defaultValue zero) extent ]
             let conclusion = v ()
             statements <- (smt (SMTAnd(conclusion, clauses))) :: statements
-            anchor conclusion (List.rev statements)
+            Ok (anchor conclusion (List.rev statements))
         | ObligationBody.StringBorrowBound origins ->
             let mutable statements: MLIROp list = []
             let constant value =
@@ -665,7 +683,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 [comparison SmtLe zero count; sameExtent; comparison SmtLt extent storage])
             let conclusion = v ()
             statements <- (smt (SMTAnd(conclusion, nonempty :: clauses))) :: statements
-            anchor conclusion (List.rev statements)
+            Ok (anchor conclusion (List.rev statements))
         | ObligationBody.RealLiteralRange (value, lower, upper) ->
             rationalComparisons [ lower, value; value, upper ]
         | ObligationBody.RealRepresentationCoverage (lower, upper, minimum, maximum) ->
@@ -706,7 +724,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     let conjunction = v ()
                     statements <- (smt (SMTAnd(conjunction, clauses))) :: statements
                     conjunction
-            anchor definition (List.rev statements)
+            Ok (anchor definition (List.rev statements))
         | ObligationBody.DimensionalRelation (rule, left, right, result) ->
             let dimensions = left :: right :: Option.toList result
             let coordinates project =
@@ -750,19 +768,20 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                         let conjunction = v ()
                         statements <- (smt (SMTAnd(conjunction, clauses))) :: statements
                         conjunction
-            anchor definition (List.rev statements)
+            Ok (anchor definition (List.rev statements))
         | ObligationBody.StorageReservation (len, storage) ->
             let s = v ()
             let l = v ()
             let one = v ()
             let sum = v ()
             let def = v ()
-            anchor def
-                [ smt (SMTIntConstant (s, int64 storage))
-                  smt (SMTIntConstant (l, int64 len))
-                  smt (SMTIntConstant (one, 1L))
-                  smt (SMTIntAdd (sum, l, one))
-                  smt (SMTEq (def, s, sum, SMTInt)) ]
+            Ok (
+                anchor def
+                    [ smt (SMTIntConstant (s, int64 storage))
+                      smt (SMTIntConstant (l, int64 len))
+                      smt (SMTIntConstant (one, 1L))
+                      smt (SMTIntAdd (sum, l, one))
+                      smt (SMTEq (def, s, sum, SMTInt)) ])
         | ObligationBody.ViewContainment (view, len, storage) ->
             let vw = v ()
             let l = v ()
@@ -770,21 +789,23 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let eq = v ()
             let lt = v ()
             let def = v ()
-            anchor def
-                [ smt (SMTIntConstant (vw, int64 view))
-                  smt (SMTIntConstant (l, int64 len))
-                  smt (SMTIntConstant (s, int64 storage))
-                  smt (SMTEq (eq, vw, l, SMTInt))
-                  smt (SMTIntCmp (lt, SmtLt, vw, s))
-                  smt (SMTAnd (def, [eq; lt])) ]
+            Ok (
+                anchor def
+                    [ smt (SMTIntConstant (vw, int64 view))
+                      smt (SMTIntConstant (l, int64 len))
+                      smt (SMTIntConstant (s, int64 storage))
+                      smt (SMTEq (eq, vw, l, SMTInt))
+                      smt (SMTIntCmp (lt, SmtLt, vw, s))
+                      smt (SMTAnd (def, [eq; lt])) ])
         | ObligationBody.NulSentinel lastByte ->
             let b = v ()
             let z = v ()
             let def = v ()
-            anchor def
-                [ smt (SMTBVConstant (b, int64 lastByte, 8))
-                  smt (SMTBVConstant (z, 0L, 8))
-                  smt (SMTEq (def, b, z, SMTBV 8)) ]
+            Ok (
+                anchor def
+                    [ smt (SMTBVConstant (b, int64 lastByte, 8))
+                      smt (SMTBVConstant (z, 0L, 8))
+                      smt (SMTEq (def, b, z, SMTBV 8)) ])
         | ObligationBody.StaticStorageLayout (slots, usedSize, allocationSize, poolAlignment, capacity, spaceAlignment, granularity) ->
             // Every placement is a concrete compiler fact. No adjacency premise
             // assumes the layout that this claim is meant to establish.
@@ -849,7 +870,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     clauses <- (any [cmp SmtLe leftEnd rightBegin; cmp SmtLe rightEnd leftBegin]) :: clauses
             let definition = v ()
             statements <- (smt (SMTAnd(definition, List.rev clauses))) :: statements
-            anchor definition (List.rev statements)
+            Ok (anchor definition (List.rev statements))
         | ObligationBody.ContinuationLayout (slots, extent, alignment) ->
             let mutable statements: MLIROp list = []
             let constant value =
@@ -909,7 +930,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                     clauses <- (any [cmp SmtLe leftEnd rightBegin; cmp SmtLe rightEnd leftBegin]) :: clauses
             let definition = v ()
             statements <- (smt (SMTAnd(definition, List.rev clauses))) :: statements
-            anchor definition (List.rev statements)
+            Ok (anchor definition (List.rev statements))
         | ObligationBody.EnvironmentStorageReservation (extent, alignment, capacity, spaceAlignment, granularity) ->
             match extent, alignment, capacity, spaceAlignment, granularity with
             | Some extent, Some alignment, Some capacity, Some spaceAlignment, Some granularity ->
@@ -937,19 +958,20 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 let validGrain, validGrainOps = powers grain
                 let positive, remainder, divisible = v (), v (), v ()
                 let padding, padded, units, rounded, covered, conclusion = v (), v (), v (), v (), v (), v ()
-                anchor conclusion
-                    (bytesOps @ alignOps @ spaceOps @ grainOps @ limitOps @ zeroOps @ oneOps @ divisorOps @ alignDivisorOps
-                     @ validAlignOps @ validSpaceOps @ validGrainOps
-                     @ [smt (SMTIntCmp(positive, SmtGt, bytes, zero))
-                        smt (SMTIntMod(remainder, spaceAlign, alignDivisor))
-                        smt (SMTEq(divisible, remainder, zero, SMTInt))
-                        smt (SMTIntSub(padding, divisor, one))
-                        smt (SMTIntAdd(padded, bytes, padding))
-                        smt (SMTIntDiv(units, padded, divisor))
-                        smt (SMTIntMul(rounded, units, divisor))
-                        smt (SMTIntCmp(covered, SmtLe, rounded, limit))
-                        smt (SMTAnd(conclusion, [positive; validAlign; validSpace; validGrain; divisible; covered]))])
-            | _ -> integerComparisons [1I, 0I]
+                Ok (
+                    anchor conclusion
+                        (bytesOps @ alignOps @ spaceOps @ grainOps @ limitOps @ zeroOps @ oneOps @ divisorOps @ alignDivisorOps
+                         @ validAlignOps @ validSpaceOps @ validGrainOps
+                         @ [smt (SMTIntCmp(positive, SmtGt, bytes, zero))
+                            smt (SMTIntMod(remainder, spaceAlign, alignDivisor))
+                            smt (SMTEq(divisible, remainder, zero, SMTInt))
+                            smt (SMTIntSub(padding, divisor, one))
+                            smt (SMTIntAdd(padded, bytes, padding))
+                            smt (SMTIntDiv(units, padded, divisor))
+                            smt (SMTIntMul(rounded, units, divisor))
+                            smt (SMTIntCmp(covered, SmtLe, rounded, limit))
+                            smt (SMTAnd(conclusion, [positive; validAlign; validSpace; validGrain; divisible; covered]))]))
+            | _ -> Ok (integerComparisons [1I, 0I])
         | ObligationBody.ConsecutiveLayout (storages, span, capacity) ->
             let sizes = List.toArray storages
             let n' = Array.length sizes
@@ -1024,7 +1046,7 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 @ allDisjOps
                 @ fitsOps
                 @ [ smt (SMTAnd (def, [allDisj; spanEq] @ fitsSSAs)) ]
-            anchor def (declOps @ nonNeg @ adjacency @ disjoint @ spanOps)
+            Ok (anchor def (declOps @ nonNeg @ adjacency @ disjoint @ spanOps))
         | ObligationBody.ConcatCopyBound (leftLen, rightLen) ->
             let ll = v ()
             let lr = v ()
@@ -1066,32 +1088,35 @@ let private scope (ob: ObligationInfo) : MLIROp list =
                 [ smt (SMTIntCmp (c1, SmtLe, ll, al))
                   smt (SMTIntCmp (c2, SmtLe, sum, al))
                   smt (SMTAnd (def, [c1; c2])) ]
-            anchor def (decls @ pin ll leftLen @ pin lr rightLen @ premise @ conclusion)
+            Ok (anchor def (decls @ pin ll leftLen @ pin lr rightLen @ premise @ conclusion))
 
         | ObligationBody.CapacityPositive cap ->
             let c = v ()
             let zero = v ()
             let def = v ()
-            anchor def
-                [ smt (SMTIntConstant (c, cap))
-                  smt (SMTIntConstant (zero, 0L))
-                  smt (SMTIntCmp (def, SmtGt, c, zero)) ]
+            Ok (
+                anchor def
+                    [ smt (SMTIntConstant (c, cap))
+                      smt (SMTIntConstant (zero, 0L))
+                      smt (SMTIntCmp (def, SmtGt, c, zero)) ])
         | ObligationBody.CapacityFits (cap, spaceCap) ->
             let c = v ()
             let sc = v ()
             let def = v ()
-            anchor def
-                [ smt (SMTIntConstant (c, cap))
-                  smt (SMTIntConstant (sc, spaceCap))
-                  smt (SMTIntCmp (def, SmtLe, c, sc)) ]
+            Ok (
+                anchor def
+                    [ smt (SMTIntConstant (c, cap))
+                      smt (SMTIntConstant (sc, spaceCap))
+                      smt (SMTIntCmp (def, SmtLe, c, sc)) ])
         | ObligationBody.InputBufferBound (count, allocation) ->
             let c = v ()
             let a = v ()
             let def = v ()
-            anchor def
-                [ smt (SMTIntConstant (c, count))
-                  smt (SMTIntConstant (a, allocation))
-                  smt (SMTIntCmp (def, SmtLe, c, a)) ]
+            Ok (
+                anchor def
+                    [ smt (SMTIntConstant (c, count))
+                      smt (SMTIntConstant (a, allocation))
+                      smt (SMTIntCmp (def, SmtLe, c, a)) ])
         | ObligationBody.InputCopyBound (cap, bound) ->
             // for all r, 1 <= r <= cap: r - 1 <= bound
             let r = v ()
@@ -1102,36 +1127,45 @@ let private scope (ob: ObligationInfo) : MLIROp list =
             let rm1 = v ()
             let b = v ()
             let def = v ()
-            anchor def
-                [ smt (SMTDeclareFun (r, "r", SMTInt))
-                  smt (SMTIntConstant (one, 1L))
-                  smt (SMTIntCmp (geOne, SmtGe, r, one))
-                  smt (SMTAssert geOne)
-                  smt (SMTIntConstant (capC, cap))
-                  smt (SMTIntCmp (leCap, SmtLe, r, capC))
-                  smt (SMTAssert leCap)
-                  smt (SMTIntSub (rm1, r, one))
-                  smt (SMTIntConstant (b, bound))
-                  smt (SMTIntCmp (def, SmtLe, rm1, b)) ]
+            Ok (
+                anchor def
+                    [ smt (SMTDeclareFun (r, "r", SMTInt))
+                      smt (SMTIntConstant (one, 1L))
+                      smt (SMTIntCmp (geOne, SmtGe, r, one))
+                      smt (SMTAssert geOne)
+                      smt (SMTIntConstant (capC, cap))
+                      smt (SMTIntCmp (leCap, SmtLe, r, capC))
+                      smt (SMTAssert leCap)
+                      smt (SMTIntSub (rm1, r, one))
+                      smt (SMTIntConstant (b, bound))
+                      smt (SMTIntCmp (def, SmtLe, rm1, b)) ])
 
-    let logic, transformation =
-        match ob.Body with
-        | ObligationBody.RealLiteralRange _ | ObligationBody.RealRepresentationCoverage _ ->
-            "QF_LIA", [ MLIROp.RawMLIR "// Exact rational bounds: QF_LRA comparisons with positive denominators cleared to QF_LIA." ]
-        | _ -> ob.Logic, []
-    [ MLIROp.RawMLIR (sprintf "// %s: %s" ob.Id ob.Statement)
-      MLIROp.RawMLIR (sprintf "// origin: %s" ob.Source)
-    ] @ transformation @ [ smt (SMTSolver (smt (SMTSetLogic logic) :: ops @ [ smt SMTCheck ])) ]
+    opsResult |> Result.map (fun ops ->
+        let logic, transformation =
+            match ob.Body with
+            | ObligationBody.RealLiteralRange _ | ObligationBody.RealRepresentationCoverage _ ->
+                "QF_LIA", [ MLIROp.RawMLIR "// Exact rational bounds: QF_LRA comparisons with positive denominators cleared to QF_LIA." ]
+            | _ -> ob.Logic, []
+        [ MLIROp.RawMLIR (sprintf "// %s: %s" ob.Id ob.Statement)
+          MLIROp.RawMLIR (sprintf "// origin: %s" ob.Source)
+        ] @ transformation @ [ smt (SMTSolver (smt (SMTSetLogic logic) :: ops @ [ smt SMTCheck ])) ])
 
 /// The verification module from the graph's obligations.
 /// Pure function: ObligationInfo list -> MLIR text. The list is
 /// the complete ledger; only its non-Pending partition has solver scopes.
-let operations (obs: ObligationInfo list) : MLIROp list =
-    obs |> List.collect (fun ob ->
-        match ob.Body with
-        | ObligationBody.Pending _ -> []
-        | _ -> scope ob)
+let operations (obs: ObligationInfo list) : Result<MLIROp list, string> =
+    let rec loop acc remaining =
+        match remaining with
+        | [] -> Ok (acc |> List.rev |> List.concat)
+        | ob :: rest ->
+            match ob.Body with
+            | ObligationBody.Pending _ -> loop acc rest
+            | _ ->
+                match scope ob with
+                | Ok scopedOps -> loop (scopedOps :: acc) rest
+                | Error reason -> Error reason
+    loop [] obs
 
-let transfer (obs: ObligationInfo list) : string =
+let transfer (obs: ObligationInfo list) : Result<string, string> =
     operations obs
-    |> moduleToString (Error "the obligations module carries no pointer-sized type") "obligations"
+    |> Result.bind (moduleToString (Error "the obligations module carries no pointer-sized type") "obligations")

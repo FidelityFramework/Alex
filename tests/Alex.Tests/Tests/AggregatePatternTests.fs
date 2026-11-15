@@ -88,7 +88,7 @@ let ``selected Option initialization writes owned bytes without a descriptor cop
         | other -> failwithf "Option initialization failed: %A" other
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("initialize_option", [Arg 0, TMemRefStatic(4, TInt(IntWidth 8)); Arg 1, TInt(IntWidth 1)], [result.Type],
         views @ writes @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))], FuncVisibility.Public))
-    let source = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "aggregate_component" [definition]
+    let source = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "aggregate_component" [definition] |> Result.defaultWith failwith
     Assert.Contains("memref.view", source)
     Assert.DoesNotContain("memref.load", source)
     Assert.DoesNotContain("memref<1xmemref", source)

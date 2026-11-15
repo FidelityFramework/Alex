@@ -70,7 +70,7 @@ let ``ordinary environment construction preserves the complete mutable cell desc
         | other -> failwithf "Environment read failed: %A" other
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("environment_component", [Arg 0, TMemRefStatic(1, TInt(IntWidth 1))], [result.Type],
         allocation @ reads @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = result.Type }]))], FuncVisibility.Public))
-    let source = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "environment_component" [definition]
+    let source = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "environment_component" [definition] |> Result.defaultWith failwith
     Assert.Contains("memref<1xmemref<1xi1>>", source)
     Assert.DoesNotContain("memref<2xindex>", source)
 
@@ -103,7 +103,7 @@ let ``returned environment initializes its admitted caller destination without a
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("environment_destination_component",
                             [Arg 0, TMemRefStatic(1, TInt(IntWidth 1)); Arg 1, ty], [ty],
                             operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = ty }]))], FuncVisibility.Public))
-        let source = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "environment_destination_component" [definition]
+        let source = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "environment_destination_component" [definition] |> Result.defaultWith failwith
         Assert.DoesNotContain("memref.alloca", source)
         Assert.Contains("memref.store", source)
     | other -> failwithf "Caller destination was not witnessed: %A" other

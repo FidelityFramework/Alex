@@ -180,8 +180,9 @@ let internal pResourceAlias site sourceId (source: Val) : PSGParser<MLIROp list 
         match resourceAccessAt state.Graph.Emission.Boundary site sourceId BoundaryResourceAccessKind.ImmutableAlias with
         | Ok rows -> preturn rows
         | Result.Error reason -> fail (Message reason)
+    let! siteTy = pValueTypeAt site
     do! ensure
-            (source.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph site
+            (source.Type = siteTy
              && (match source.Type with TOpaqueHandle _ | TResourceOption _ -> true | _ -> false))
             "Immutable resource alias differs from its exact source representation."
     return [ResourceAlias(site, source)], TRValue source
@@ -226,13 +227,14 @@ let private pResourceCall (call: BoundaryCall) (imported: BoundaryImport) : PSGP
                         return [], value
                       }
                     | None -> pBoundaryAdapt call.Site operand.Actual operand.Adaptation raw
-                do! ensure (value.Type = BoundaryAbi.scalarType operand.Abi)
+                let! expectedScalarTy = pFromResult (BoundaryAbi.scalarType operand.Abi)
+                do! ensure (value.Type = expectedScalarTy)
                         "Resource acquisition actual differs from its source-published native ABI."
                 let! remaining, values = arguments (Map.add operand.Actual (operand.Adaptation, raw, value) witnessed) rest
                 return operations @ remaining, value :: values
               }
         let! argumentOps, values = arguments Map.empty call.Arguments
-        let resultType = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph call.Site
+        let! resultType = pValueTypeAt call.Site
         do! ensure
                 (match resultType with TResourceOption _ -> true | _ -> false)
                 "Nullable resource acquisition lacks its source-settled opaque Option representation."
@@ -265,7 +267,7 @@ let private pResourceCall (call: BoundaryCall) (imported: BoundaryImport) : PSGP
                     "Owned resource release differs from its original acquisition and cleanup account."
         | None -> return! fail (Message "Owned resource release has no current source-published acquisition.")
         let! ssa, ty = pRecallNode operand.Actual
-        let expected = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual
+        let! expected = pValueTypeAt operand.Actual
         do! ensure
                 (ty = expected
                  && (match expected with
@@ -392,10 +394,12 @@ let pIntrinsicWrite : PSGParser<MLIROp list * TransferResult> = parser {
                 }
                 else pBoundaryAdapt node.Id call.Count call.CountAdaptation { SSA = countSSA; Type = countType }
             let values = [fd; { SSA = bufferSSA; Type = bufferType }; count]
-            do! ensure (List.map _.Type values = IntrinsicWriteAbi.parameters declaration)
+            let! expectedParams = pFromResult (IntrinsicWriteAbi.parameters declaration)
+            do! ensure (List.map _.Type values = expectedParams)
                     "Intrinsic write operands disagree with the source-published ABI."
             let! resultSSA = getNodeSSA node.Id
-            let raw = { SSA = resultSSA; Type = BoundaryAbi.scalarType declaration.Result }
+            let! rawScalarType = pFromResult (BoundaryAbi.scalarType declaration.Result)
+            let raw = { SSA = resultSSA; Type = rawScalarType }
             let! operation = pFuncCallResults [raw] declaration.Symbol values
             let! resultOps, result = pBoundaryAdapt node.Id node.Id call.ResultAdaptation raw
             return fdOps @ countOps @ [operation] @ resultOps, TRValue result
@@ -494,11 +498,6 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                         && (BoundaryAbi.borrowedCHandleRepAt state.Graph imp decl nullable
                             |> Option.bind (Alex.CodeGeneration.TypeMapping.tryRepresentationType >> Result.toOption)
                             |> Option.exists (fun expected -> ty = expected))
-                let pValueTypeAt nodeId : PSGParser<MLIRType> = parser {
-                    match Alex.CodeGeneration.TypeMapping.tryValueTypeAt state.Graph nodeId with
-                    | Result.Ok ty -> return ty
-                    | Result.Error reason -> return! fail (Message reason)
-                }
                 let rec arguments ordinal (witnessed: Map<NodeId, Meet option * Val * Val>) (operands: BoundaryOperand list) : PSGParser<MLIROp list * Val list * OptionalEntrySlot list * BufferAbsenceSlot list> = parser {
                     match operands with
                     | [] -> return [], [], [], []
@@ -525,8 +524,9 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                     match BoundaryAbi.optionalEntryAbsenceConversionAt state.Graph call ordinal operand with
                                     | Result.Ok row -> preturn row
                                     | Result.Error reason -> fail (Message reason)
+                                let! actualType = pValueTypeAt operand.Actual
                                 do! ensure (operand.Adaptation.IsNone
-                                            && raw.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual)
+                                            && raw.Type = actualType)
                                         "Optional absence intent differs from its original Option operand."
                                 let arm : OptionalEntryArm = { CaseOrdinal = selected.CaseOrdinal; Claim = selected.Obligation; Code = None }
                                 return [], raw, Some ({ Ordinal = ordinal; Choice = OptionalEntrySlotChoice.Direct arm } : OptionalEntrySlot), None
@@ -557,8 +557,9 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                         return [operation], code, signature
                                       }
                                     | _ -> fail (Message "Optional entry Result lacks its unique source account.")
+                                let! actualType = pValueTypeAt operand.Actual
                                 do! ensure (operand.Adaptation.IsNone && codeType = signature
-                                            && raw.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual)
+                                            && raw.Type = actualType)
                                         "Optional entry intent differs from its original Option operand or retained closed code."
                                 let arm : OptionalEntryArm = { CaseOrdinal = selected.CaseOrdinal; Claim = selected.Obligation; Code = Some { SSA = code; Type = codeType } }
                                 return codeOps, raw, Some ({ Ordinal = ordinal; Choice = OptionalEntrySlotChoice.Direct arm } : OptionalEntrySlot), None
@@ -577,11 +578,13 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                     match FunctionPointerPatterns.closedFunctionAddress state.Graph presentModel.Formation with
                                     | Result.Ok row -> preturn row
                                     | Result.Error reason -> fail (Message $"Conditional optional entry at boundary call {siteId} operand {ordinal}: {reason}")
+                                let! tagExpectedType = pValueTypeAt tagProjection
+                                let! actualType = pValueTypeAt operand.Actual
                                 do! ensure (operand.Adaptation.IsNone
                                             && presentModel.ResultRetirement.IsNone
                                             && absentModel.ResultRetirement.IsNone
-                                            && tagType = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph tagProjection
-                                            && raw.Type = Alex.CodeGeneration.TypeMapping.valueTypeAt state.Graph operand.Actual)
+                                            && tagType = tagExpectedType
+                                            && raw.Type = actualType)
                                         $"Conditional optional entry intent at boundary call {siteId} operand {ordinal} differs from its published Option operand, tag projection or closed code."
                                 let code = Alex.Traversal.Values.aggregateComponent node.Id selectedRow.Slot ordinal 14
                                 let! operation = pFuncConstant code symbol signature

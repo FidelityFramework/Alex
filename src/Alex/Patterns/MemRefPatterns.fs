@@ -114,18 +114,22 @@ let pStoreMutableVariable (nodeId: int) (memrefSSA: SSA) (valueSSA: SSA) (elemTy
 
 /// Physical storage type of a value with semantic type `ty`: records and tuples are
 /// semantic TStruct values whose storage is a byte memref of the struct's size.
-let slotElementType (arch: Architecture) (ty: MLIRType) : MLIRType =
+let slotElementType (arch: Architecture) (ty: MLIRType) : Result<MLIRType, string> =
     physicalStorageType arch ty
 
-let private programSlotType arch valueTy (published: ProgramStorageEntry option) =
+let private pSlotElementType (arch: Architecture) (ty: MLIRType) : PSGParser<MLIRType> =
+    pPhysicalStorageType arch ty
+
+let private pProgramSlotType arch valueTy (published: ProgramStorageEntry option) : PSGParser<MLIRType> =
     match published with
     | Some storage when
         (match storage.Shape with
          | ProgramStorageShape.NativeEntry _ -> true
          | _ -> false)
         ->
-        TMemRefStatic(storage.Bytes, TInt(IntWidth 8))
-    | _ -> TMemRefStatic(1, slotElementType arch valueTy)
+        preturn (TMemRefStatic(storage.Bytes, TInt(IntWidth 8)))
+    | _ ->
+        pSlotElementType arch valueTy |>> fun elem -> TMemRefStatic(1, elem)
 
 /// Observe the exact startup/storage relation. The source binding's
 /// immutability never grants permission to write an immutable image region.
@@ -160,7 +164,7 @@ let pGlobalSlotInit (nodeId: NodeId) (globalName: string) (valueSSA: SSA) (value
         let! state = getUserState
         let identity = ProgramStorageIdentity.BindingSlot nodeId
         let published = state.Graph.Emission.Storage.ProgramStorage.Entries.TryFind identity
-        let slotTy = programSlotType state.Platform.TargetArch valueTy published
+        let! slotTy = pProgramSlotType state.Platform.TargetArch valueTy published
 
         let! authority =
             Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot nodeId) slotTy
@@ -178,7 +182,7 @@ let pGlobalSlotInit (nodeId: NodeId) (globalName: string) (valueSSA: SSA) (value
             let value = { SSA = valueSSA; Type = valueTy }
             return ([ getOp; MLIROp.NativeEntrySlotStore(identity, formation, slot, value) ], TRValue slot)
         | _ ->
-            let elemTy = slotElementType state.Platform.TargetArch valueTy
+            let! elemTy = pSlotElementType state.Platform.TargetArch valueTy
             MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
             let! zeroOp = pIndexConst ssas.[1] 0L
             let! storeOp = pStore valueSSA ssas.[0] [ ssas.[1] ] elemTy slotTy
@@ -208,7 +212,7 @@ let pGlobalSlotLoad
         let! state = getUserState
         let identity = ProgramStorageIdentity.BindingSlot bindingId
         let published = state.Graph.Emission.Storage.ProgramStorage.Entries.TryFind identity
-        let slotTy = programSlotType state.Platform.TargetArch valueTy published
+        let! slotTy = pProgramSlotType state.Platform.TargetArch valueTy published
 
         let! authority =
             Alex.Patterns.MemoryPatterns.pProgramStorageDeclaration (ProgramStorageIdentity.BindingSlot bindingId) slotTy
@@ -225,7 +229,7 @@ let pGlobalSlotLoad
             let result = { SSA = ssas.[2]; Type = functionType }
             return ([ getOp; MLIROp.NativeEntrySlotLoad(identity, formation, slot, result) ], TRValue result)
         | _ ->
-            let elemTy = slotElementType state.Platform.TargetArch valueTy
+            let! elemTy = pSlotElementType state.Platform.TargetArch valueTy
             MLIRAccumulator.tryEmitGlobalMemref globalName slotTy (Some authority) state.Accumulator
             let! zeroOp = pIndexConst ssas.[1] 0L
             let! loadOp = pLoadFrom ssas.[2] ssas.[0] [ ssas.[1] ] elemTy
@@ -260,7 +264,7 @@ let pGlobalSlotStore
                      | _ -> true))
                 "Native entry module slots do not admit mutable stores."
 
-        let elemTy = slotElementType state.Platform.TargetArch valueTy
+        let! elemTy = pSlotElementType state.Platform.TargetArch valueTy
         let slotTy = TMemRefStatic(1, elemTy)
 
         let! authority =

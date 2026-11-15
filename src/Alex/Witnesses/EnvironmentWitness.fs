@@ -80,8 +80,8 @@ let private access (ctx: WitnessContext) (node: SemanticNode) environment slotId
                         failure node "sequence carrier"
                             $"Codata (SequenceFamilies) did not settle a resident generator for sequence owner {NodeId.value owner} at environment read {NodeId.value node.Id}"
                     | Some generator ->
-                        let symbol = Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph generator false
                         let sequence = parser {
+                            let! symbol = pFromResult (Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph generator false)
                             let! operations, result = pattern
                             match result with
                             | TRValue environment ->

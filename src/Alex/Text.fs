@@ -22,15 +22,12 @@ let firstLine (value: string) =
 
 let replace (oldValue: string) newValue (value: string) =
     let count = String.length oldValue
-    if count = 0 then invalidArg "oldValue" "Replacement requires a nonempty token."
-    let rec loop offset reversed =
-        if offset = String.length value then reversed |> List.rev |> String.concat ""
-        elif offset + count <= String.length value
-             && Seq.forall (fun index -> value[offset + index] = oldValue[index]) (seq { 0 .. count - 1 }) then
-            loop (offset + count) (newValue :: reversed)
-        else loop (offset + 1) (string value[offset] :: reversed)
-    loop 0 []
-
-let exceptionMessage = function
-    | Failure message -> message
-    | _ -> "Unhandled exception"
+    if count = 0 then value
+    else
+        let rec loop offset reversed =
+            if offset = String.length value then reversed |> List.rev |> String.concat ""
+            elif offset + count <= String.length value
+                 && Seq.forall (fun index -> value[offset + index] = oldValue[index]) (seq { 0 .. count - 1 }) then
+                loop (offset + count) (newValue :: reversed)
+            else loop (offset + 1) (string value[offset] :: reversed)
+        loop 0 []

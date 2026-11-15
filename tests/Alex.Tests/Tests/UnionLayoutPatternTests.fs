@@ -80,7 +80,7 @@ let ``union allocation and selected descriptor stores consume the source aligned
     let descriptor = { SSA = Arg 0; Type = TMemRef(TInt(IntWidth 8)) }
     let fields = if present then [descriptor] else []
     let writes =
-        match matchAt (pDUCaseAt selected.Id destination (Alex.CodeGeneration.TypeMapping.sourceTypeAt graph storage.Id) (if present then 1L else 0L) fields) (focus selected.Id) bits operands with
+        match matchAt (pDUCaseAt selected.Id destination (Alex.CodeGeneration.TypeMapping.sourceTypeAt graph storage.Id |> Result.defaultWith failwith) (if present then 1L else 0L) fields) (focus selected.Id) bits operands with
         | Result.Ok ((operations, TRVoid), _) -> operations
         | other -> failwithf "Selected union initialization failed: %A" other
     let views = writes |> List.choose (function
@@ -94,6 +94,6 @@ let ``union allocation and selected descriptor stores consume the source aligned
     Assert.Equal((if present then 2 else 1), stores.Length)
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("initialize_aligned_union", [descriptor.SSA, descriptor.Type], [],
         allocations @ writes @ [MLIROp.FuncOp(FuncOp.Return [])], FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok bits) "union_layout_component" [definition]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok bits) "union_layout_component" [definition] |> Result.defaultWith failwith
     Assert.DoesNotContain("memref.load", text)
     Assert.Equal((if present then 2 else 1), text.Split("memref.store").Length - 1)

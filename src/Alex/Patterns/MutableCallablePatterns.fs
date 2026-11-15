@@ -191,7 +191,7 @@ let pReadMutableCallable (ctx: WitnessContext) binding occurrence = parser {
                 match state.Graph.Nodes.TryFind carrier.Implementation with
                 | Some implementation -> preturn implementation
                 | None -> fail (Message $"Codata (CallableCarriers) did not settle a present implementation for mutable callable alternative {alternative} at node {NodeId.value occurrence}: implementation node {NodeId.value carrier.Implementation} is absent from the graph")
-            let symbol = Alex.CodeGeneration.CallableSymbols.lambda state.Graph implementation false
+            let! symbol = pFromResult (Alex.CodeGeneration.CallableSymbols.lambda state.Graph implementation false)
             let value = { SSA = Values.callableAlternative occurrence alternative; Type = code.Type }
             let! constant = pFuncConstant value.SSA symbol value.Type
             return int64 alternative, ([constant], [value])

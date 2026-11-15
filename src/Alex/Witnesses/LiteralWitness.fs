@@ -48,13 +48,16 @@ let private witnessLiteralNode (ctx: WitnessContext) (node: SemanticNode) : Witn
                         WitnessOutput.errorDiag (Diagnostic.error (Some node.Id) (Some "Literal") (Some "StaticStringPool")
                             "PSG settlement (StaticStringPool) lacks the complete source-owned allocation obligation inventory for this literal.")
                     else
-                    let ops, result = stringPoolView pool entry (Alex.Traversal.Values.values node.Id)
-                    let globals =
-                        if Set.contains pool.Symbol ctx.Accumulator.EmittedGlobals then []
-                        else
-                            ctx.Accumulator.EmittedGlobals <- Set.add pool.Symbol ctx.Accumulator.EmittedGlobals
-                            [Alex.Dialects.Core.Types.MLIROp.GlobalBytePool (pool.Symbol, pool.Bytes, pool.Alignment, anchors)]
-                    { InlineOps = ops; TopLevelOps = globals; Result = result }
+                    match stringPoolView pool entry (Alex.Traversal.Values.values node.Id) with
+                    | Result.Error err ->
+                        WitnessOutput.errorDiag (Diagnostic.error (Some node.Id) (Some "Literal") (Some "StaticStringPool") err)
+                    | Result.Ok (ops, result) ->
+                        let globals =
+                            if Set.contains pool.Symbol ctx.Accumulator.EmittedGlobals then []
+                            else
+                                ctx.Accumulator.EmittedGlobals <- Set.add pool.Symbol ctx.Accumulator.EmittedGlobals
+                                [Alex.Dialects.Core.Types.MLIROp.GlobalBytePool (pool.Symbol, pool.Bytes, pool.Alignment, anchors)]
+                        { InlineOps = ops; TopLevelOps = globals; Result = result }
 
         | _ ->
             // Other literals (int, bool, float, char, etc.) use single SSA

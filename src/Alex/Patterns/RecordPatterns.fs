@@ -26,8 +26,11 @@ open Alex.CodeGeneration.TypeMapping
 
 /// The byte offset of a field within a struct: a read of the settled layout the struct carries
 /// (`SemanticGraph.Layouts`, ruling 2), never a sum of the preceding fields.
-let structFieldByteOffset (structTy: MLIRType) (idx: int) : int =
+let structFieldByteOffset (structTy: MLIRType) (idx: int) : Result<int, string> =
     structFieldOffset structTy idx
+
+let pStructFieldByteOffset (structTy: MLIRType) (idx: int) : PSGParser<int> =
+    pStructFieldOffset structTy idx
 
 /// Find field index and type by name within a TStruct
 let structFieldLookup (fields: (string * MLIRType) list) (fieldName: string) : (int * MLIRType) option =
@@ -107,7 +110,7 @@ let pBuildRecord
                             match structTy with
                             | TStruct (allFields, _) ->
                                 match structFieldLookup allFields fieldName with
-                                | Some (fieldIdx, _) -> parser { return structFieldByteOffset structTy fieldIdx }
+                                | Some (fieldIdx, _) -> pStructFieldByteOffset structTy fieldIdx
                                 | None -> fail (Message $"Record field '{fieldName}' not found in struct type — CCS must provide complete field metadata")
                             | _ -> fail (Message $"Record construction requires TStruct type, got {structTy} — type mapping must produce TStruct for records")
                         let! storeOps = pTypedInsertView allocSSA valueSSA byteOffset offsetSSA viewSSA zeroSSA fieldType memrefTy
@@ -190,7 +193,7 @@ let pBuildRecordCopyWith
 
             // 3. Cast to platform word
             let! state = getUserState
-            let platformWordTy = state.Platform.PlatformWordType
+            let! platformWordTy = pFromResult state.Platform.PlatformWordType
             let! castSrc = pIndexCastS srcPtrWordSSA srcPtrIdxSSA TIndex platformWordTy
             let! castDst = pIndexCastS dstPtrWordSSA dstPtrIdxSSA TIndex platformWordTy
 
@@ -219,7 +222,7 @@ let pBuildRecordCopyWith
                             match structTy with
                             | TStruct (allFields, _) ->
                                 match structFieldLookup allFields fieldName with
-                                | Some (fieldIdx, _) -> preturn (structFieldByteOffset structTy fieldIdx)
+                                | Some (fieldIdx, _) -> pStructFieldByteOffset structTy fieldIdx
                                 | None -> fail (Message $"Record field '{fieldName}' not found in struct type — CCS must provide complete field metadata")
                             | _ -> fail (Message $"Record copy-with requires TStruct type, got {structTy}")
                         let! storeOps = pTypedInsertView allocSSA valueSSA byteOffset offsetSSA viewSSA zeroSSA fieldType memrefTy
@@ -251,7 +254,8 @@ let pBuildRecordComponentCopy
             "Callable record representation copy requires its admitted memory pathway."
     let! count, element = pMemRefShape nodeId state.Platform.TargetArch structTy
     let storage = { SSA = Alex.Traversal.Values.value nodeId 0; Type = TMemRefStatic(count, element) }
-    let source = { original with Type = physicalStorageType state.Platform.TargetArch original.Type }
+    let! sourcePhysType = pPhysicalStorageType state.Platform.TargetArch original.Type
+    let source = { original with Type = sourcePhysType }
     let! allocation = pAllocValue nodeId storage.SSA storage.Type
     let! copy = pAggregateDataCopy source storage
     let! writes =
@@ -261,7 +265,7 @@ let pBuildRecordComponentCopy
                 match structTy with
                 | TStruct(fields, _) ->
                     match structFieldLookup fields name with
-                    | Some(index, _) -> preturn (structFieldByteOffset structTy index)
+                    | Some(index, _) -> pStructFieldByteOffset structTy index
                     | None -> fail (Message "Callable record copy lacks its published data-field placement.")
                 | _ -> fail (Message "Callable record copy lacks its published record placement.")
             let names = Alex.Traversal.Values.aggregateComponent nodeId nodeId ordinal
@@ -295,8 +299,9 @@ let pRecordFieldSet
                 let offsetSSA = ssas.[0]
                 let viewSSA   = ssas.[1]
                 let zeroSSA   = ssas.[2]
-                let byteOffset = structFieldByteOffset structTy fieldIdx
-                let memrefTy = TMemRefStatic (mlirTypeSize arch structTy, TInt (IntWidth 8))
+                let! byteOffset = pStructFieldByteOffset structTy fieldIdx
+                let! structSize = pMlirTypeSize arch structTy
+                let memrefTy = TMemRefStatic (structSize, TInt (IntWidth 8))
                 let! storeOps = pTypedInsertView structSSA valueSSA byteOffset offsetSSA viewSSA zeroSSA fieldType memrefTy
                 return (storeOps, TRVoid)
             | None ->
@@ -345,8 +350,9 @@ let pRecordFieldGet
                     let viewSSA   = ssas.[1]
                     let zeroSSA   = ssas.[2]
                     let resultSSA = ssas.[3]
-                    let byteOffset = structFieldByteOffset structTy fieldIdx
-                    let memrefTy = TMemRefStatic (mlirTypeSize arch structTy, TInt (IntWidth 8))
+                    let! byteOffset = pStructFieldByteOffset structTy fieldIdx
+                    let! structSize = pMlirTypeSize arch structTy
+                    let memrefTy = TMemRefStatic (structSize, TInt (IntWidth 8))
                     let! extractOps = pTypedExtractView resultSSA structSSA byteOffset offsetSSA viewSSA zeroSSA fieldType memrefTy
                     let! (meetOps, readSSA, readTy) = pAdapt nodeId nodeId resultSSA fieldType
                     return (extractOps @ meetOps, TRValue { SSA = readSSA; Type = readTy })

@@ -304,7 +304,7 @@ let ``match scrutinee bindings guard and body retain the declared structural occ
     let result, resultType = MLIRAccumulator.recallNode root.Id ctx.Accumulator |> require "Match lost its result"
     let body = ScopeContext.getOps ctx.ScopeContext.Value @ [MLIROp.FuncOp(FuncOp.Return [{ SSA = result; Type = resultType }])]
     let declaration = MLIROp.FuncOp(FuncOp.FuncDef("match_occurrences", [Arg 0, scrutineeType], [resultType], body, FuncVisibility.Private))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "match_occurrences" [declaration]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "match_occurrences" [declaration] |> Result.defaultWith failwith
     Assert.Contains("@match_occurrences", text)
 
 [<Fact>]

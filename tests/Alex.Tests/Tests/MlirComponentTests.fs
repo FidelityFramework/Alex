@@ -29,7 +29,7 @@ let ``opaque static frame copy serializes as one copy without field loads`` (poi
     let definition =
         MLIROp.FuncOp(FuncOp.FuncDef("copy_frame", [Arg 0, storage; Arg 1, storage], [],
             [copy; MLIROp.FuncOp(FuncOp.Return [])], FuncVisibility.Public))
-    let text = moduleToString (Ok pointerBits) "opaque_copy_component" [definition]
+    let text = moduleToString (Ok pointerBits) "opaque_copy_component" [definition] |> Result.defaultWith failwith
     Assert.Contains("memref.copy", text)
     Assert.DoesNotContain("memref.load", text)
     Assert.DoesNotContain("memref.store", text)
@@ -47,6 +47,6 @@ let ``dynamic stack allocation serializes its descriptor element and alignment``
           MLIROp.MemRefOp(MemRefOp.Store(Arg 1,storage,[zero],element,TMemRef element))
           MLIROp.MemRefOp(MemRefOp.Dim(extent,storage,zero,TMemRef element))
           MLIROp.FuncOp(FuncOp.Return[{ SSA = extent; Type = TIndex }]) ],FuncVisibility.Public))
-    let text = moduleToString (Ok pointerBits) "source_array_storage" [definition]
+    let text = moduleToString (Ok pointerBits) "source_array_storage" [definition] |> Result.defaultWith failwith
     Assert.Contains($"memref<?xi{elementBits}>",text)
     Assert.Contains($"alignment = {alignment}",text)

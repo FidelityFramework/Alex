@@ -167,10 +167,10 @@ let getNode (nodeId: NodeId) (z: PSGZipper) : SemanticNode option =
     Revision.tryNode nodeId z.Graph
 
 /// Get a node, failing if not found
-let requireNode (nodeId: NodeId) (z: PSGZipper) : SemanticNode =
+let requireNode (nodeId: NodeId) (z: PSGZipper) : Result<SemanticNode, string> =
     match getNode nodeId z with
-    | Some node -> node
-    | None -> failwithf "Node %d not found in graph" (NodeId.value nodeId)
+    | Some node -> Result.Ok node
+    | None -> Result.Error (sprintf "Node %d not found in graph" (NodeId.value nodeId))
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PATH INSPECTION

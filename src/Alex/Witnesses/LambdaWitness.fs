@@ -83,8 +83,7 @@ let private ordinaryParameterComponents (ctx: WitnessContext) parameters =
             Alex.Traversal.LazyOperands.project ctx id |> Result.map (fun shape ->
                 Alex.Traversal.LazyOperands.componentTypes shape, Lazy shape)
         | Result.Ok(CallableValueShape.Data _) ->
-            try Result.Ok([mapTypeAt id ctx], Scalar)
-            with ex -> Result.Error (Alex.Text.exceptionMessage ex))
+            mapTypeAt id ctx |> Result.map (fun ty -> [ty], Scalar))
     match groups |> List.tryPick (function Result.Error reason -> Some reason | _ -> None) with
     | Some reason -> Result.Error reason
     | None -> Result.Ok(groups |> List.choose (function Result.Ok group -> Some group | _ -> None))
@@ -187,11 +186,14 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
 
             // Definitions, direct calls and closure code addresses share the same
             // resolved binding identity; equal local source names remain distinct.
-            let funcName =
+            let funcNameResult =
                 match native, storage.Startup with
-                | Some _, _ -> ctx.Graph.Emission.Callable.NativeEntries[node.Id]
-                | _, Some plan when plan.EntryLambda = node.Id -> plan.Symbol
+                | Some _, _ -> Result.Ok (ctx.Graph.Emission.Callable.NativeEntries[node.Id])
+                | _, Some plan when plan.EntryLambda = node.Id -> Result.Ok plan.Symbol
                 | _ -> Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph node false
+            match funcNameResult with
+            | Result.Error reason -> WitnessOutput.error reason
+            | Result.Ok funcName ->
 
             // The actual lambda occurrence supplies ordered formals. A callable
             // formal expands into code and its actual environment; subsequent
@@ -226,9 +228,12 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                 | Omitted, [] -> ()
                 | NativeUnit, [] ->
                     let ssa = Values.value paramId 0
-                    let ty = representationType (ValueRepresentation.Scalar SettledSlot.Unit)
-                    MLIRAccumulator.bindNode paramId ssa ty ctx.Accumulator
-                    bodyScopeRef := ScopeContext.addOp (MLIROp.ArithOp(ArithOp.ConstI(ssa, 0I, ty))) !bodyScopeRef
+                    match representationType (ValueRepresentation.Scalar SettledSlot.Unit) with
+                    | Result.Ok ty ->
+                        MLIRAccumulator.bindNode paramId ssa ty ctx.Accumulator
+                        bodyScopeRef := ScopeContext.addOp (MLIROp.ArithOp(ArithOp.ConstI(ssa, 0I, ty))) !bodyScopeRef
+                    | Result.Error reason ->
+                        MLIRAccumulator.addError (Diagnostic.error (Some paramId) (Some "Lambda") (Some "Native unit formal") reason) ctx.Accumulator
                 | Scalar, [value] ->
                     let adaptation = native |> Option.bind (fun (entry, _) -> List.zip entry.Formals entry.ParameterAdaptations |> List.tryFind (fst >> (=) paramId) |> Option.bind snd)
                     let adapted =
@@ -306,7 +311,11 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             let bodyOps = ScopeContext.getOps !bodyScopeRef
 
             // Get body result for return value
-            let actualValueNode = if nativeUnit then bodyId else findLastValueNode bodyId ctx.Graph
+            match if nativeUnit then Result.Ok bodyId else findLastValueNode bodyId ctx.Graph with
+            | Result.Error reason ->
+                MLIRAccumulator.restoreOperands savedOperands ctx.Accumulator
+                WitnessOutput.error reason
+            | Result.Ok actualValueNode ->
             let bodyResult = MLIRAccumulator.recallNode bodyId ctx.Accumulator
             let bodyCallable =
                 match MLIRAccumulator.recallCallable actualValueNode ctx.Accumulator with
@@ -361,29 +370,44 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                 | None, Some(_, actualType), Some(meet, _) when actualType <> TInt(IntWidth meet.From) ->
                     Some "Lambda return meet does not start at its witnessed body carrier."
                 | _ -> None
-            let returnTypes =
-                if nativeUnit then []
+            let returnTypesResult : Result<MLIRType list, string> =
+                if nativeUnit then Result.Ok []
                 else
-                    let rawReturnType =
+                    let rawReturnTypeResult =
                         match bodyComponents with
-                        | Some values -> (List.head values).Type
+                        | Some values -> Result.Ok (List.head values).Type
                         | None -> mapTypeAt bodyId ctx
-                    [match bodyComponents, returnMeet, bodyResult with
-                     | Some values, _, _ -> (List.head values).Type
-                     | None, Some (meet, _), Some _ -> TInt (IntWidth meet.To)
-                     | None, _, Some (_, actualTy) -> actualTy
-                     | None, _, None -> requireValueType ctx.Graph bodyId rawReturnType]
+                    rawReturnTypeResult |> Result.bind (fun rawReturnType ->
+                        match bodyComponents, returnMeet, bodyResult with
+                        | Some values, _, _ -> Result.Ok [ (List.head values).Type ]
+                        | None, Some (meet, _), Some _ -> Result.Ok [ TInt (IntWidth meet.To) ]
+                        | None, _, Some (_, actualTy) -> Result.Ok [ actualTy ]
+                        | None, _, None ->
+                            requireValueType ctx.Graph bodyId rawReturnType |> Result.map List.singleton)
+            match returnTypesResult with
+            | Result.Error reason ->
+                WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Lambda") (Some "return type") reason
+            | Result.Ok returnTypes ->
             match native with
-            | Some(entry, signature) when
-                entry.ResultAdaptation <> (returnMeet |> Option.map fst) ||
-                (signature.Result |> Option.map BoundaryAbi.scalarType |> Option.toList) <> returnTypes ->
-                MLIRAccumulator.addError (Diagnostic.error (Some node.Id) (Some "Lambda") (Some "Native result")
-                    "Closed native result differs from its exact source return meet and receiving ABI.") ctx.Accumulator
-            | _ -> ()
-            let returnMeetOps =
+            | Some(entry, signature) ->
+                let sigResultType =
+                    match signature.Result with
+                    | None -> Result.Ok []
+                    | Some scalar -> BoundaryAbi.scalarType scalar |> Result.map List.singleton
+                if entry.ResultAdaptation <> (returnMeet |> Option.map fst) ||
+                   sigResultType <> Result.Ok returnTypes then
+                    MLIRAccumulator.addError (Diagnostic.error (Some node.Id) (Some "Lambda") (Some "Native result")
+                        "Closed native result differs from its exact source return meet and receiving ABI.") ctx.Accumulator
+            | None -> ()
+            let returnMeetOpsResult =
                 match returnError, returnMeet, bodyResult with
-                | None, Some (meet, result), Some (ssa, _) -> [ meetOp meet result ssa ]
-                | _ -> []
+                | None, Some (meet, result), Some (ssa, _) ->
+                    meetOp meet result ssa |> Result.map List.singleton
+                | _ -> Result.Ok []
+            match returnMeetOpsResult with
+            | Result.Error reason ->
+                WitnessOutput.errorCoded AX4001 (Some node.Id) (Some "Lambda") (Some "return occurrence") reason
+            | Result.Ok returnMeetOps ->
             let bodyOps = bodyOps @ returnMeetOps
 
             // Handle bodyResult based on return type

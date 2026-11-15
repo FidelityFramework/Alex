@@ -71,7 +71,7 @@ type Refusal = {
 }
 
 /// The portable text of a module of operations.
-let serialize (pointerBits: Result<int, string>) (moduleName: string option) (operations: MLIROp list) : ModuleText =
+let serialize (pointerBits: Result<int, string>) (moduleName: string option) (operations: MLIROp list) : Result<ModuleText, string> =
     moduleText pointerBits moduleName operations
 
 let private witnessWith
@@ -108,21 +108,28 @@ let private witnessWith
                     Alex.Traversal.XDCTransfer.transfer mapping
                     |> Result.map (fun xdc -> Some { Name = "constraints.xdc"; Text = xdc })
                 | _ -> Result.Ok None
-            match storage, constraints with
-            | Result.Error reason, _ | _, Result.Error reason -> Result.Error (refuse reason operations)
-            | Result.Ok writableStorage, Result.Ok constraints ->
+            let textResult = serialize arch.Pointer moduleName operations
+            let proofOpsResult = Alex.Traversal.SMTTransfer.operations revision.Obligations
+            let proofTextResult = Alex.Traversal.SMTTransfer.transfer revision.Obligations
+            match storage, constraints, textResult, proofOpsResult, proofTextResult with
+            | Result.Error reason, _, _, _, _
+            | _, Result.Error reason, _, _, _
+            | _, _, Result.Error reason, _, _
+            | _, _, _, Result.Error reason, _
+            | _, _, _, _, Result.Error reason -> Result.Error (refuse reason operations)
+            | Result.Ok writableStorage, Result.Ok constraints, Result.Ok text, Result.Ok proofOps, Result.Ok proofText ->
                 let witnessed =
                     { Scope = scope
                       Operations = operations
                       Definitions = definitions
                       Emissions = emissions
-                      Text = serialize arch.Pointer moduleName operations
+                      Text = text
                       ModuleName = moduleName
                       PointerBits = arch.Pointer
                       WritableStorage = writableStorage
                       Proof = { Obligations = revision.Obligations
-                                Operations = Alex.Traversal.SMTTransfer.operations revision.Obligations
-                                Text = Alex.Traversal.SMTTransfer.transfer revision.Obligations }
+                                Operations = proofOps
+                                Text = proofText }
                       Constraints = constraints
                       Links = Set.union revision.Emission.Boundary.Links request.LinkedLibraries }
                 Result.Ok (witnessed, state)

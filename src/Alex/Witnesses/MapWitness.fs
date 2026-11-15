@@ -29,11 +29,12 @@ let private witnessMap (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
     | Some (info, _) ->
         match info.Operation with
         | "empty" ->
-            let mapTy = mapTypeAt node.Id ctx
-
-            match tryMatchWithDiagnostics (pMapEmpty node.Id mapTy) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-            | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-            | Result.Error diagnostic -> WitnessOutput.error $"Map.empty: {diagnostic}"
+            match mapTypeAt node.Id ctx with
+            | Result.Ok mapTy ->
+                match tryMatchWithDiagnostics (pMapEmpty node.Id mapTy) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                | Result.Error diagnostic -> WitnessOutput.error $"Map.empty: {diagnostic}"
+            | Result.Error err -> WitnessOutput.error $"Map.empty: {err}"
 
         | "isEmpty" ->
             WitnessOutput.error "Map.isEmpty: Baker decomposes to structural check"
@@ -43,11 +44,12 @@ let private witnessMap (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (mapSSA, _) ->
-                    let keyType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pMapKey node.Id mapSSA keyType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Map.key: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok keyType ->
+                        match tryMatchWithDiagnostics (pMapKey node.Id mapSSA keyType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Map.key: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Map.key: {err}"
                 | None -> WitnessOutput.error "Map.key: Map not yet witnessed"
             | _ -> WitnessOutput.error $"Map.key: Expected 1 child, got {node.Children.Length}"
 
@@ -56,11 +58,12 @@ let private witnessMap (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (mapSSA, _) ->
-                    let valueType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pMapValue node.Id mapSSA valueType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Map.value: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok valueType ->
+                        match tryMatchWithDiagnostics (pMapValue node.Id mapSSA valueType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Map.value: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Map.value: {err}"
                 | None -> WitnessOutput.error "Map.value: Map not yet witnessed"
             | _ -> WitnessOutput.error $"Map.value: Expected 1 child, got {node.Children.Length}"
 
@@ -69,11 +72,12 @@ let private witnessMap (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (mapSSA, _) ->
-                    let subtreeType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pMapLeft node.Id mapSSA subtreeType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Map.left: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok subtreeType ->
+                        match tryMatchWithDiagnostics (pMapLeft node.Id mapSSA subtreeType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Map.left: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Map.left: {err}"
                 | None -> WitnessOutput.error "Map.left: Map not yet witnessed"
             | _ -> WitnessOutput.error $"Map.left: Expected 1 child, got {node.Children.Length}"
 
@@ -82,11 +86,12 @@ let private witnessMap (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (mapSSA, _) ->
-                    let subtreeType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pMapRight node.Id mapSSA subtreeType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Map.right: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok subtreeType ->
+                        match tryMatchWithDiagnostics (pMapRight node.Id mapSSA subtreeType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Map.right: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Map.right: {err}"
                 | None -> WitnessOutput.error "Map.right: Map not yet witnessed"
             | _ -> WitnessOutput.error $"Map.right: Expected 1 child, got {node.Children.Length}"
 
@@ -95,11 +100,12 @@ let private witnessMap (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (mapSSA, _) ->
-                    let heightType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pMapHeight node.Id mapSSA heightType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Map.height: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok heightType ->
+                        match tryMatchWithDiagnostics (pMapHeight node.Id mapSSA heightType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Map.height: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Map.height: {err}"
                 | None -> WitnessOutput.error "Map.height: Map not yet witnessed"
             | _ -> WitnessOutput.error $"Map.height: Expected 1 child, got {node.Children.Length}"
 
@@ -116,11 +122,12 @@ let private witnessMap (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
                     let value = { SSA = valueSSA; Type = valueType }
                     let left = { SSA = leftSSA; Type = leftType }
                     let right = { SSA = rightSSA; Type = rightType }
-                    let mapTy = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pMapAdd node.Id key value left right mapTy) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Map.node: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok mapTy ->
+                        match tryMatchWithDiagnostics (pMapAdd node.Id key value left right mapTy) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Map.node: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Map.node: {err}"
                 | _ -> WitnessOutput.error "Map.node: One or more children not yet witnessed"
             | _ -> WitnessOutput.error $"Map.node: Expected 5 children, got {node.Children.Length}"
 

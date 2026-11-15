@@ -126,6 +126,9 @@ printf 'let PhysicalEquality (x: int) (y: int) = x = y\nlet value = PhysicalEqua
 printf 'let render (x: int) = sprintf "%%A" x\n' > "$scratch/reflection-format.fsx"
 printf 'let render (x: int) = sprintf "%%+A" x\n' > "$scratch/reflection-format-plus.fsx"
 printf 'let render (x: int) = $"value: %%A{x}"\n' > "$scratch/reflection-format-interpolated.fsx"
+printf 'let bad () : int = failwith "error"\n' > "$scratch/exception-failwith.fsx"
+printf 'let bad (x: int) : int = invalidArg "x" "error"\n' > "$scratch/exception-invalidarg.fsx"
+printf 'let bad () = try 1 with _ -> 0\n' > "$scratch/exception-trywith.fsx"
 for alias in Foreign ObjectAlias ObjectNominal Chain Builders Handler Pair Both Boxed Arr Text Names Lookup Function PurePair Optional Generic NestedObj NestedForeign Anonymous AnonymousObj Distance Ints UnitFunction Nat Resizable LazyValue Sequence LocalAlias ExceptionType BigInteger DecimalValue; do
   type_name=$alias
   case "$alias" in Boxed|Generic) type_name="$alias<int>" ;; esac
@@ -187,6 +190,7 @@ run_case() {
         AXC005) reason='Clef production code must not declare obj types.' ;;
         AXC006) reason='Clef production code must not use reference identity (PhysicalEquality or ReferenceEquals).' ;;
         AXC007) reason='Clef production code must not use %A reflection formatting.' ;;
+        AXC008) reason='Clef production code must not throw or catch CLR exceptions.' ;;
         *) printf 'Unknown expected diagnostic %s\n' "$expected" >&2; return 1 ;;
       esac
       count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
@@ -291,6 +295,9 @@ run_case physical-equality-lookalike clean
 run_case reflection-format AXC007 '1,30'
 run_case reflection-format-plus AXC007 '1,30'
 run_case reflection-format-interpolated AXC007 '1,22'
+run_case exception-failwith AXC008 '1,19'
+run_case exception-invalidarg AXC008 '1,25'
+run_case exception-trywith AXC008 '1,13'
 run_case null AXC001 '1,20'
 run_case null-pattern AXC001 '1,37'
 run_case system-open AXC002 '1,5'
@@ -342,7 +349,7 @@ run_case alias-Resizable policy-pending
 run_case alias-LazyValue policy-pending
 run_case alias-Sequence policy-pending
 run_case alias-LocalAlias clean
-run_case alias-ExceptionType policy-pending
+run_case alias-ExceptionType AXC002 '2,10'
 run_case alias-BigInteger policy-pending
 run_case alias-DecimalValue policy-pending
 run_case file-reference AXC002 '1,21 1,11'
@@ -472,7 +479,7 @@ run_case Traversal/axel-fallback-helper-param AXA007-fn '4,37'
 run_case Traversal/axel-fallback-ok clean
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 198 ]] || { printf 'Expected 198 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 201 ]] || { printf 'Expected 201 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done

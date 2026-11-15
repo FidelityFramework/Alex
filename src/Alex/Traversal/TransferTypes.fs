@@ -36,7 +36,8 @@ type PlatformReads = {
 }
 with
     /// The platform word type: the declared Register width as an MLIR integer.
-    member this.PlatformWordType : MLIRType = TInt (declaredWordWidth this.TargetArch)
+    member this.PlatformWordType : Result<MLIRType, string> =
+        declaredWordWidth this.TargetArch |> Result.map TInt
 
 /// What the traversal carries beside the graph. Every fact about the program is read from the
 /// graph (its nodes, layouts, ranges and Codata); these are the target and the platform reads.
@@ -757,11 +758,11 @@ module ModuleValues =
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The result value a node names (Alex.Traversal.Values)
-let requireSSA (nodeId: NodeId) (ctx: WitnessContext) : SSA =
+let requireSSA (nodeId: NodeId) (ctx: WitnessContext) : Result<SSA, string> =
     Alex.Traversal.Values.resultOf ctx.Coeffects.TargetPlatform ctx.Graph (Alex.Traversal.PSGZipper.enclosingLambdaIds ctx.Zipper) nodeId
 
 /// The values a node names (Alex.Traversal.Values)
-let requireSSAs (nodeId: NodeId) (ctx: WitnessContext) : SSA list =
+let requireSSAs (nodeId: NodeId) (ctx: WitnessContext) : Result<SSA list, string> =
     Alex.Traversal.Values.valuesOf ctx.Coeffects.TargetPlatform ctx.Graph (Alex.Traversal.PSGZipper.enclosingLambdaIds ctx.Zipper) nodeId
 
 /// The escape kind of an allocating site (Codata.Escapes). CCS records every
@@ -772,12 +773,6 @@ let tryEscapeOf (graph: Revision) (nodeId: NodeId) : Result<EscapeKind, string> 
     | Some escape -> Result.Ok escape
     | None ->
         Result.Error (sprintf "Codata (Escapes) did not settle the escape class for allocating site %d" (NodeId.value nodeId))
-
-/// Parser-layer callers should prefer tryEscapeOf and fail with its reason.
-let escapeOf (graph: Revision) (nodeId: NodeId) : EscapeKind =
-    match tryEscapeOf graph nodeId with
-    | Result.Ok escape -> escape
-    | Result.Error reason -> invalidOp reason
 
 /// The meet the graph derived for a consumer's operand, with the value emission names for it;
 /// None where the widths agree. A read of a slot names the consumer as its own operand.
@@ -793,9 +788,9 @@ let targetArch (ctx: WitnessContext) : Architecture =
     ctx.Coeffects.Platform.TargetArch
 
 /// Physical form at the exact source occurrence.
-let mapTypeAt (nodeId: NodeId) (ctx: WitnessContext) : MLIRType =
+let mapTypeAt (nodeId: NodeId) (ctx: WitnessContext) : Result<MLIRType, string> =
     valueTypeAt ctx.Graph nodeId
 
 /// Get platform-aware word width for string length, array length, etc.
-let wordWidth (ctx: WitnessContext) : IntWidth =
+let wordWidth (ctx: WitnessContext) : Result<IntWidth, string> =
     declaredWordWidth ctx.Coeffects.Platform.TargetArch

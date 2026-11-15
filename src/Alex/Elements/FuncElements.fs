@@ -52,14 +52,17 @@ let boundaryScalarType = BoundaryAbi.scalarType
 
 /// Atomic physical spelling of a declaration already settled by CCS/Baker.
 /// The Pattern witnesses it only at its published owner scope.
-let publishedFuncDecl (declaration: BoundaryImport) : MLIROp =
-    MLIROp.FuncOp (FuncOp.BoundaryFuncDecl(declaration, BoundaryAbi.parameters declaration, BoundaryAbi.results declaration))
+let publishedFuncDecl (declaration: BoundaryImport) : Result<MLIROp, string> =
+    match BoundaryAbi.parameters declaration, BoundaryAbi.results declaration with
+    | Ok parameters, Ok results ->
+        Ok (MLIROp.FuncOp (FuncOp.BoundaryFuncDecl(declaration, parameters, results)))
+    | Error reason, _ | _, Error reason -> Error reason
 
 let publishedIntrinsicWriteDecl (declaration: IntrinsicWriteImport) : MLIROp =
     MLIROp.FuncOp (FuncOp.IntrinsicWriteDecl declaration)
 
 let pPublishedFuncDecl (declaration: BoundaryImport) : PSGParser<MLIROp> =
-    preturn (publishedFuncDecl declaration)
+    pFromResult (publishedFuncDecl declaration)
 
 let pPublishedIntrinsicWriteDecl (declaration: IntrinsicWriteImport) : PSGParser<MLIROp> =
     preturn (publishedIntrinsicWriteDecl declaration)

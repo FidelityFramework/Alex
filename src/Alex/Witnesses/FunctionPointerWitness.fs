@@ -34,12 +34,17 @@ let private witness (ctx: WitnessContext) (node: SemanticNode) =
             else
                 let projection = ctx.Graph.Emission.Callable
                 let adapted = List.zip arguments (List.choose id recalled) |> List.map (fun (id, (ssa, ty)) -> adaptOperand ctx.Coeffects ctx.Graph node.Id id ssa ty)
-                let prefix = adapted |> List.collect (fun (ops, _, _) -> ops)
-                let values = adapted |> List.map (fun (_, ssa, ty) -> { SSA = ssa; Type = ty })
                 let physicalResult =
-                    if projection.VoidPointers.Contains pointer then TVoid
+                    if projection.VoidPointers.Contains pointer then Result.Ok TVoid
                     else mapTypeAt node.Id ctx
-                observe (pFunctionPointerCall node.Id pointerSSA values physicalResult) prefix
+                match adapted |> List.tryPick (function Result.Error err -> Some err | _ -> None), physicalResult with
+                | Some err, _
+                | _, Result.Error err -> WitnessOutput.error err
+                | None, Result.Ok resultTy ->
+                    let items = adapted |> List.choose (function Result.Ok item -> Some item | _ -> None)
+                    let prefix = items |> List.collect (fun (ops, _, _) -> ops)
+                    let values = items |> List.map (fun (_, ssa, ty) -> { SSA = ssa; Type = ty })
+                    observe (pFunctionPointerCall node.Id pointerSSA values resultTy) prefix
         | _ -> WitnessOutput.error "Native callback pointer was not witnessed as a pointer-sized value."
     | None -> WitnessOutput.skip
 

@@ -116,16 +116,19 @@ let private witnessBinding (ctx: WitnessContext) (node: SemanticNode) : WitnessO
                         // bound to the value it forwards by its own witness.
                         match MLIRAccumulator.recallNode valueId ctx.Accumulator with
                         | Some (initialSSA, initialTy) ->
-                            let meetOps, valueSSA, _ = adaptOperand ctx.Coeffects ctx.Graph node.Id valueId initialSSA initialTy
                             // the slot's element type at the binding's range width on fabric
-                            let valueTy = mapTypeAt node.Id ctx
-                            let globalName = ModuleValues.globalName name node.Id
-                            match tryMatchWithDiagnostics (pGlobalSlotInit node.Id globalName valueSSA valueTy)
-                                          ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                            | Result.Ok ((ops, result), _) ->
-                                { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
-                            | Result.Error diagnostic ->
-                                WitnessOutput.error $"Module value '{name}': {diagnostic}"
+                            match adaptOperand ctx.Coeffects ctx.Graph node.Id valueId initialSSA initialTy, mapTypeAt node.Id ctx with
+                            | Result.Ok (meetOps, valueSSA, _), Result.Ok valueTy ->
+                                let globalName = ModuleValues.globalName name node.Id
+                                match tryMatchWithDiagnostics (pGlobalSlotInit node.Id globalName valueSSA valueTy)
+                                              ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                                | Result.Ok ((ops, result), _) ->
+                                    { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
+                                | Result.Error diagnostic ->
+                                    WitnessOutput.error $"Module value '{name}': {diagnostic}"
+                            | Result.Error err, _
+                            | _, Result.Error err ->
+                                WitnessOutput.error $"Module value '{name}': {err}"
                         | None ->
                             WitnessOutput.error $"Module value '{name}': Initial value not yet witnessed"
                     // Check if binding is mutable
@@ -136,18 +139,21 @@ let private witnessBinding (ctx: WitnessContext) (node: SemanticNode) : WitnessO
                         match MLIRAccumulator.recallNode valueId ctx.Accumulator with
                         | Some (rawInitSSA, rawInitTy) ->
                             let (NodeId nodeIdInt) = node.Id
-                            let (meetOps, initSSA, initTy) = adaptOperand ctx.Coeffects ctx.Graph node.Id valueId rawInitSSA rawInitTy
-                            let elemType = mapTypeAt node.Id ctx
-                            let pattern = parser {
-                                do! ensure (initTy = elemType) "Mutable initializer lacks the source-settled cell representation."
-                                return! pBuildMutableBinding nodeIdInt elemType initSSA
-                              }
-                            match tryMatchWithDiagnostics pattern
-                                          ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                            | Result.Ok ((ops, result), _) ->
-                                { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
-                            | Result.Error diagnostic ->
-                                WitnessOutput.error $"Mutable binding '{name}': {diagnostic}"
+                            match adaptOperand ctx.Coeffects ctx.Graph node.Id valueId rawInitSSA rawInitTy, mapTypeAt node.Id ctx with
+                            | Result.Ok (meetOps, initSSA, initTy), Result.Ok elemType ->
+                                let pattern = parser {
+                                    do! ensure (initTy = elemType) "Mutable initializer lacks the source-settled cell representation."
+                                    return! pBuildMutableBinding nodeIdInt elemType initSSA
+                                  }
+                                match tryMatchWithDiagnostics pattern
+                                              ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                                | Result.Ok ((ops, result), _) ->
+                                    { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
+                                | Result.Error diagnostic ->
+                                    WitnessOutput.error $"Mutable binding '{name}': {diagnostic}"
+                            | Result.Error err, _
+                            | _, Result.Error err ->
+                                WitnessOutput.error $"Mutable binding '{name}': {err}"
                         | None ->
                             WitnessOutput.error $"Mutable binding '{name}': Initial value not yet witnessed"
                     else
@@ -157,8 +163,11 @@ let private witnessBinding (ctx: WitnessContext) (node: SemanticNode) : WitnessO
                         // for this binding); the value's own SSA where the widths agree
                         match MLIRAccumulator.recallNode valueId ctx.Accumulator with
                         | Some (rawSSA, rawTy) ->
-                            let (meetOps, ssa, ty) = adaptOperand ctx.Coeffects ctx.Graph node.Id valueId rawSSA rawTy
-                            { InlineOps = meetOps; TopLevelOps = []; Result = TRValue { SSA = ssa; Type = ty } }
+                            match adaptOperand ctx.Coeffects ctx.Graph node.Id valueId rawSSA rawTy with
+                            | Result.Ok (meetOps, ssa, ty) ->
+                                { InlineOps = meetOps; TopLevelOps = []; Result = TRValue { SSA = ssa; Type = ty } }
+                            | Result.Error err ->
+                                WitnessOutput.error $"Binding '{name}': {err}"
                         | None ->
                             // Check if the child was witnessed but returned TRVoid
                             // This happens for entry point Lambdas (function definitions) and other module-level declarations

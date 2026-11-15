@@ -18,7 +18,7 @@ module Sequences = Alex.Traversal.SequenceOperands
 
 let private pSlotType (slot: ContinuationSlot) : PSGParser<MLIRType> = parser {
     let! state = getUserState
-    let mapped () = valueTypeAt state.Graph slot.Source
+    let pMapped = pValueTypeAt slot.Source
     match slot.Holds with
     | CaptureSlotKind.Scalar settled ->
         do! ensure (slot.Field.Slot = settled) $"Continuation slot {NodeId.value slot.Source} disagrees with its settled scalar field"
@@ -32,9 +32,11 @@ let private pSlotType (slot: ContinuationSlot) : PSGParser<MLIRType> = parser {
         | _ -> return! fail (Message $"Continuation slot {NodeId.value slot.Source} has unsupported scalar representation {settled}")
     | CaptureSlotKind.CellView payload ->
         do! ensure (slot.Field.Slot = SettledSlot.Pointer 5) $"Continuation cell {NodeId.value slot.Source} requires a complete descriptor field"
-        return TMemRefStatic(1, mapped ())
+        let! elemTy = pMapped
+        return TMemRefStatic(1, elemTy)
     | CaptureSlotKind.InlineValue native ->
-        match settledLayoutAt state.Graph slot.Source with
+        let! layoutOpt = pSettledLayoutAt slot.Source
+        match layoutOpt with
         | Some(SettledLayout.Union(_, _, Some bytes, Some alignment)) when bytes > 0 && alignment > 0 ->
             let consistent = not slot.IsCapture && slot.Field.Slot = SettledSlot.InlineBytes(bytes, alignment)
                              && slot.Field.Size = Some bytes && slot.Field.Align = Some alignment
@@ -54,7 +56,7 @@ let private pSlotType (slot: ContinuationSlot) : PSGParser<MLIRType> = parser {
         let! ty =
             match carrier with
             | Some ty -> preturn ty
-            | None -> preturn (mapped ())
+            | None -> pMapped
         match ty with
         | TMemRef _ | TMemRefStatic _ | TStruct(_, Some _) -> return ty
         | _ -> return! fail (Message $"Continuation value {NodeId.value slot.Source} has no settled descriptor carrier")
@@ -414,11 +416,13 @@ let pSequenceCurrent nodeId (sequence: SequenceOperand) = parser {
             | SettledSlot.Real 64 -> preturn (TFloat F64, false)
             | _ -> fail (Message "Sequence scalar current has an unsupported settled representation")
         | Some(_, CaptureSlotKind.InlineValue _), SettledSlot.InlineBytes(bytes, alignment)
-            when bytes > 0 && alignment > 0 && field.Size = Some bytes && field.Align = Some alignment ->
-            match settledLayoutAt state.Graph nodeId with
+            when bytes > 0 && alignment > 0 && field.Size = Some bytes && field.Align = Some alignment -> parser {
+            let! layoutOpt = pSettledLayoutAt nodeId
+            match layoutOpt with
             | Some(SettledLayout.Union(_, _, Some actualBytes, Some actualAlignment)) when actualBytes = bytes && actualAlignment = alignment ->
-                preturn (TMemRefStatic(bytes, TInt(IntWidth 8)), true)
-            | _ -> fail (Message "Sequence aggregate current no longer matches its exact source union layout")
+                return TMemRefStatic(bytes, TInt(IntWidth 8)), true
+            | _ -> return! fail (Message "Sequence aggregate current no longer matches its exact source union layout")
+          }
         | _ -> fail (Message "Sequence common current requires its settled physical value protocol")
     let! offset =
         match field.Offset, field.Size, field.Align with

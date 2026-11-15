@@ -63,8 +63,8 @@ let private accessSlot (ctx: WitnessContext) (node: SemanticNode) frameId slotId
                 | Some owner, Result.Ok shape when (Sequences.flow shape).Owners = Set.singleton owner ->
                     let family = Sequences.family shape
                     let generator = ctx.Graph.Nodes[family.Members[owner].Generator]
-                    let symbol = Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph generator false
                     let sequence = parser {
+                        let! symbol = pFromResult (Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph generator false)
                         let! operations, result = pattern
                         match result with
                         | TRValue environment ->
@@ -83,8 +83,8 @@ let private accessSlot (ctx: WitnessContext) (node: SemanticNode) frameId slotId
                     | Result.Ok shape ->
                         let carrier = ctx.Graph.Codata.CallableCarriers[node.Id]
                         let implementation = ctx.Graph.Nodes[carrier.Implementation]
-                        let symbol = Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph implementation false
                         let callable = parser {
+                            let! symbol = pFromResult (Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph implementation false)
                             let! operations, result = pattern
                             match result with
                             | TRValue environment ->
@@ -148,8 +148,8 @@ let private witnessSeq (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | Some initializers ->
                 match Sequences.project ctx node.Id, ctx.Graph.Nodes.TryFind frame.Generator with
                 | Result.Ok shape, Some ({ Kind = SemanticKind.Lambda _ } as generator) ->
-                    let symbol = Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph generator false
                     let formation = parser {
+                        let! symbol = pFromResult (Alex.CodeGeneration.CallableSymbols.lambda ctx.Graph generator false)
                         let! operations, result = pConstructSequence node.Id frame initializers
                         match result with
                         | TRValue environment ->

@@ -366,7 +366,7 @@ module Schema53BoundaryWitnessing =
                     | NodeId 0 -> Arg 0
                     | NodeId 1 -> Arg 1
                     | NodeId k -> V(k, 0)
-                MLIRAccumulator.bindNode nid ssa (Alex.CodeGeneration.TypeMapping.representationType rep) acc
+                MLIRAccumulator.bindNode nid ssa (Alex.CodeGeneration.TypeMapping.representationType rep |> Result.defaultWith failwith) acc
             | _ -> ()
         let result = matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus g g.Nodes[siteId]) 64 acc
         Assert.Empty acc.AllOps
@@ -500,8 +500,8 @@ module Schema53BoundaryWitnessing =
             match Alex.Patterns.PlatformPatterns.boundaryImportsAt (id 51) scopedBoundary with
             | Result.Ok [ MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(imp, [ TMemRef(TInt(IntWidth 8)); TInt(IntWidth 32) ], [ TInt(IntWidth 32) ])) as decl ] ->
                 Assert.Equal(id 53, imp.Identity)
-                Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [ decl ])
-                Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
+                Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [ decl ])
+                Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
             | other -> failwithf "Unexpected boundaryImportsAt result for ExplicitZeroCopy: %A" other
         | other -> failwithf "Unexpected ExplicitZeroCopy result: %A" other
 
@@ -951,8 +951,8 @@ module Schema53BoundaryWitnessing =
         | Result.Ok(([ MLIROp.BoundaryBufferCall(NodeId 360, [ { Type = TOpaqueHandle _ } ], [], [], [ { Type = TMemRef(TInt(IntWidth 8)) } ]) ] as ops, TRValue _), _) ->
             match Alex.Patterns.PlatformPatterns.boundaryImportsAt declBinding validGraph.Emission.Boundary with
             | Result.Ok([ MLIROp.ResourceImport _ ] as decls) ->
-                Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None decls)
-                Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
+                Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None decls)
+                Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
             | other -> failwithf "Unexpected boundaryImportsAt result: %A" other
         | other -> failwithf "Unexpected BorrowedResultView positive result: %A" other
 
@@ -1038,7 +1038,7 @@ module Schema53BoundaryWitnessing =
                                     plainBorrowedGraph.Emission.Numeric.OccurrenceRepresentations.Add(ownerActual, Result.Error "withdrawn owner") } } }
             |> declareTraversalReadings
         let accWithdrawnOwner = MLIRAccumulator.empty ()
-        MLIRAccumulator.bindNode ownerActual (Arg 0) (Alex.CodeGeneration.TypeMapping.representationType handleRep) accWithdrawnOwner
+        MLIRAccumulator.bindNode ownerActual (Arg 0) (Alex.CodeGeneration.TypeMapping.representationType handleRep |> Result.defaultWith failwith) accWithdrawnOwner
         match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus withdrawnOwnerGraph withdrawnOwnerGraph.Nodes[siteId]) 64 accWithdrawnOwner with
         | Result.Error reason ->
             Assert.Equal("TypeMapping: value occurrence 0 has no source-published representation: withdrawn owner", reason)
@@ -1075,8 +1075,8 @@ module Schema53BoundaryWitnessing =
         | Result.Error reason -> Assert.Equal("Borrowed result view cannot appear as a boundary call argument.", reason)
         | Result.Ok other -> failwithf "Admitted BorrowedBytes as boundary call argument: %A" other
 
-        Assert.Throws<System.ArgumentException>(fun () -> BoundaryAbi.scalarType (BoundaryScalar.ReadOnlyBytes bvId) |> ignore) |> ignore
-        Assert.Throws<System.ArgumentException>(fun () -> BoundaryAbi.scalarType (BoundaryScalar.BorrowedBytes bvId) |> ignore) |> ignore
+        Assert.True((BoundaryAbi.scalarType (BoundaryScalar.ReadOnlyBytes bvId)).IsError)
+        Assert.True((BoundaryAbi.scalarType (BoundaryScalar.BorrowedBytes bvId)).IsError)
 
     [<Fact>]
     let ``CountedEntryArrays and Retained callback extent emit native entry parameter types and refuse invalid Retained bounds`` () =
@@ -1426,7 +1426,7 @@ module Schema53BoundaryWitnessing =
             for (nid, repRes) in Map.toList g'.Emission.Numeric.OccurrenceRepresentations do
                 match repRes with
                 | Result.Ok rep when nid <> siteId ->
-                    MLIRAccumulator.bindNode nid (V(NodeId.value nid, 0)) (Alex.CodeGeneration.TypeMapping.representationType rep) acc
+                    MLIRAccumulator.bindNode nid (V(NodeId.value nid, 0)) (Alex.CodeGeneration.TypeMapping.representationType rep |> Result.defaultWith failwith) acc
                 | _ -> ()
             MLIRAccumulator.bindNode cbFormId (V(NodeId.value cbFormId, 0)) (TFunc([ TInt(IntWidth 32) ], [ TInt(IntWidth 32) ])) acc
             let r = matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus g' g'.Nodes[siteId]) 64 acc
@@ -1479,7 +1479,7 @@ module Schema53BoundaryWitnessing =
                     { Call = id 1; Parameter = 0; Actual = id 8; Construction = id 8
                       SourceCase = 1; Absence = id 9
                       Arms = [ arm0; arm1 ] }) ]
-        let mlir = Alex.Traversal.SMTTransfer.transfer obs
+        let mlir = Alex.Traversal.SMTTransfer.transfer obs |> Result.defaultWith failwith
         let expectedMlir =
             String.concat "\n"
                 [ "module @obligations {"
@@ -1633,7 +1633,7 @@ module Schema53BoundaryWitnessing =
                     { Call = id 1; Declaration = id 2; Parameter = 1; CountParameter = 2
                       Buffer = id 3; Count = id 4; MinimumCount = 1I; MaximumCount = 8I; ExtentCapacity = 32I
                       ElementBytes = 4; CountCoverage = id 507 })
-        let scaledMlir = Alex.Traversal.SMTTransfer.transfer [ scaledExtentOb ]
+        let scaledMlir = Alex.Traversal.SMTTransfer.transfer [ scaledExtentOb ] |> Result.defaultWith failwith
         Assert.Contains("%v0_0 = smt.int.constant 8\n    %v0_1 = smt.int.constant 4\n    %v0_2 = smt.int.mul %v0_0, %v0_1\n    %v0_3 = smt.int.constant 32\n    %v0_4 = smt.int.cmp le %v0_2, %v0_3", scaledMlir)
 
         // BufferAbsenceArgumentConversion delegates to BufferAbsenceArgumentProof.project for both SourceCase = 0 and SourceCase = 1 and rejects invalid models.
@@ -1643,7 +1643,7 @@ module Schema53BoundaryWitnessing =
                     { Call = id 1; Parameter = 0; Actual = id 8; Construction = id 8
                       SourceCase = 0; Absence = id 9
                       Arms = [ arm0; arm1 ] })
-        let noneAbsenceMlir = Alex.Traversal.SMTTransfer.transfer [ noneAbsenceOb ]
+        let noneAbsenceMlir = Alex.Traversal.SMTTransfer.transfer [ noneAbsenceOb ] |> Result.defaultWith failwith
         Assert.Contains("smt.declare_fun \"buffer_absence_accepted_9\" : !smt.bool", noneAbsenceMlir)
         Assert.Contains("smt.declare_fun \"ob_508\" : !smt.bool", noneAbsenceMlir)
 
@@ -1653,8 +1653,10 @@ module Schema53BoundaryWitnessing =
                     { Call = id 1; Parameter = 0; Actual = id 8; Construction = id 8
                       SourceCase = 1; Absence = id 9
                       Arms = [ arm0; { arm1 with CaseOrdinal = 9 } ] })
-        let armErr = Assert.Throws<System.ArgumentException>(fun () -> Alex.Traversal.SMTTransfer.transfer [ corruptOb ] |> ignore)
-        Assert.Contains("The buffer absence conversion plan requires exact AbsentNull and RequiresNonNullBuffer arms.", armErr.Message)
+        match Alex.Traversal.SMTTransfer.transfer [ corruptOb ] with
+        | Result.Error msg ->
+            Assert.Contains("The buffer absence conversion plan requires exact AbsentNull and RequiresNonNullBuffer arms.", msg)
+        | Result.Ok _ -> failwith "Admitted corrupt BufferAbsenceArgumentConversion arms"
 
         let badSourceCaseOb =
             obligation (id 509) "foreign-buffer-absence-conversion-0"
@@ -1662,7 +1664,7 @@ module Schema53BoundaryWitnessing =
                     { Call = id 1; Parameter = 0; Actual = id 8; Construction = id 8
                       SourceCase = 2; Absence = id 9
                       Arms = [ arm0; arm1 ] })
-        let badSourceCaseMlir = Alex.Traversal.SMTTransfer.transfer [ badSourceCaseOb ]
+        let badSourceCaseMlir = Alex.Traversal.SMTTransfer.transfer [ badSourceCaseOb ] |> Result.defaultWith failwith
         Assert.Contains("smt.int.constant 2", badSourceCaseMlir)
 
     [<Fact>]
@@ -1764,7 +1766,7 @@ module Schema53BoundaryWitnessing =
         match Alex.Patterns.PlatformPatterns.boundaryImportsAt scopeId boundary with
         | Result.Ok [ MLIROp.ResourceImport imp ] ->
             Assert.Equal(importId, imp.Identity)
-            Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [ MLIROp.ResourceImport imp ])
+            Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [ MLIROp.ResourceImport imp ])
         | other -> failwithf "Unexpected boundaryImportsAt result for callback-nested ResourceHandle: %A" other
 
         let graph =
@@ -2507,7 +2509,7 @@ module Schema53BoundaryWitnessing =
         match Alex.Patterns.PlatformPatterns.boundaryImportsAt scopeId goodBoundary with
         | Result.Ok [ MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(imp, [ TFunc([ TInt(IntWidth 32); TMemRef(TInt(IntWidth 8)) ], [ TInt(IntWidth 32) ]) ], [ TInt(IntWidth 32) ])) as decl ] ->
             Assert.Equal(importId, imp.Identity)
-            Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [ decl ])
+            Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [ decl ])
         | other -> failwithf "Unexpected boundaryImportsAt result for non-ResourceHandle CountedEntryArrays callback: %A" other
 
         // Negative controls: ReadOnlyBufferDeclarations carrier or CountedEntryArrays wrong ordinal must be refused in callback signature

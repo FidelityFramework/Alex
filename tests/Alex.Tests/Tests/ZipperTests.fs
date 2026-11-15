@@ -83,6 +83,7 @@ let ``invalid navigation does not manufacture a scope or graph node`` () =
     let absent = NodeId (1 + (fixture.Graph.Nodes |> Map.toList |> List.map (fst >> NodeId.value) |> List.max))
     Assert.True((Zipper.create fixture.Graph absent).IsNone)
     Assert.True((Zipper.focusOn absent fixture.Position).IsNone)
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> Zipper.requireNode absent fixture.Position |> ignore)
-    Assert.Contains("not found in graph", error.Message)
+    match Zipper.requireNode absent fixture.Position with
+    | Result.Error msg -> Assert.Contains("not found in graph", msg)
+    | Result.Ok _ -> failwith "Absent node should not be found in graph"
     Assert.Same(fixture.Graph, fixture.Position.Graph)

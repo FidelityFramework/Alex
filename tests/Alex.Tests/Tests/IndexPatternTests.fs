@@ -20,7 +20,7 @@ let ``Array get pulls its index range from the graph and composes a typed load``
         operations |> List.choose (function MLIROp.IndexOp _ as operation -> Some operation | _ -> None)
         |> Assert.Single
     let castSSA = Alex.Traversal.Values.value fixture.Call 0
-    Assert.Equal($"{ssaToString castSSA} = {spelling} {ssaToString (Arg 1)} : i8 to index", opToString (Ok 64) cast)
+    Assert.Equal(Result.Ok $"{ssaToString castSSA} = {spelling} {ssaToString (Arg 1)} : i8 to index", opToString (Ok 64) cast)
     let load =
         operations |> List.choose (function MLIROp.MemRefOp(MemRefOp.Load _ as load) -> Some load | _ -> None)
         |> Assert.Single

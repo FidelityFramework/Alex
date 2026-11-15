@@ -72,7 +72,7 @@ let ``index switch with zero one or multiple results serializes its cases`` (ari
     let parameters = [Arg 0, TIndex; Arg 1, cell; Arg 2, TIndex; Arg 3, integer; Arg 4, integer]
     let definition = MLIROp.FuncOp(FuncOp.FuncDef("switch_component", parameters, [integer],
         operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = result.SSA; Type = integer }]))], FuncVisibility.Public))
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "switch_component" [definition]
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "switch_component" [definition] |> Result.defaultWith failwith
     Assert.Contains("scf.index_switch", text)
     Assert.Contains("case -1", text)
 
@@ -105,5 +105,5 @@ let ``explicit module import serves a switch arm without relocation`` () =
         operations @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = first.SSA; Type = integer }]))], FuncVisibility.Public))
     let collected = [declaration; definition]
     Assert.Equal(declaration, collected.Head)
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "switch_declarations" collected
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "switch_declarations" collected |> Result.defaultWith failwith
     Assert.Contains("func.func private @external_effect", text)

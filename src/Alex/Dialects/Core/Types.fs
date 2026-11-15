@@ -97,64 +97,58 @@ type Architecture = {
 }
 
 /// The platform's word: the declared Register width as an MLIR integer width.
-let declaredWordWidth (arch: Architecture) : IntWidth =
-    match arch.Register with
-    | Ok bits -> IntWidth bits
-    | Error message -> failwith message
+let declaredWordWidth (arch: Architecture) : Result<IntWidth, string> =
+    arch.Register |> Result.map IntWidth
 
-/// The declared Pointer width in bytes: the size of an index, and the unit of a memref
-/// descriptor (five words). Function code values have no implicit data-storage layout.
-let declaredPointerBytes (arch: Architecture) : int =
-    match arch.Pointer with
-    | Ok bits -> (bits + 7) / 8
-    | Error message -> failwith message
+// The declared Pointer width in bytes: the size of an index, and the unit of a memref
+// descriptor (five words). Function code values have no implicit data-storage layout.
+let declaredPointerBytes (arch: Architecture) : Result<int, string> =
+    arch.Pointer |> Result.map (fun bits -> (bits + 7) / 8)
 
-/// The size in bytes of a value as it is stored: a read, never a computation (§8.3, one size
-/// model). A scalar is the bytes of its selected width; every pointer-sized type (an index; a
-/// rank-1 memref descriptor, {allocPtr, alignPtr, offset, size, stride}, five words)
-/// is the declared Pointer width times its words, and `pointer` is `Error`
-/// where no declaration is in hand (serialization), so that a pointer-sized value reaching such a
-/// path is a loud defect and never a silent eight bytes; a struct is its settled size, read from
-/// the layout CCS settled at saturation, and a struct with none (fabric, an opaque field) is a
-/// stop. A width the range was to give (`IntWidth 0`) has no size and is a stop naming it.
-let rec mlirTypeSizeWith (pointer: Result<int, string>) (ty: MLIRType) : int =
+// The size in bytes of a value as it is stored: a read, never a computation (§8.3, one size
+// model). A scalar is the bytes of its selected width; every pointer-sized type (an index; a
+// rank-1 memref descriptor, {allocPtr, alignPtr, offset, size, stride}, five words)
+// is the declared Pointer width times its words, and `pointer` is `Error`
+// where no declaration is in hand (serialization), so that a pointer-sized value reaching such a
+// path is a loud defect and never a silent eight bytes; a struct is its settled size, read from
+// the layout CCS settled at saturation, and a struct with none (fabric, an opaque field) is a
+// stop. A width the range was to give (`IntWidth 0`) has no size and is a stop naming it.
+let rec mlirTypeSizeWith (pointer: Result<int, string>) (ty: MLIRType) : Result<int, string> =
     let pointerBytes () =
-        match pointer with
-        | Ok bits -> (bits + 7) / 8
-        | Error message -> failwith message
+        pointer |> Result.map (fun bits -> (bits + 7) / 8)
     match ty with
-    | TInt (IntWidth 0) -> failwith "mlirTypeSize: an integer whose width the node's range was to give reached a size read unnarrowed"
-    | TInt w -> intWidthBytes w
-    | TFloat F32 -> 4 | TFloat F64 -> 8
-    | TOpaqueHandle _ | TResourceOption _ -> failwith "mlirTypeSize: an opaque resource cannot acquire generic spatial storage authority"
-    | TFunc _ -> failwith "mlirTypeSize: a function code SSA has no admitted data-storage layout; settle callable storage before sizing it"
-    | TMemRef _ | TMemRefStatic _ | TMemRefScalar _ -> 5 * pointerBytes ()
+    | TInt (IntWidth 0) -> Error "mlirTypeSize: an integer whose width the node's range was to give reached a size read unnarrowed"
+    | TInt w -> Ok (intWidthBytes w)
+    | TFloat F32 -> Ok 4 | TFloat F64 -> Ok 8
+    | TOpaqueHandle _ | TResourceOption _ -> Error "mlirTypeSize: an opaque resource cannot acquire generic spatial storage authority"
+    | TFunc _ -> Error "mlirTypeSize: a function code SSA has no admitted data-storage layout; settle callable storage before sizing it"
+    | TMemRef _ | TMemRefStatic _ | TMemRefScalar _ -> pointerBytes () |> Result.map (fun bytes -> 5 * bytes)
     | TVector (count, _) ->
-        failwithf "mlirTypeSize: PSG settlement (Layouts) did not settle a storage size for a vector of %d lanes; no size is read for it" count
+        Error (sprintf "mlirTypeSize: PSG settlement (Layouts) did not settle a storage size for a vector of %d lanes; no size is read for it" count)
     | TIndex -> pointerBytes ()
-    | TStruct (_, Some bytes) -> bytes.Size
+    | TStruct (_, Some bytes) -> Ok bytes.Size
     | TStruct (fields, None) ->
-        failwithf "mlirTypeSize: the struct {%s} has no settled layout to read its size from (a fabric struct, or a field the placement could not settle)"
-            (fields |> List.map fst |> String.concat ", ")
-    | TSeqClock -> failwith "mlirTypeSize: a clock signal (!seq.clock) has no byte storage; a fabric value reached a size read"
+        Error (sprintf "mlirTypeSize: the struct {%s} has no settled layout to read its size from (a fabric struct, or a field the placement could not settle)"
+            (fields |> List.map fst |> String.concat ", "))
+    | TSeqClock -> Error "mlirTypeSize: a clock signal (!seq.clock) has no byte storage; a fabric value reached a size read"
     | TTag caseCount ->
-        failwithf "mlirTypeSize: backend (CIRCT) did not settle a byte size for the abstract tag of %d cases: a fabric tag's width is the hw backend's, and a core holds a tag as a byte memref" caseCount
-    | TVoid -> failwith "mlirTypeSize: TVoid marks a foreign function with no result; it is not a value and has no size"
+        Error (sprintf "mlirTypeSize: backend (CIRCT) did not settle a byte size for the abstract tag of %d cases: a fabric tag's width is the hw backend's, and a core holds a tag as a byte memref" caseCount)
+    | TVoid -> Error "mlirTypeSize: TVoid marks a foreign function with no result; it is not a value and has no size"
 
-/// The settled byte offset of a struct's field, read from the layout CCS settled; a struct with
-/// no settled layout, or a field outside it, is a stop.
-let structFieldOffset (ty: MLIRType) (fieldIndex: int) : int =
+// The settled byte offset of a struct's field, read from the layout CCS settled; a struct with
+// no settled layout, or a field outside it, is a stop.
+let structFieldOffset (ty: MLIRType) (fieldIndex: int) : Result<int, string> =
     match ty with
     | TStruct (_, Some bytes) ->
         match List.tryItem fieldIndex bytes.Offsets with
-        | Some offset -> offset
-        | None -> failwithf "structFieldOffset: field %d is outside the settled layout of %d fields" fieldIndex bytes.Offsets.Length
+        | Some offset -> Ok offset
+        | None -> Error (sprintf "structFieldOffset: field %d is outside the settled layout of %d fields" fieldIndex bytes.Offsets.Length)
     | TStruct (fields, None) ->
-        failwithf "structFieldOffset: the struct {%s} has no settled layout to read an offset from" (fields |> List.map fst |> String.concat ", ")
-    | _ -> failwith "structFieldOffset: the supplied type is not a struct"
+        Error (sprintf "structFieldOffset: the struct {%s} has no settled layout to read an offset from" (fields |> List.map fst |> String.concat ", "))
+    | _ -> Error "structFieldOffset: the supplied type is not a struct"
 
-/// The size model read through the architecture's declared Pointer width.
-let mlirTypeSize (arch: Architecture) (ty: MLIRType) : int =
+// The size model read through the architecture's declared Pointer width.
+let mlirTypeSize (arch: Architecture) (ty: MLIRType) : Result<int, string> =
     mlirTypeSizeWith arch.Pointer ty
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1043,17 +1037,17 @@ module BoundaryAbi =
 
     /// Signless MLIR types spell physical carriers; they do not replace source ABI facts.
     let scalarType = function
-        | Fidelity.PSG.BoundaryScalar.Integer(bits, _) -> TInt(IntWidth bits)
-        | Fidelity.PSG.BoundaryScalar.Boolean -> TInt(IntWidth 1)
-        | Fidelity.PSG.BoundaryScalar.Entry _ -> invalidArg "scalar" "An entry carrier requires its source-published receiving signature."
+        | Fidelity.PSG.BoundaryScalar.Integer(bits, _) -> Ok (TInt(IntWidth bits))
+        | Fidelity.PSG.BoundaryScalar.Boolean -> Ok (TInt(IntWidth 1))
+        | Fidelity.PSG.BoundaryScalar.Entry _ -> Error "An entry carrier requires its source-published receiving signature."
         | Fidelity.PSG.BoundaryScalar.ResourceHandle _ ->
-            invalidArg "scalar" "A resource carrier requires its exact direct-call conversion and cleanup accounts."
+            Error "A resource carrier requires its exact direct-call conversion and cleanup accounts."
         | Fidelity.PSG.BoundaryScalar.WritableBytes _ ->
-            invalidArg "scalar" "A writable byte carrier requires its exact source-published declaration."
+            Error "A writable byte carrier requires its exact source-published declaration."
         | Fidelity.PSG.BoundaryScalar.ReadOnlyBytes _ ->
-            invalidArg "scalar" "A read-only byte carrier requires its exact source-published declaration."
+            Error "A read-only byte carrier requires its exact source-published declaration."
         | Fidelity.PSG.BoundaryScalar.BorrowedBytes _ ->
-            invalidArg "scalar" "A borrowed result view carrier requires its exact source-published declaration."
+            Error "A borrowed result view carrier requires its exact source-published declaration."
 
     let rec private hasResourceCarrierSeen (boundary: Fidelity.PSG.BoundaryEmissionProjection) (seen: Set<Fidelity.PSG.NodeId>) = function
         | Fidelity.PSG.BoundaryScalar.ResourceHandle _ -> true
@@ -1258,20 +1252,44 @@ module BoundaryAbi =
             | None -> Ok ()
             | Some ret -> tryScalarTypeContextWith true boundary Set.empty None ret |> Result.map ignore)
 
-    let rec signatureTypeIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) (signature: Fidelity.PSG.NativeEntrySignature) =
+    let rec signatureTypeIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) (signature: Fidelity.PSG.NativeEntrySignature) : Result<MLIRType, string> =
         if signature.CallingConvention <> "CDecl" then
-            invalidArg "signature" "A closed native entry requires its source-published CDecl convention."
-        TFunc(List.map (scalarTypeIn boundary) signature.Parameters, signature.Result |> Option.map (scalarTypeIn boundary) |> Option.toList)
+            Error "A closed native entry requires its source-published CDecl convention."
+        else
+            let rec collectParams acc = function
+                | [] -> Ok (List.rev acc)
+                | s :: rest ->
+                    match scalarTypeIn boundary s with
+                    | Ok ty -> collectParams (ty :: acc) rest
+                    | Error reason -> Error reason
+            let resultTypes =
+                match signature.Result with
+                | None -> Ok []
+                | Some s -> scalarTypeIn boundary s |> Result.map List.singleton
+            match collectParams [] signature.Parameters, resultTypes with
+            | Ok paramTypes, Ok retTypes -> Ok (TFunc(paramTypes, retTypes))
+            | Error reason, _ | _, Error reason -> Error reason
 
-    and signatureType (signature: Fidelity.PSG.NativeEntrySignature) =
+    and signatureType (signature: Fidelity.PSG.NativeEntrySignature) : Result<MLIRType, string> =
         if signature.CallingConvention <> "CDecl" then
-            invalidArg "signature" "A closed native entry requires its source-published CDecl convention."
-        TFunc(List.map scalarType signature.Parameters, signature.Result |> Option.map scalarType |> Option.toList)
+            Error "A closed native entry requires its source-published CDecl convention."
+        else
+            let rec collectParams acc = function
+                | [] -> Ok (List.rev acc)
+                | s :: rest ->
+                    match scalarType s with
+                    | Ok ty -> collectParams (ty :: acc) rest
+                    | Error reason -> Error reason
+            let resultTypes =
+                match signature.Result with
+                | None -> Ok []
+                | Some s -> scalarType s |> Result.map List.singleton
+            match collectParams [] signature.Parameters, resultTypes with
+            | Ok paramTypes, Ok retTypes -> Ok (TFunc(paramTypes, retTypes))
+            | Error reason, _ | _, Error reason -> Error reason
 
-    and scalarTypeIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) scalar =
-        match tryScalarTypeIn boundary Set.empty scalar with
-        | Ok ty -> ty
-        | Error reason -> invalidArg "scalar" reason
+    and scalarTypeIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) scalar : Result<MLIRType, string> =
+        tryScalarTypeIn boundary Set.empty scalar
 
     let tryParametersIn (boundary: Fidelity.PSG.BoundaryEmissionProjection) (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
         let rec collect acc = function
@@ -1282,38 +1300,51 @@ module BoundaryAbi =
                 | Error reason -> Error reason
         collect [] declaration.Parameters
 
-    let parametersIn boundary (declaration: Fidelity.PSG.BoundaryImport) =
-        declaration.Parameters |> List.map (snd >> scalarTypeIn boundary)
+    let parametersIn boundary (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
+        tryParametersIn boundary declaration
 
-    let resultsIn boundary (declaration: Fidelity.PSG.BoundaryImport) =
-        declaration.Result |> Option.map (scalarTypeIn boundary) |> Option.toList
+    let resultsIn boundary (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
+        match declaration.Result with
+        | None -> Ok []
+        | Some scalar -> scalarTypeIn boundary scalar |> Result.map List.singleton
 
-    let parameters (declaration: Fidelity.PSG.BoundaryImport) =
-        declaration.Parameters |> List.map (snd >> scalarType)
+    let parameters (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
+        let rec collect acc = function
+            | [] -> Ok (List.rev acc)
+            | (_, scalar) :: rest ->
+                match scalarType scalar with
+                | Ok ty -> collect (ty :: acc) rest
+                | Error reason -> Error reason
+        collect [] declaration.Parameters
 
-    let results (declaration: Fidelity.PSG.BoundaryImport) =
-        declaration.Result |> Option.map scalarType |> Option.toList
+    let results (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
+        match declaration.Result with
+        | None -> Ok []
+        | Some scalar -> scalarType scalar |> Result.map List.singleton
 
 module NativeEntrySlotSymbols =
     open Fidelity.PSG
 
-    /// Spelling only: source inventory and typed slot incidence remain authority.
+    // Spelling only: source inventory and typed slot incidence remain authority.
     let names =
         function
         | ProgramStorageIdentity.BindingSlot binding ->
             let suffix = NodeId.value binding
-            sprintf "__clef_native_entry_slot_store_%d" suffix, sprintf "__clef_native_entry_slot_load_%d" suffix
-        | ProgramStorageIdentity.Allocation _ -> invalidArg "identity" "A native entry slot requires a source binding-slot identity."
+            Ok (sprintf "__clef_native_entry_slot_store_%d" suffix, sprintf "__clef_native_entry_slot_load_%d" suffix)
+        | ProgramStorageIdentity.Allocation _ ->
+            Error "A native entry slot requires a source binding-slot identity."
 
 module IntrinsicWriteAbi =
     let bufferType (declaration: Fidelity.PSG.IntrinsicWriteImport) =
         TMemRef(TInt(IntWidth declaration.ByteRepresentation.Bits))
 
-    let parameters (declaration: Fidelity.PSG.IntrinsicWriteImport) =
-        [BoundaryAbi.scalarType declaration.Fd; bufferType declaration; BoundaryAbi.scalarType declaration.Count]
+    let parameters (declaration: Fidelity.PSG.IntrinsicWriteImport) : Result<MLIRType list, string> =
+        match BoundaryAbi.scalarType declaration.Fd, BoundaryAbi.scalarType declaration.Count with
+        | Ok fdTy, Ok countTy -> Ok [fdTy; bufferType declaration; countTy]
+        | Error reason, _ | _, Error reason -> Error reason
 
-    let results (declaration: Fidelity.PSG.IntrinsicWriteImport) =
-        [BoundaryAbi.scalarType declaration.Result]
+    let results (declaration: Fidelity.PSG.IntrinsicWriteImport) : Result<MLIRType list, string> =
+        BoundaryAbi.scalarType declaration.Result |> Result.map List.singleton
 
 /// Structural serialization order only; source meaning remains in the PSG.
 module OperationStructure =

@@ -200,7 +200,7 @@ let ``shared body reads each lambda occurrence's block argument and restores out
             | _ -> None)
     Assert.Equal(2, definitions.Length)
     for fn, argument in [first, Arg 0; second, Arg 1] do
-        let name = Alex.CodeGeneration.CallableSymbols.lambda graph graph.Nodes[fn.Id] false
+        let name = Alex.CodeGeneration.CallableSymbols.lambda graph graph.Nodes[fn.Id] false |> Result.defaultWith failwith
         let _, parameters, returnTypes, emitted = definitions |> List.find (fun (actual, _, _, _) -> actual = name)
         let returnType = Assert.Single returnTypes
         Assert.Contains((argument, carrier), parameters)
@@ -213,7 +213,7 @@ let ``shared body reads each lambda occurrence's block argument and restores out
             | MLIROp.MemRefOp(MemRefOp.LoadAligned(result, _, _, _, _, _)) -> Some result
             | _ -> None) |> Assert.Single
         Assert.Contains(MLIROp.FuncOp(FuncOp.Return([{ SSA = loaded; Type = returnType }])), emitted)
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "lambda_occurrences" operations
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "lambda_occurrences" operations |> Result.defaultWith failwith
     Assert.DoesNotContain("unrealized_conversion_cast", text)
 
 /// One function of the dependency fixture with the nodes it owns. A call names the
@@ -473,7 +473,7 @@ let ``definition discovered inside a dependency is reused by later reference and
         | _ -> None)
     Assert.Equal(3, definitions.Length)
     Assert.Equal(3, definitions |> Set.ofList |> Set.count)
-    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "dependency_reuse" operations
+    let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "dependency_reuse" operations |> Result.defaultWith failwith
     for name in definitions do Assert.Contains($"@{name}", text)
 
 [<Fact>]
@@ -518,7 +518,7 @@ let ``occurrence-bound formal read emits its settled refinement before consumpti
         let body = output.InlineOps @ [MLIROp.FuncOp(FuncOp.Return([{ SSA = value.SSA; Type = value.Type }]))]
         let definition = MLIROp.FuncOp(FuncOp.FuncDef("refined_read",
             [Arg 0, TInt(IntWidth 1); Arg 1, TInt(IntWidth 64)], [value.Type], body, FuncVisibility.Public))
-        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "refined_formal" [definition]
+        let text = Alex.Dialects.Core.Serialize.moduleToString (Ok 64) "refined_formal" [definition] |> Result.defaultWith failwith
         Assert.Contains("arith.trunci", text)
     | other -> failwithf "No value from refined formal read: %A" other
 
@@ -1167,7 +1167,7 @@ let ``native unit callback consumes canonical literal and block tokens`` mode re
             | _ -> None)
 
     Assert.Equal<MLIRType>(
-        Alex.CodeGeneration.TypeMapping.representationType (ValueRepresentation.Scalar SettledSlot.Unit),
+        Alex.CodeGeneration.TypeMapping.representationType (ValueRepresentation.Scalar SettledSlot.Unit) |> Result.defaultWith failwith,
         Assert.Single units
     )
 

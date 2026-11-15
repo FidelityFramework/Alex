@@ -24,8 +24,9 @@ module Components = Alex.Patterns.CallableAggregatePatterns
 let pBuildAggregateStorage (nodeId: NodeId) : PSGParser<MLIROp list * TransferResult> = parser {
     let! state = getUserState
     do! ensure (state.Graph.Codata.Escapes.TryFind nodeId = Some EscapeKind.StackScoped) $"Aggregate storage {NodeId.value nodeId} has no admitted caller activation"
+    let! layoutOpt = pSettledLayoutAt nodeId
     let! bytes, alignment =
-        match settledLayoutAt state.Graph nodeId with
+        match layoutOpt with
         | Some(SettledLayout.Union(_, _, Some bytes, Some alignment)) when bytes > 0 && alignment > 0 -> preturn (bytes, alignment)
         | _ -> fail (Message $"Aggregate storage {NodeId.value nodeId} has no complete union layout")
     let result = Alex.Traversal.Values.value nodeId 0
@@ -42,8 +43,9 @@ let pBuildDUInitialize (nodeId: NodeId) (destinationId: NodeId) (caseName: strin
         | Some node -> preturn node
         | None -> fail (Message "DU initialization has no destination node")
     let! destination, destinationType = pRecallNode destinationId
+    let! layoutOpt = pSettledLayoutAt destinationId
     let! cases, bytes =
-        match settledLayoutAt state.Graph destinationId with
+        match layoutOpt with
         | Some(SettledLayout.Union(cases, _, Some bytes, Some alignment)) when bytes > 0 && alignment > 0 -> preturn (cases, bytes)
         | _ -> fail (Message "DU initialization requires a complete destination layout")
     do! ensure (destinationType = TMemRefStatic(bytes, TInt(IntWidth 8))) "DU destination disagrees with its settled byte carrier"
@@ -59,7 +61,8 @@ let pBuildDUInitialize (nodeId: NodeId) (destinationId: NodeId) (caseName: strin
             do! ensure (payloadSlot |> Option.bind settledScalarType = Some valueType) "DU initialization payload lacks the selected case's settled scalar carrier"
             return operations, [{ SSA = value; Type = valueType }]
           }
-    let! writes, result = pDUCaseAt nodeId { SSA = destination; Type = destinationType } (sourceTypeAt state.Graph destinationId) (int64 caseIndex) payload
+    let! destSourceTy = pSourceTypeAt destinationId
+    let! writes, result = pDUCaseAt nodeId { SSA = destination; Type = destinationType } destSourceTy (int64 caseIndex) payload
     return adaptations @ writes, result
 }
 
@@ -92,8 +95,7 @@ let pBuildDUConstruct (nodeId: NodeId) (tag: int64) (payload: Val list) (duTy: M
                     // Struct DU on FPGA (e.g. ValueNone): zero-initialized aggregate constant.
                     // Its payload fields take the widths of the payload type's FieldRanges
                     // (a field nothing constructs has the empty range, one bit).
-                    let! state = getUserState
-                    let settledTy = requireValueType state.Graph nodeId duTy
+                    let! settledTy = pRequireValueType nodeId duTy
                     let! op = pHWAggregateConstant ssa settledTy
                     return ([op], TRValue { SSA = ssa; Type = settledTy })
                 | TTag _ | TInt _ ->
@@ -131,8 +133,7 @@ let pBuildDUGetTag (nodeId: NodeId) (duSSA: SSA) (duType: MLIRType) : PSGParser<
             match result with
             | TRValue value ->
                 let! (meetOps, readSSA, readTy) = pAdapt nodeId nodeId value.SSA value.Type
-                let! state = getUserState
-                let readTy = requireValueType state.Graph nodeId readTy
+                let! readTy = pRequireValueType nodeId readTy
                 return (ops @ meetOps, TRValue { SSA = readSSA; Type = readTy })
             | other ->
                 return! fail (Message $"PSG settlement did not settle a tag value for DUGetTag at node {NodeId.value nodeId}: extraction produced {other}")

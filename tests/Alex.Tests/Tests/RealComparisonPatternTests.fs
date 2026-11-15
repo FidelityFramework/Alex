@@ -81,5 +81,5 @@ let ``IEEE self inequality is unordered while self equality remains ordered`` bi
             Assert.Equal(physicalType bits, operandType)
             Assert.Equal(result, value.SSA)
             Assert.Equal(TInt(IntWidth 1), value.Type)
-            Assert.Contains("arith.cmpf " + spelling + ",", opToString (Ok 64) operation)
+            Assert.Contains("arith.cmpf " + spelling + ",", opToString (Ok 64) operation |> Result.defaultWith failwith)
         | other -> failwithf "IEEE comparison changed its exact ordered operands: %A" other

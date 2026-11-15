@@ -201,12 +201,11 @@ let private pNumericOperands (operation: NumericOperationWitness) (operationType
                     return [], value
                   }
                 | None -> parser {
-                    let! state = getUserState
                     let! loads, ssa, ty = pRecallArgWithLoad operand.Actual
-                    let expected =
+                    let! expected =
                         match operand.Carrier with
-                        | Some carrier -> scalarCarrierType carrier
-                        | None -> valueTypeAt state.Graph operand.Actual
+                        | Some carrier -> pScalarCarrierType carrier
+                        | None -> pValueTypeAt operand.Actual
                     do! ensure (ty = expected) "Numeric operand differs from its source-published carrier."
                     let! adaptations, value = pPublishedAdapt operation.Site operand.Actual operand.Adaptation { SSA = ssa; Type = ty }
                     do! ensure (value.Type = operationType) "Numeric operand adaptation does not establish the published operation carrier."
@@ -221,7 +220,8 @@ let private pNumericOperands (operation: NumericOperationWitness) (operationType
 /// result carrier; absence is equality, never a request to choose a cast.
 let private pNumericResult (operation: NumericOperationWitness) operations value = parser {
     let! adaptations, result = pPublishedAdapt operation.Site operation.Site operation.ResultAdaptation value
-    do! ensure (result.Type = scalarCarrierType operation.Result)
+    let! expectedResultType = pScalarCarrierType operation.Result
+    do! ensure (result.Type = expectedResultType)
             "Numeric operation result differs from its source-published held carrier."
     return operations @ adaptations, TRValue result
 }
@@ -362,7 +362,7 @@ let pTruncate (nodeId: NodeId)
         let resultSSA = ssas.[0]
 
         let! state = getUserState
-        let dstType = valueTypeAt state.Graph state.Current.Id
+        let! dstType = pValueTypeAt state.Current.Id
 
         match srcType, dstType with
         | TFloat _, TInt _ ->
@@ -394,7 +394,7 @@ let pTypeConversion (nodeId: NodeId)
         let resultSSA = ssas.[0]
 
         let! state = getUserState
-        let dstType = valueTypeAt state.Graph state.Current.Id
+        let! dstType = pValueTypeAt state.Current.Id
 
         if (match srcType, dstType with TInt _, TInt _ | TFloat _, TFloat _ -> true | _ -> false) then
             let! operations, result = pSettledAdaptTo nodeId argIds.[0] dstType { SSA = srcSSA; Type = srcType }
@@ -450,7 +450,7 @@ let pIgnoreIntrinsic : PSGParser<MLIROp list * TransferResult> =
         let! ssas = getNodeSSAs node.Id
         do! ensure (ssas.Length >= 1) "Operators.ignore has no assigned result value"
         let! state = getUserState
-        let unitTy = valueTypeAt state.Graph state.Current.Id
+        let! unitTy = pValueTypeAt state.Current.Id
         let! unitValue = Alex.Elements.MLIRAtomics.pConstI ssas.[0] 0I unitTy
         return [unitValue], TRValue { SSA = ssas.[0]; Type = unitTy }
     }

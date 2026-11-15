@@ -19,10 +19,10 @@ let ``checked text cannot acquire portable text without its selected validator a
   let operation =
     if retirement then Utf8SnapshotRetire(NodeId 2, snapshot)
     else Utf8Validate(NodeId 2, snapshot, result)
-  Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
-  let error = Assert.ThrowsAny<System.Exception>(fun () ->
-    Alex.Dialects.Core.Serialize.opToString (Ok 64) operation |> ignore)
-  Assert.Contains("exact snapshot, validator and retirement accounts", error.Message)
+  Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
+  match Alex.Dialects.Core.Serialize.opToString (Ok 64) operation with
+  | Result.Error msg -> Assert.Contains("exact snapshot, validator and retirement accounts", msg)
+  | Result.Ok _ -> failwith "Checked text serialized without selected validator/retirement realization"
   Assert.Equal<MLIROp list>([operation], OperationStructure.flatten [operation])
 
 [<Fact>]
@@ -34,9 +34,9 @@ let ``Pending obligation emits no solver operation or placeholder and retains re
   let pending =
     { ready with Id = "pending_transfer"; Logic = ""
                  Body = ObligationBody.Pending ["Selected target conversion remains Pending."] }
-  Assert.Empty(Alex.Traversal.SMTTransfer.operations [pending])
-  let ordinary = Alex.Traversal.SMTTransfer.transfer [ready]
-  let mixed = Alex.Traversal.SMTTransfer.transfer [pending; ready; pending]
+  Assert.Empty(Alex.Traversal.SMTTransfer.operations [pending] |> Result.defaultWith failwith)
+  let ordinary = Alex.Traversal.SMTTransfer.transfer [ready] |> Result.defaultWith failwith
+  let mixed = Alex.Traversal.SMTTransfer.transfer [pending; ready; pending] |> Result.defaultWith failwith
   Assert.Equal(ordinary, mixed)
   Assert.Contains("ready_transfer", mixed)
   Assert.DoesNotContain("pending_transfer", mixed)
@@ -47,10 +47,10 @@ let ``optional Some call intent requires selected target realization and retains
   let code = { SSA = Arg 1; Type = TFunc([], []) }
   let slot = { Ordinal = 0; Choice = OptionalEntrySlotChoice.Direct { CaseOrdinal = 1; Claim = NodeId 3; Code = Some code } }
   let operation = OptionalEntryCall(NodeId 2, [original], [slot], [])
-  Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
-  let error = Assert.ThrowsAny<System.Exception>(fun () ->
-    Alex.Dialects.Core.Serialize.opToString (Ok 64) operation |> ignore)
-  Assert.Contains("exact source conversion accounts", error.Message)
+  Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
+  match Alex.Dialects.Core.Serialize.opToString (Ok 64) operation with
+  | Result.Error msg -> Assert.Contains("exact source conversion accounts", msg)
+  | Result.Ok _ -> failwith "Optional Some call intent serialized without target realization"
   match OperationStructure.flatten [operation] with
   | [OptionalEntryCall(site, arguments, [actual], results)] ->
     Assert.Equal(NodeId 2, site)
@@ -70,7 +70,7 @@ let ``optional None call intent retains the original Option without a code value
   let original = { SSA = Arg 0; Type = TMemRefStatic(1, TInt(IntWidth 8)) }
   let slot = { Ordinal = 0; Choice = OptionalEntrySlotChoice.Direct { CaseOrdinal = 0; Claim = NodeId 3; Code = None } }
   let operation = OptionalEntryCall(NodeId 2, [original], [slot], [])
-  Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
+  Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
   match OperationStructure.flatten [operation] with
   | [OptionalEntryCall(_, [actual], [slot], [])] ->
     Assert.Equal(original, actual)
@@ -93,10 +93,10 @@ let ``conditional optional call intent requires target realization and preserves
   let whenTrue, whenFalse = if reversed then absentArm, presentArm else presentArm, absentArm
   let slot = { Ordinal = 0; Choice = OptionalEntrySlotChoice.Conditional(NodeId 6, tag, whenTrue, whenFalse) }
   let operation = OptionalEntryCall(NodeId 2, [original], [slot], [])
-  Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
-  let error = Assert.ThrowsAny<System.Exception>(fun () ->
-    Alex.Dialects.Core.Serialize.opToString (Ok 64) operation |> ignore)
-  Assert.Contains("exact source conversion accounts", error.Message)
+  Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [operation])
+  match Alex.Dialects.Core.Serialize.opToString (Ok 64) operation with
+  | Result.Error msg -> Assert.Contains("exact source conversion accounts", msg)
+  | Result.Ok _ -> failwith "Conditional optional call intent serialized without target realization"
   match OperationStructure.flatten [operation] with
   | [OptionalEntryCall(site, [actual], [held], [])] ->
     Assert.Equal(NodeId 2, site)
@@ -238,7 +238,7 @@ let private context (graph: Revision) site (operands: MLIRAccumulator) =
 let private closedReceivingFixture () =
     let graph, functions = fixture false
     let fn = functions.Head
-    let symbol = lambda graph graph.Nodes[fn.Lambda] false
+    let symbol = lambda graph graph.Nodes[fn.Lambda] false |> Result.defaultWith failwith
     let scalar = BoundaryScalar.Integer(64, true)
     let invocation : BoundaryCallbackInvocation =
         { Identity = NodeId 40; Import = NodeId 41; Parameter = 0; Formal = NodeId 42; Scope = NodeId 43
@@ -308,7 +308,7 @@ let ``ordinary and saturated calls preserve resolved identity across equal local
     let graph, functions = fixture saturated
     let symbols =
         functions |> List.map (fun fn ->
-            let definitionSymbol = lambda graph graph.Nodes[fn.Lambda] false
+            let definitionSymbol = lambda graph graph.Nodes[fn.Lambda] false |> Result.defaultWith failwith
             let operands = MLIRAccumulator.empty ()
             MLIRAccumulator.bindNode fn.Argument (Arg 0) (TInt(IntWidth 1)) operands
             let ctx = context graph fn.Call operands
@@ -336,19 +336,19 @@ let ``module and external spellings and anonymous closure identities are preserv
         |> named (CallableSymbolName.ModuleBinding("Library", "read")) (Some moduleNode.Id) fn
         |> declareTraversalReadings
     Assert.Equal(Some "Library.read", tryBinding moduleGraph fn.Binding)
-    Assert.Equal("Library.read", lambda moduleGraph moduleGraph.Nodes[fn.Lambda] false)
+    Assert.Equal(Result.Ok "Library.read", lambda moduleGraph moduleGraph.Nodes[fn.Lambda] false)
     Assert.Equal(Some "Library.read", tryBinding moduleGraph fn.Binding)
     let externalGraph =
         { graph with Nodes = graph.Nodes.Add(fn.Binding, { binding with Parent = None }) }
         |> named (CallableSymbolName.RootBinding "read") None fn
         |> declareTraversalReadings
     Assert.Equal(Some "read", tryBinding externalGraph fn.Binding)
-    Assert.Equal("read", lambda externalGraph externalGraph.Nodes[fn.Lambda] false)
+    Assert.Equal(Result.Ok "read", lambda externalGraph externalGraph.Nodes[fn.Lambda] false)
     // The contract states an anonymous code identity as one published name. It
     // holds no separate row for a lambda expression and for a closure pair.
     let original = graph.Nodes[fn.Lambda]
     let anonymousGraph = graph |> namedCode (CallableSymbolName.Anonymous fn.Lambda) fn
-    Assert.Equal(sprintf "lambda_%d" (NodeId.value fn.Lambda), lambda anonymousGraph original true)
+    Assert.Equal(Result.Ok(sprintf "lambda_%d" (NodeId.value fn.Lambda)), lambda anonymousGraph original true)
 
     // Native address plans are already settled by CCS. The witness retains that
     // symbol; this local-name projection does not re-resolve native entry plans.
@@ -610,7 +610,7 @@ let private nativeSlotTypeFixture () =
 [<Fact>]
 let ``native module type read consumes its exact entry slot`` () =
     let graph = nativeSlotTypeFixture ()
-    Assert.Equal(TFunc([], []), Alex.CodeGeneration.TypeMapping.valueTypeAt graph (NodeId 32))
+    Assert.Equal(Result.Ok(TFunc([], [])), Alex.CodeGeneration.TypeMapping.valueTypeAt graph (NodeId 32))
 
 [<Fact>]
 let ``native module type read refuses withdrawn binding transport`` () =
@@ -636,10 +636,10 @@ let ``native module type read refuses withdrawn binding transport`` () =
                 }
         }
 
-    let error =
-        Assert.Throws<System.Exception>(fun () -> Alex.CodeGeneration.TypeMapping.valueTypeAt graph (NodeId 32) |> ignore)
-
-    Assert.Contains("Native entry slot differs from its original immutable formation binding.", error.Message)
+    match Alex.CodeGeneration.TypeMapping.valueTypeAt graph (NodeId 32) with
+    | Result.Error msg ->
+        Assert.Contains("Native entry slot differs from its original immutable formation binding.", msg)
+    | Result.Ok _ -> failwith "Withdrawn binding transport was admitted"
 
 [<Fact>]
 let ``native module type read retains ordinary numeric refusal`` () =
@@ -662,11 +662,11 @@ let ``native module type read retains ordinary numeric refusal`` () =
                 }
         }
 
-    let error =
-        Assert.Throws<System.Exception>(fun () -> Alex.CodeGeneration.TypeMapping.valueTypeAt graph (NodeId 32) |> ignore)
-
-    Assert.Contains("value occurrence 32 has no source-published representation", error.Message)
-    Assert.Contains("CCS8410", error.Message)
+    match Alex.CodeGeneration.TypeMapping.valueTypeAt graph (NodeId 32) with
+    | Result.Error msg ->
+        Assert.Contains("value occurrence 32 has no source-published representation", msg)
+        Assert.Contains("CCS8410", msg)
+    | Result.Ok _ -> failwith "Ordinary numeric refusal was bypassed"
 
 [<Fact>]
 let ``native entry module slot keeps typed initialization and reload`` () =
@@ -785,7 +785,7 @@ let ``native entry module slot serializes stock typed placeholders`` () =
 
     let text =
         ops
-        |> List.map (Alex.Dialects.Core.Serialize.opToString (Ok 64))
+        |> List.map (fun op -> Alex.Dialects.Core.Serialize.opToString (Ok 64) op |> Result.defaultWith failwith)
         |> String.concat "\n"
 
     Assert.Contains("func.func private @__clef_native_entry_slot_store_32(memref<8xi8>, () -> ())", text)
@@ -1311,7 +1311,7 @@ let ``conditional optional boundary call witnesses assigned tag projection and a
   MLIRAccumulator.bindNode (NodeId 28) (V(28, 0)) tagCarrier accumulator
   match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus graph graph.Nodes[NodeId 30]) 64 accumulator with
   | Result.Ok((operations, TRVoid), _) ->
-    Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None operations)
+    Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None operations)
     match operations with
     | [ FuncOp(FuncConstant(codeSSA, "Native.callback", sigType))
         OptionalEntryCall(site, [actual], [slot], results) ] ->
@@ -1776,18 +1776,19 @@ let ``opaque resource Option retains its exact source case order and placement``
     let handle = ValueRepresentation.Scalar(SettledSlot.CHandle(unitType, 64, 4))
     let cases = ["absent", []; "present", [handle]]
     let representation = ValueRepresentation.Union((if reversed then List.rev cases else cases), Some(4, 12, 4))
-    let actual = Alex.CodeGeneration.TypeMapping.representationType representation
+    let actual = Alex.CodeGeneration.TypeMapping.representationType representation |> Result.defaultWith failwith
     Assert.Equal(TResourceOption representation, actual)
     Assert.Equal(Some(TOpaqueHandle(unitType, 64, 4)), SettledScalar.tryType (SettledSlot.CHandle(unitType, 64, 4)))
-    Assert.Equal(NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [ResourceAlias(NodeId 1, {SSA=Arg 0;Type=actual})])
+    Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None [ResourceAlias(NodeId 1, {SSA=Arg 0;Type=actual})])
 
 [<Theory>]
 [<InlineData(false)>]
 [<InlineData(true)>]
 let ``resource ABI cannot become a generic imported or callable scalar`` nullable =
-    let error = Assert.Throws<System.ArgumentException>(fun () ->
-        BoundaryAbi.scalarType (BoundaryScalar.ResourceHandle(NodeId 1, nullable)) |> ignore)
-    Assert.Contains("requires its exact direct-call conversion and cleanup accounts", error.Message)
+    match BoundaryAbi.scalarType (BoundaryScalar.ResourceHandle(NodeId 1, nullable)) with
+    | Result.Error msg ->
+        Assert.Contains("requires its exact direct-call conversion and cleanup accounts", msg)
+    | Result.Ok _ -> failwith "Resource ABI became a generic imported or callable scalar"
 
 /// This deliberately incomplete component fixture has no resource declaration
 /// or proof bodies either: the asserted gate is the missing per-call account,
@@ -1827,8 +1828,10 @@ let ``resource boundary refuses a missing per-call conversion and cleanup accoun
 let ``opaque resource carriers do not acquire generic spatial storage authority`` option =
     let handle = ValueRepresentation.Scalar(SettledSlot.CHandle(unitType, 64, 8))
     let carrier = if option then TResourceOption(ValueRepresentation.Union(["absent", []; "present", [handle]], Some(8,16,8))) else TOpaqueHandle(unitType,64,8)
-    let error = Assert.Throws<System.Exception>(fun () -> mlirTypeSizeWith (Ok 64) carrier |> ignore)
-    Assert.Contains("opaque resource cannot acquire generic spatial storage authority", error.Message)
+    match mlirTypeSizeWith (Ok 64) carrier with
+    | Result.Error msg ->
+        Assert.Contains("opaque resource cannot acquire generic spatial storage authority", msg)
+    | Result.Ok _ -> failwith "Opaque resource carrier acquired generic spatial storage authority"
 
 [<Theory>]
 [<InlineData(false)>]
@@ -1837,5 +1840,7 @@ let ``resource Option refuses missing placement or an extra opaque alternative``
     let handle = ValueRepresentation.Scalar(SettledSlot.CHandle(unitType, 64, 8))
     let cases = ["absent", []; "present", [handle]] @ (if extra then ["other", [handle]] else [])
     let representation = ValueRepresentation.Union(cases, if extra then Some(8,16,8) else None)
-    let error = Assert.Throws<System.Exception>(fun () -> Alex.CodeGeneration.TypeMapping.representationType representation |> ignore)
-    Assert.Contains("requires its complete source-settled case and byte placement", error.Message)
+    match Alex.CodeGeneration.TypeMapping.representationType representation with
+    | Result.Error msg ->
+        Assert.Contains("requires its complete source-settled case and byte placement", msg)
+    | Result.Ok _ -> failwith "Resource Option admitted missing placement or extra opaque alternative"

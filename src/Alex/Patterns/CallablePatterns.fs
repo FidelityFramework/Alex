@@ -19,12 +19,12 @@ module Values = Alex.Traversal.Values
 
 /// Classification is a published source fact, including negative membership.
 /// An absent projection cannot be interpreted as a data value.
-let isCallableValue (ctx: WitnessContext) (node: SemanticNode) =
+let isCallableValue (ctx: WitnessContext) (node: SemanticNode) : Result<bool, string> =
     match Operands.valueShape ctx node.Id with
-    | Result.Ok (CallableValueShape.Callable owner) when owner = node.Id -> true
-    | Result.Ok (CallableValueShape.Callable _) -> invalidOp "Callable value shape belongs to another occurrence."
-    | Result.Ok _ -> false
-    | Result.Error reason -> invalidOp reason
+    | Result.Ok (CallableValueShape.Callable owner) when owner = node.Id -> Result.Ok true
+    | Result.Ok (CallableValueShape.Callable _) -> Result.Error "Callable value shape belongs to another occurrence."
+    | Result.Ok _ -> Result.Ok false
+    | Result.Error reason -> Result.Error reason
 
 /// An annotation around a directly applied intrinsic carries source type
 /// information, not a first-class function operand. Follow only transparent

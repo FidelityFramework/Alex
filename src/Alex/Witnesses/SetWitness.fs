@@ -29,11 +29,12 @@ let private witnessSet (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
     | Some (info, _) ->
         match info.Operation with
         | "empty" ->
-            let setType = mapTypeAt node.Id ctx
-
-            match tryMatchWithDiagnostics (pSetEmpty node.Id setType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-            | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-            | Result.Error diagnostic -> WitnessOutput.error $"Set.empty: {diagnostic}"
+            match mapTypeAt node.Id ctx with
+            | Result.Ok setType ->
+                match tryMatchWithDiagnostics (pSetEmpty node.Id setType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                | Result.Error diagnostic -> WitnessOutput.error $"Set.empty: {diagnostic}"
+            | Result.Error err -> WitnessOutput.error $"Set.empty: {err}"
 
         | "isEmpty" ->
             WitnessOutput.error "Set.isEmpty: Baker decomposes to structural check"
@@ -43,11 +44,12 @@ let private witnessSet (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (setSSA, _) ->
-                    let elemType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pSetValue node.Id setSSA elemType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Set.value: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok elemType ->
+                        match tryMatchWithDiagnostics (pSetValue node.Id setSSA elemType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Set.value: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Set.value: {err}"
                 | None -> WitnessOutput.error "Set.value: Set not yet witnessed"
             | _ -> WitnessOutput.error $"Set.value: Expected 1 child, got {node.Children.Length}"
 
@@ -56,11 +58,12 @@ let private witnessSet (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (setSSA, _) ->
-                    let subtreeType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pSetLeft node.Id setSSA subtreeType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Set.left: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok subtreeType ->
+                        match tryMatchWithDiagnostics (pSetLeft node.Id setSSA subtreeType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Set.left: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Set.left: {err}"
                 | None -> WitnessOutput.error "Set.left: Set not yet witnessed"
             | _ -> WitnessOutput.error $"Set.left: Expected 1 child, got {node.Children.Length}"
 
@@ -69,11 +72,12 @@ let private witnessSet (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (setSSA, _) ->
-                    let subtreeType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pSetRight node.Id setSSA subtreeType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Set.right: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok subtreeType ->
+                        match tryMatchWithDiagnostics (pSetRight node.Id setSSA subtreeType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Set.right: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Set.right: {err}"
                 | None -> WitnessOutput.error "Set.right: Set not yet witnessed"
             | _ -> WitnessOutput.error $"Set.right: Expected 1 child, got {node.Children.Length}"
 
@@ -82,11 +86,12 @@ let private witnessSet (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
             | [childId] ->
                 match MLIRAccumulator.recallNode childId ctx.Accumulator with
                 | Some (setSSA, _) ->
-                    let heightType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pSetHeight node.Id setSSA heightType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Set.height: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok heightType ->
+                        match tryMatchWithDiagnostics (pSetHeight node.Id setSSA heightType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Set.height: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Set.height: {err}"
                 | None -> WitnessOutput.error "Set.height: Set not yet witnessed"
             | _ -> WitnessOutput.error $"Set.height: Expected 1 child, got {node.Children.Length}"
 
@@ -101,11 +106,12 @@ let private witnessSet (ctx: WitnessContext) (node: SemanticNode) : WitnessOutpu
                     let element = { SSA = elementSSA; Type = elementType }
                     let left = { SSA = leftSSA; Type = leftType }
                     let right = { SSA = rightSSA; Type = rightType }
-                    let setType = mapTypeAt node.Id ctx
-
-                    match tryMatchWithDiagnostics (pSetAdd node.Id element left right setType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"Set.node: {diagnostic}"
+                    match mapTypeAt node.Id ctx with
+                    | Result.Ok setType ->
+                        match tryMatchWithDiagnostics (pSetAdd node.Id element left right setType) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"Set.node: {diagnostic}"
+                    | Result.Error err -> WitnessOutput.error $"Set.node: {err}"
                 | _ -> WitnessOutput.error "Set.node: One or more children not yet witnessed"
             | _ -> WitnessOutput.error $"Set.node: Expected 4 children, got {node.Children.Length}"
 

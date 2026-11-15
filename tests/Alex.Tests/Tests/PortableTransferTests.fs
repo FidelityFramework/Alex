@@ -28,10 +28,10 @@ let ``attribute encoding preserves all UTF8 bytes and refuses unpaired surrogate
         UTF8Encoding(false, true).GetBytes value
         |> Array.map (fun b -> if b >= 32uy && b <= 126uy && b <> 34uy && b <> 92uy then string (char b) else sprintf "\\%02X" b)
         |> String.concat ""
-    Assert.Equal("cf.assert %arg0, \"" + expected + "\"", opToString (Ok 64) (MLIROp.Assert(Arg 0, value)))
+    Assert.Equal(Result.Ok("cf.assert %arg0, \"" + expected + "\""), opToString (Ok 64) (MLIROp.Assert(Arg 0, value)))
     let high, low = String([|char 0xD800|]), String([|char 0xDC00|])
     for malformed in [high; low; high + "x"; "x" + low] do
-        Assert.ThrowsAny<Exception>(fun () -> opToString (Ok 64) (MLIROp.Assert(Arg 0, malformed)) |> ignore) |> ignore
+        Assert.True((opToString (Ok 64) (MLIROp.Assert(Arg 0, malformed))).IsError)
 
 let private floatArray value =
     let authority: MemoryArrayLiteralWitness =
@@ -56,12 +56,12 @@ let ``immutable floating initializers round trip every bit independent of cultur
         for culture in ["en-US"; "fr-FR"; "ar-SA"] do
             CultureInfo.CurrentCulture <- CultureInfo.GetCultureInfo culture
             for value in values do
-                let text = opToString (Ok 64) (floatArray value)
+                let text = opToString (Ok 64) (floatArray value) |> Result.defaultWith failwith
                 let token = Regex.Match(text, @"dense<\[([^\]]+)\]>").Groups[1].Value
                 let parsed = Double.Parse(token, CultureInfo.InvariantCulture)
                 Assert.Equal(BitConverter.DoubleToInt64Bits value, BitConverter.DoubleToInt64Bits parsed)
         for value in [Double.NaN; Double.PositiveInfinity; Double.NegativeInfinity] do
-            Assert.ThrowsAny<Exception>(fun () -> opToString (Ok 64) (floatArray value) |> ignore) |> ignore
+            Assert.True((opToString (Ok 64) (floatArray value)).IsError)
     finally CultureInfo.CurrentCulture <- previous
 
 [<Fact>]
@@ -72,7 +72,7 @@ let ``integer serialization retains mathematical values beyond signed machine ra
         for value in [-18446744073709551615I; -9223372036854775808I; 0I; 18446744073709551615I] do
             let operation = ArithOp(ArithOp.ConstI(Arg 0, value, TInt(IntWidth 128)))
             let expected = value.ToString(CultureInfo.InvariantCulture)
-            Assert.Equal("%arg0 = arith.constant " + expected + " : i128", opToString (Ok 64) operation)
+            Assert.Equal(Result.Ok("%arg0 = arith.constant " + expected + " : i128"), opToString (Ok 64) operation)
     finally CultureInfo.CurrentCulture <- previous
 
 [<Fact>]
@@ -108,6 +108,7 @@ let ``SMT comparisons retain constants before uses and the complete ordered anch
           Refs = []; Body = ObligationBody.IntegerRepresentationCoverage(2I, 4I, 0I, 9I) }
     let solver =
         Alex.Traversal.SMTTransfer.operations [obligation]
+        |> Result.defaultWith failwith
         |> List.choose (function SMTOp(SMTSolver body) -> Some body | _ -> None)
         |> Assert.Single
     let s n = V(0, n)

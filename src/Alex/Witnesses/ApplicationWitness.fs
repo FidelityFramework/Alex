@@ -41,8 +41,8 @@ let private arguments (ctx: WitnessContext) call sources =
                 | _ ->
                     match MLIRAccumulator.recallNode source ctx.Accumulator with
                     | Some (ssa, ty) ->
-                        let operations, value, actual = adaptOperand ctx.Coeffects ctx.Graph call source ssa ty
-                        Result.Ok(operations, [{ SSA = value; Type = actual }])
+                        adaptOperand ctx.Coeffects ctx.Graph call source ssa ty
+                        |> Result.map (fun (operations, value, actual) -> operations, [{ SSA = value; Type = actual }])
                     | None -> Result.Error $"Argument {NodeId.value source} has not been witnessed")
     match readings |> List.tryPick (function Result.Error reason -> Some reason | _ -> None) with
     | Some reason -> Result.Error reason
@@ -56,8 +56,10 @@ let private observe (ctx: WitnessContext) (node: SemanticNode) prefix pattern =
     | Result.Ok ((operations, result), _) ->
         match result with
         | TRValue value ->
-            let meets, ssa, ty = adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id value.SSA value.Type
-            { InlineOps = prefix @ operations @ meets; TopLevelOps = []; Result = TRValue { SSA = ssa; Type = ty } }
+            match adaptOperand ctx.Coeffects ctx.Graph node.Id node.Id value.SSA value.Type with
+            | Result.Ok (meets, ssa, ty) ->
+                { InlineOps = prefix @ operations @ meets; TopLevelOps = []; Result = TRValue { SSA = ssa; Type = ty } }
+            | Result.Error reason -> failure node "result adaptation" reason
         | _ -> { InlineOps = prefix @ operations; TopLevelOps = []; Result = result }
 
 let private invoke (ctx: WitnessContext) (node: SemanticNode) invocation sources body names environment expected (native: (BoundaryClosedEntry * NativeEntrySignature) option) =
@@ -111,8 +113,10 @@ let private invoke (ctx: WitnessContext) (node: SemanticNode) invocation sources
                 else observe ctx node prefix (pUnitApplication node.Id invocation actuals)
             | Direct symbol, Some body ->
                 // The call's result is held at its declaration body's settled width.
-                let resultType = mapTypeAt body ctx
-                observe ctx node prefix (pDirectCall node.Id symbol (actuals |> List.map (fun value -> value.SSA, value.Type)) resultType names)
+                match mapTypeAt body ctx with
+                | Result.Ok resultType ->
+                    observe ctx node prefix (pDirectCall node.Id symbol (actuals |> List.map (fun value -> value.SSA, value.Type)) resultType names)
+                | Result.Error reason -> failure node "result boundary" reason
             | Direct _, None ->
                 failure node "result boundary"
                     $"Baker callable projection did not settle the declaration body for direct call {NodeId.value node.Id}: its result width has no settled source"
@@ -124,11 +128,12 @@ let private invoke (ctx: WitnessContext) (node: SemanticNode) invocation sources
 let private direct (ctx: WitnessContext) (node: SemanticNode) binding (sources: NodeId list) =
     let declared =
         match Alex.CodeGeneration.CallableSymbols.tryBinding ctx.Graph binding, declaration ctx binding with
-        | Some symbol, Some(parameters, body, implementation) -> Some(symbol, parameters, body, implementation)
-        | _ -> Operands.tryThunkDeclaration ctx binding |> Option.map (fun (symbol, parameters, body) -> symbol, parameters, body, binding)
+        | Some symbol, Some(parameters, body, implementation) -> Result.Ok (Some(symbol, parameters, body, implementation))
+        | _ -> Operands.thunkDeclaration ctx binding |> Result.map (Option.map (fun (symbol, parameters, body) -> symbol, parameters, body, binding))
     let demand = ctx.Graph.Emission.Ordinary
     match declared with
-    | Some(symbol, parameters, body, implementation) ->
+    | Result.Error reason -> failure node "declaration identity" reason
+    | Result.Ok (Some(symbol, parameters, body, implementation)) ->
         match Operands.closedNativeDefinition ctx.Graph implementation with
         | Result.Error reason -> failure node "closed native boundary" reason
         | Result.Ok native ->
