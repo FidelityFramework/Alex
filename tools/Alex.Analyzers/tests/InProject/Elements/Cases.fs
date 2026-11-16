@@ -9,3 +9,4 @@ let badTypeMappingCall () = Alex.CodeGeneration.TypeMapping.mapInt ()
 let badCallableSymbolsCall (id: NodeId) = Alex.CodeGeneration.CallableSymbols.symbolFor id
 let badParserGraph (state: PSGParserState) = state.Graph.Header
 let badParserZipper (state: PSGParserState) = state.Zipper
+let badAccumulatorAssign (acc: Alex.Traversal.TransferTypes.MLIRAccumulator) = acc.SSATypes <- Map.empty

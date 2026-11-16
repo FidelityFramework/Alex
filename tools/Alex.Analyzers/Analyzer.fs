@@ -363,16 +363,39 @@ type private BoundaryHits = {
   Diagnostics: Message list
   Axa003: ObservedSite list
   Axa004: ObservedSite list
+  Axa005Witness: ObservedSite list
   Axa007: ObservedSite list
+  Axa008: ObservedSite list
+  Axa009Construction: ObservedSite list
+  Axa009Values: ObservedSite list
+  Axa010: ObservedSite list
+  Axa010Smt: ObservedSite list
 }
 
-let private emptyHits = { Diagnostics = []; Axa003 = []; Axa004 = []; Axa007 = [] }
+let private emptyHits = {
+  Diagnostics = []
+  Axa003 = []
+  Axa004 = []
+  Axa005Witness = []
+  Axa007 = []
+  Axa008 = []
+  Axa009Construction = []
+  Axa009Values = []
+  Axa010 = []
+  Axa010Smt = []
+}
 
 let private mergeHits a b = {
   Diagnostics = a.Diagnostics @ b.Diagnostics
   Axa003 = a.Axa003 @ b.Axa003
   Axa004 = a.Axa004 @ b.Axa004
+  Axa005Witness = a.Axa005Witness @ b.Axa005Witness
   Axa007 = a.Axa007 @ b.Axa007
+  Axa008 = a.Axa008 @ b.Axa008
+  Axa009Construction = a.Axa009Construction @ b.Axa009Construction
+  Axa009Values = a.Axa009Values @ b.Axa009Values
+  Axa010 = a.Axa010 @ b.Axa010
+  Axa010Smt = a.Axa010Smt @ b.Axa010Smt
 }
 
 let private collectHits items f =
@@ -490,9 +513,23 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
       layerTarget.EndsWith("/Traversal/NanopassArchitecture.fsx", System.StringComparison.Ordinal)
     let inElements = hasLayerSegment "Elements"
     let inWitnesses = hasLayerSegment "Witnesses"
+    let inPatterns = hasLayerSegment "Patterns"
     let inImmutableLayer =
       hasLayerSegment "Dialects" || hasLayerSegment "CodeGeneration" ||
-      hasLayerSegment "Elements" || hasLayerSegment "XParsec" || hasLayerSegment "Patterns"
+      inElements || hasLayerSegment "XParsec" || inPatterns || inWitnesses
+    let isSourceFile (stem: string) =
+      layerTarget.EndsWith(stem + ".fs", System.StringComparison.Ordinal) ||
+      layerTarget.EndsWith(stem + ".fsx", System.StringComparison.Ordinal)
+    // AXA008 exemptions (Alex#60): TransferTypes.fs declares MLIRAccumulator and its functions;
+    // NanopassArchitecture.fs is the permitted binding layer. Every other file is in scope.
+    let isAccumulatorDeclarationFile = isSourceFile "/Traversal/TransferTypes"
+    let isAccumulatorMutationFile = isAccumulatorDeclarationFile || isNanopassArchitecture
+    // AXA009 exemptions: Values.fs derives SSA names; PSGCombinators.fs defines getNodeSSA / getNodeSSAs.
+    let isValuesFile = isSourceFile "/Traversal/Values"
+    let isSsaNameAuthorityFile = isValuesFile || isSourceFile "/XParsec/PSGCombinators"
+    // AXA010 scope: subtree traversal, ScopeContext creation and update, and SMT transfer are not
+    // Pattern or Witness operations.
+    let inSingleLayerScope = inPatterns || inWitnesses
 
     let isPsgAssembly (assembly: FSharpAssembly) = assembly.SimpleName = "Fidelity.PSG"
     let isPsgEntity (fullName: string) (entity: FSharpEntity) =
@@ -598,6 +635,53 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
       (value.DisplayName.StartsWith("recall", System.StringComparison.Ordinal) ||
        value.CompiledName.StartsWith("recall", System.StringComparison.Ordinal)) &&
       (value.DeclaringEntity |> Option.exists isAccumulatorEntity)
+    let isAlexEntity (fullNames: string list) (entity: FSharpEntity) =
+      entity.Assembly.SimpleName = "Alex" &&
+      (entity.TryFullName |> Option.exists (fun name -> List.contains name fullNames))
+    let isAlexValueNamed (fullNames: string list) (names: string list) (value: FSharpMemberOrFunctionOrValue) =
+      List.contains value.DisplayName names &&
+      (value.DeclaringEntity |> Option.exists (isAlexEntity fullNames))
+    // AXA008: the MLIRAccumulator functions that write an operand table, a void completion or the SSA type index.
+    let accumulatorMutationFunctions = [ "completeVoid"; "forgetVoid"; "restoreOperands"; "registerSSAType" ]
+    let isAccumulatorMutationFunction (value: FSharpMemberOrFunctionOrValue) =
+      (value.DisplayName.StartsWith("bind", System.StringComparison.Ordinal) ||
+       value.CompiledName.StartsWith("bind", System.StringComparison.Ordinal) ||
+       List.contains value.DisplayName accumulatorMutationFunctions ||
+       List.contains value.CompiledName accumulatorMutationFunctions) &&
+      (value.DeclaringEntity |> Option.exists isAccumulatorEntity)
+    let isAccumulatorPropertySetter (value: FSharpMemberOrFunctionOrValue) =
+      value.IsPropertySetterMethod && (value.DeclaringEntity |> Option.exists isAccumulatorEntity)
+    let isAccumulatorMutation (value: FSharpMemberOrFunctionOrValue) =
+      isAccumulatorMutationFunction value || isAccumulatorPropertySetter value
+    // AXA008: the settable properties MLIRAccumulator declares at the introduction of the rule. The set is closed.
+    let accumulatorSettableProperties =
+      Set.ofList [ "WitnessScope"; "EmittedDefinitions"; "WitnessEmissions"; "AllOps"; "Errors"; "BoundaryScopes"
+                   "NodeAssoc"; "CallableAssoc"; "CallableCellAssoc"; "SequenceAssoc"; "LazyAssoc"; "VoidAssoc"
+                   "SSATypes"; "EmittedGlobals"; "EmittedGlobalContents"; "EmittedStaticGlobals"; "PendingStaticGlobals" ]
+    let isAccumulatorTypeEntity (entity: FSharpEntity) =
+      not entity.IsFSharpModule && entity.TryFullName = Some "Alex.Traversal.TransferTypes.MLIRAccumulator"
+    // AXA009: every member of Alex.Traversal.Values that returns an SSA name.
+    let ssaNameMembers =
+      [ "value"; "values"; "continuationValue"; "valuesOf"; "resultOf"; "prologueValue"; "callableCode"
+        "callableAlternative"; "aggregateComponent"; "arrayElementIndex"; "meetValue"; "returnMeetValue"
+        "unitReturnValue"; "hardwareValue"; "solverValue"; "undefined" ]
+    let isDirectSsaNameValue (value: FSharpMemberOrFunctionOrValue) =
+      isAlexValueNamed [ "Alex.Traversal.Values" ] ssaNameMembers value
+    let rec isSsaType (typ: FSharpType) =
+      if typ.IsAbbreviation then isSsaType typ.AbbreviatedType
+      else typ.HasTypeDefinition && isAlexEntity [ "Alex.Dialects.Core.Types.SSA" ] typ.TypeDefinition
+    // AXA010, pinned ratchet: subtree traversal and ScopeContext creation and update.
+    let isConfinedTraversalValue (value: FSharpMemberOrFunctionOrValue) =
+      isAlexValueNamed [ "Alex.Traversal.NanopassArchitecture" ] [ "visitAllNodes" ] value ||
+      isAlexValueNamed
+        [ "Alex.Traversal.ScopeContext"
+          "Alex.Traversal.ScopeContext.ScopeContext"
+          "Alex.Traversal.ScopeContext.ScopeContextModule" ]
+        [ "root"; "createChild"; "addOp"; "addOps"; "enterScope"; "exitScope" ]
+        value
+    // AXA010, no pins: SMT transfer.
+    let isSmtTransferValue (value: FSharpMemberOrFunctionOrValue) =
+      isAlexValueNamed [ "Alex.Traversal.SMTTransfer" ] [ "operations"; "transfer" ] value
     let isDeclarationFactsField (field: FSharpField) =
       field.Name = "DeclarationFacts" &&
       (field.DeclaringEntity |> Option.exists (isPsgEntity "Fidelity.PSG.BoundaryImport"))
@@ -1489,6 +1573,21 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
           helperCollapsesFactParam callEnv (fn :: visitedHelpers) boundParams info.Body
       | _ -> false
 
+    // AXA005 mutable state. A Witnesses/ site is an observed site for the axa005WitnessPins ratchet;
+    // a site in any other immutable layer is reported directly, with no pin.
+    let mutableStateHits (enclosingFunc: string) (range: range) (message: string) : BoundaryHits =
+      if not inImmutableLayer then emptyHits
+      elif inWitnesses then { emptyHits with Axa005Witness = [ { Target = enclosingFunc; Range = range } ] }
+      else
+        { emptyHits with
+            Diagnostics =
+              [ { Type = "Alex layer purity"
+                  Message = message
+                  Code = "AXA005"
+                  Severity = Severity.Error
+                  Range = range
+                  Fixes = [] } ] }
+
     let rec walkExpr (env: BindingEnv) (enclosingFunc: string) (syntheticRevisionRanges: range list) (expression: FSharpExpr) : BoundaryHits =
       match expression with
       | NewRecord(recordType, args) ->
@@ -1504,50 +1603,35 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
                 Severity = Severity.Error
                 Range = expression.Range
                 Fixes = []
-              }
-            if inImmutableLayer && recordType.HasTypeDefinition && isFSharpRefEntity recordType.TypeDefinition then
-              yield {
-                Type = "Alex layer purity"
-                Message = "Mutable ref cells (FSharpRef) are forbidden in non-traversal Alex layers."
-                Code = "AXA005"
-                Severity = Severity.Error
-                Range = expression.Range
-                Fixes = []
               } ]
+        let refHits =
+          if recordType.HasTypeDefinition && isFSharpRefEntity recordType.TypeDefinition then
+            mutableStateHits enclosingFunc expression.Range "Mutable ref cells (FSharpRef) are forbidden in non-traversal Alex layers."
+          else emptyHits
         let nextSynthetic =
           if recordType.HasTypeDefinition && isPsgEntity "Fidelity.PSG.Revision" recordType.TypeDefinition then
             expression.Range :: syntheticRevisionRanges
           else syntheticRevisionRanges
         let childHits = collectHits args (walkExpr env enclosingFunc nextSynthetic)
-        mergeHits { emptyHits with Diagnostics = hereDiags } childHits
+        mergeHits { refHits with Diagnostics = hereDiags @ refHits.Diagnostics } childHits
       | Let((value, binding, _), body) ->
-        let hereDiags =
-          if inImmutableLayer && value.IsMutable && not value.IsCompilerGenerated then
-            [ { Type = "Alex layer purity"
-                Message = sprintf "Mutable local '%s' is forbidden in non-traversal Alex layers." value.DisplayName
-                Code = "AXA005"
-                Severity = Severity.Error
-                Range = value.DeclarationLocation
-                Fixes = [] } ]
-          else []
+        let mutableHits =
+          if value.IsMutable && not value.IsCompilerGenerated then
+            mutableStateHits enclosingFunc value.DeclarationLocation (sprintf "Mutable local '%s' is forbidden in non-traversal Alex layers." value.DisplayName)
+          else emptyHits
         let bindingHits = walkExpr env enclosingFunc syntheticRevisionRanges binding
         let bodyEnv = addBinding value (bindingOfExpr binding) env
         let bodyHits = walkExpr bodyEnv enclosingFunc syntheticRevisionRanges body
-        mergeHits { emptyHits with Diagnostics = hereDiags } (mergeHits bindingHits bodyHits)
+        mergeHits mutableHits (mergeHits bindingHits bodyHits)
       | LetRec(recBindings, body) ->
         let recEnv =
           recBindings |> List.fold (fun acc (value, rhs, _) -> addBinding value (bindingOfExpr rhs) acc) env
         let recHits =
           collectHits recBindings (fun (value, rhs, _) ->
-            let mutDiag =
-              if inImmutableLayer && value.IsMutable && not value.IsCompilerGenerated then
-                [ { Type = "Alex layer purity"
-                    Message = sprintf "Mutable local '%s' is forbidden in non-traversal Alex layers." value.DisplayName
-                    Code = "AXA005"
-                    Severity = Severity.Error
-                    Range = value.DeclarationLocation
-                    Fixes = [] } ]
-              else []
+            let mutableHits =
+              if value.IsMutable && not value.IsCompilerGenerated then
+                mutableStateHits enclosingFunc value.DeclarationLocation (sprintf "Mutable local '%s' is forbidden in non-traversal Alex layers." value.DisplayName)
+              else emptyHits
             let axa004 =
               if containsSemanticKindOrRevisionNodes rhs then
                 let targetName =
@@ -1556,7 +1640,7 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
                 [ { Target = targetName; Range = value.DeclarationLocation } ]
               else []
             let rhsHits = walkExpr recEnv enclosingFunc syntheticRevisionRanges rhs
-            mergeHits { emptyHits with Diagnostics = mutDiag; Axa004 = axa004 } rhsHits)
+            mergeHits { mutableHits with Axa004 = axa004 } rhsHits)
         let bodyHits = walkExpr recEnv enclosingFunc syntheticRevisionRanges body
         mergeHits recHits bodyHits
       | FSharpFieldGet(receiverOpt, _, field) ->
@@ -1570,11 +1654,21 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
           |> Option.defaultValue emptyHits
         mergeHits { emptyHits with Axa003 = axa003 } recvHits
       | Value v ->
-        let axa003 =
-          if not isZipperSubstrate && isRevisionTryNodeValue v then
+        let site = [ { Target = enclosingFunc; Range = expression.Range } ]
+        { emptyHits with
+            Axa003 = if not isZipperSubstrate && isRevisionTryNodeValue v then site else []
+            Axa008 = if not isAccumulatorMutationFile && isAccumulatorMutationFunction v then site else []
+            Axa009Values = if not isSsaNameAuthorityFile && isDirectSsaNameValue v then site else []
+            Axa010 = if inSingleLayerScope && isConfinedTraversalValue v then site else []
+            Axa010Smt = if inSingleLayerScope && isSmtTransferValue v then site else [] }
+      | NewUnionCase(unionType, _, args) ->
+        let axa009 =
+          if not isValuesFile && isSsaType unionType then
             [ { Target = enclosingFunc; Range = expression.Range } ]
           else []
-        { emptyHits with Axa003 = axa003 }
+        mergeHits
+          { emptyHits with Axa009Construction = axa009 }
+          (collectHits args (walkExpr env enclosingFunc syntheticRevisionRanges))
       | Coerce(_, input) ->
         let found, errs = hasDeclarationFactsProvenance env [] input
         let hereDiags =
@@ -1610,16 +1704,11 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
             [ { Target = enclosingFunc; Range = range } ]
           else []
 
-        let refDiag =
-          if inImmutableLayer && called.CompiledName = "Ref" &&
+        let refHits =
+          if called.CompiledName = "Ref" &&
              (called.DeclaringEntity |> Option.exists (fun e -> e.Assembly.SimpleName = "FSharp.Core" && e.TryFullName = Some "Microsoft.FSharp.Core.Operators")) then
-            [ { Type = "Alex layer purity"
-                Message = "Mutable ref cells (ref) are forbidden in non-traversal Alex layers."
-                Code = "AXA005"
-                Severity = Severity.Error
-                Range = range
-                Fixes = [] } ]
-          else []
+            mutableStateHits enclosingFunc range "Mutable ref cells (ref) are forbidden in non-traversal Alex layers."
+          else emptyHits
 
         let axa006Diags =
           let exprs = (Option.toList receiverOpt) @ arguments
@@ -1699,10 +1788,14 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
           | _ ->
             collectHits arguments (walkExpr env enclosingFunc syntheticRevisionRanges)
         mergeHits
-          { Diagnostics = axa002Diags @ refDiag @ axa006Diags @ axa007ErrDiags
-            Axa003 = axa003
-            Axa004 = []
-            Axa007 = axa007SitesFromComb @ helperFallbackSites }
+          { refHits with
+              Diagnostics = axa002Diags @ refHits.Diagnostics @ axa006Diags @ axa007ErrDiags
+              Axa003 = axa003
+              Axa007 = axa007SitesFromComb @ helperFallbackSites
+              Axa008 = if not isAccumulatorMutationFile && isAccumulatorMutation called then [ { Target = enclosingFunc; Range = range } ] else []
+              Axa009Values = if not isSsaNameAuthorityFile && isDirectSsaNameValue called then [ { Target = enclosingFunc; Range = range } ] else []
+              Axa010 = if inSingleLayerScope && isConfinedTraversalValue called then [ { Target = enclosingFunc; Range = range } ] else []
+              Axa010Smt = if inSingleLayerScope && isSmtTransferValue called then [ { Target = enclosingFunc; Range = range } ] else [] }
           (mergeHits recvHits argHits)
       | Application _ ->
         let head, allArgs = unwrapApplications expression
@@ -1805,15 +1898,10 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
         collectHits subDecls (walkDeclaration moduleEnv)
       | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(value, paramGroups, body) ->
         if not value.IsCompilerGenerated then
-          let mutDiag =
-            if inImmutableLayer && value.IsMutable then
-              [ { Type = "Alex layer purity"
-                  Message = sprintf "Mutable binding '%s' is forbidden in non-traversal Alex layers." value.DisplayName
-                  Code = "AXA005"
-                  Severity = Severity.Error
-                  Range = value.DeclarationLocation
-                  Fixes = [] } ]
-            else []
+          let mutableHits =
+            if value.IsMutable then
+              mutableStateHits value.DisplayName value.DeclarationLocation (sprintf "Mutable binding '%s' is forbidden in non-traversal Alex layers." value.DisplayName)
+            else emptyHits
           let axa004 =
             if isRecursiveBinding value body && containsSemanticKindOrRevisionNodes body then
               [ { Target = value.DisplayName; Range = value.DeclarationLocation } ]
@@ -1824,7 +1912,7 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
             if List.isEmpty flatParams && List.isEmpty ps then moduleEnv
             else addBinding value { Params = flatParams @ ps; Body = inner } moduleEnv
           let bodyHits = walkExpr declEnv value.DisplayName [] body
-          mergeHits { emptyHits with Diagnostics = mutDiag; Axa004 = axa004 } bodyHits
+          mergeHits { mutableHits with Axa004 = axa004 } bodyHits
         else emptyHits
       | FSharpImplementationFileDeclaration.InitAction(action) ->
         walkExpr moduleEnv "<init>" [] action
@@ -1841,9 +1929,35 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
         else env
       | FSharpImplementationFileDeclaration.InitAction _ -> env
 
+    // AXA008, Traversal/TransferTypes.fs only: a settable MLIRAccumulator property outside the closed set
+    // is reported at its declaration, with no pin.
+    let rec accumulatorPropertyDiagnostics (decl: FSharpImplementationFileDeclaration) : Message list =
+      match decl with
+      | FSharpImplementationFileDeclaration.Entity(entity, subDecls) ->
+        let hereDiags =
+          if isAccumulatorTypeEntity entity then
+            entity.MembersFunctionsAndValues
+            |> Seq.filter (fun m ->
+              m.IsProperty && m.HasSetterMethod && not (accumulatorSettableProperties.Contains m.DisplayName))
+            |> Seq.map (fun m ->
+              { Type = "Alex layer purity"
+                Message =
+                  sprintf "Alex must not add a settable property to MLIRAccumulator; '%s' is outside the %d settable properties declared at the introduction of AXA008." m.DisplayName accumulatorSettableProperties.Count
+                Code = "AXA008"
+                Severity = Severity.Error
+                Range = m.DeclarationLocation
+                Fixes = [] })
+            |> Seq.toList
+          else []
+        hereDiags @ List.collect accumulatorPropertyDiagnostics subDecls
+      | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue _ -> []
+      | FSharpImplementationFileDeclaration.InitAction _ -> []
+
     let moduleEnv = tree.Declarations |> List.fold collectModuleBindings Map.empty
     let walkedHits = collectHits tree.Declarations (walkDeclaration moduleEnv)
     for d in walkedHits.Diagnostics do diagnostics.Add d
+    if isAccumulatorDeclarationFile then
+      for d in List.collect accumulatorPropertyDiagnostics tree.Declarations do diagnostics.Add d
 
     let sourceRelList =
       context.ProjectOptions.SourceFiles
@@ -2010,10 +2124,116 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
       { File = "Witnesses/LambdaWitness.fs"; Target = "ordinaryParameterComponents"; MaxCount = 1 }
       { File = "Witnesses/LambdaWitness.fs"; Target = "witnessLambdaWith"; MaxCount = 4 }
     ]
+    // AXA005, Witnesses/ only: ref cells that exist at the introduction of the Witnesses/ rule.
+    let axa005WitnessPins : DebtPin list = [
+      { File = "Witnesses/ControlFlowWitness.fs"; Target = "witnessBranchScope"; MaxCount = 1 }
+      { File = "Witnesses/MatchWitness.fs"; Target = "witnessBranchScope"; MaxCount = 1 }
+      { File = "Witnesses/LambdaWitness.fs"; Target = "witnessLambdaWith"; MaxCount = 2 }
+    ]
+    // AXA008: MLIRAccumulator.bind*, completeVoid, forgetVoid, restoreOperands and registerSSAType calls, and
+    // MLIRAccumulator property assignments, outside Traversal/TransferTypes.fs and Traversal/NanopassArchitecture.fs.
+    let axa008Pins : DebtPin list = [
+      { File = "Elements/MemRefElements.fs"; Target = "pAlloca"; MaxCount = 1 }
+      { File = "Elements/MemRefElements.fs"; Target = "pAllocaDynamic"; MaxCount = 1 }
+      { File = "Elements/MemRefElements.fs"; Target = "pAllocAligned"; MaxCount = 1 }
+      { File = "Elements/MemRefElements.fs"; Target = "pAllocStatic"; MaxCount = 1 }
+      { File = "Elements/MemRefElements.fs"; Target = "pMemRefGetGlobal"; MaxCount = 1 }
+      { File = "Elements/MemRefElements.fs"; Target = "pMemRefView"; MaxCount = 1 }
+      { File = "Patterns/MemoryPatterns.fs"; Target = "pPublishedMemoryOperation"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pReadContinuationSlot"; MaxCount = 1 }
+      { File = "Traversal/CallableOperands.fs"; Target = "bind"; MaxCount = 1 }
+      { File = "Traversal/CallableOperands.fs"; Target = "copy"; MaxCount = 1 }
+      { File = "Traversal/SequenceOperands.fs"; Target = "bind"; MaxCount = 1 }
+      { File = "Traversal/SequenceOperands.fs"; Target = "copy"; MaxCount = 1 }
+      { File = "Traversal/SelectiveTraversal.fs"; Target = "freshCommon"; MaxCount = 1 }
+      { File = "Traversal/SelectiveTraversal.fs"; Target = "freshScalar"; MaxCount = 1 }
+      { File = "Witnesses/LiteralWitness.fs"; Target = "witnessLiteralNode"; MaxCount = 1 }
+      { File = "Witnesses/LambdaWitness.fs"; Target = "witnessLambdaWith"; MaxCount = 11 }
+    ]
+    // AXA009: SSA union case construction outside Traversal/Values.fs.
+    let axa009ConstructionPins : DebtPin list = [
+      { File = "Witnesses/LambdaWitness.fs"; Target = "witnessLambdaWith"; MaxCount = 1 }
+    ]
+    // AXA009: direct uses of the SSA-producing members of Alex.Traversal.Values outside Traversal/Values.fs
+    // and XParsec/PSGCombinators.fs.
+    let axa009Pins : DebtPin list = [
+      { File = "Patterns/MemoryPatterns.fs"; Target = "pDUCaseAt"; MaxCount = 1 }
+      { File = "Patterns/MemoryPatterns.fs"; Target = "pMemoryAddressOfView"; MaxCount = 1 }
+      { File = "Patterns/MemoryPatterns.fs"; Target = "pPublishedMemoryOperation"; MaxCount = 1 }
+      { File = "Patterns/CallableAggregatePatterns.fs"; Target = "pReadOrdinaryComponent"; MaxCount = 2 }
+      { File = "Patterns/CallableAggregatePatterns.fs"; Target = "pSelect"; MaxCount = 2 }
+      { File = "Patterns/CallableAggregatePatterns.fs"; Target = "pStorage"; MaxCount = 1 }
+      { File = "Patterns/CallableAggregatePatterns.fs"; Target = "pWrite"; MaxCount = 1 }
+      { File = "Patterns/DUPatterns.fs"; Target = "pBuildAggregateStorage"; MaxCount = 1 }
+      { File = "Patterns/RecordPatterns.fs"; Target = "pBuildRecordComponentCopy"; MaxCount = 2 }
+      { File = "Patterns/ControlFlowPatterns.fs"; Target = "pBuildContinuationDispatch"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pAcquireSequence"; MaxCount = 3 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pAllocateContinuationStorage"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pAllocateFrame"; MaxCount = 2 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pBorrowContinuationSlot"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pGetEnumerator"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pInitializeEnvironmentSlots"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pInitializeState"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pMoveNext"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pPullSequence"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pReadContinuationSlot"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pSequenceCurrent"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pSequenceValue"; MaxCount = 1 }
+      { File = "Patterns/ContinuationPatterns.fs"; Target = "pWriteContinuationSlot"; MaxCount = 1 }
+      { File = "Patterns/EnvironmentPatterns.fs"; Target = "pAllocateEnvironment"; MaxCount = 1 }
+      { File = "Patterns/LazyPatterns.fs"; Target = "pAllocateLazyEnvironment"; MaxCount = 1 }
+      { File = "Patterns/LazyPatterns.fs"; Target = "pLazyConditional"; MaxCount = 1 }
+      { File = "Patterns/LazyPatterns.fs"; Target = "pLazyDispatch"; MaxCount = 1 }
+      { File = "Patterns/LazyPatterns.fs"; Target = "pLazySwitch"; MaxCount = 2 }
+      { File = "Patterns/LazyPatterns.fs"; Target = "pLazyValue"; MaxCount = 1 }
+      { File = "Patterns/LazyPatterns.fs"; Target = "pProgramLazyReference"; MaxCount = 1 }
+      { File = "Patterns/ApplicationPatterns.fs"; Target = "pCallableApplication"; MaxCount = 2 }
+      { File = "Patterns/ApplicationPatterns.fs"; Target = "pIndirectApplication"; MaxCount = 1 }
+      { File = "Patterns/ApplicationPatterns.fs"; Target = "pLazyApplication"; MaxCount = 2 }
+      { File = "Patterns/ApplicationPatterns.fs"; Target = "pSequenceApplication"; MaxCount = 2 }
+      { File = "Patterns/CallablePatterns.fs"; Target = "pCallableConditional"; MaxCount = 3 }
+      { File = "Patterns/CallablePatterns.fs"; Target = "pCallableValue"; MaxCount = 1 }
+      { File = "Patterns/CallablePatterns.fs"; Target = "pProgramCallableReference"; MaxCount = 1 }
+      { File = "Patterns/SequencePatterns.fs"; Target = "pProgramSequenceReference"; MaxCount = 1 }
+      { File = "Patterns/SequencePatterns.fs"; Target = "pSequenceConditional"; MaxCount = 1 }
+      { File = "Patterns/SequencePatterns.fs"; Target = "pSequenceDispatch"; MaxCount = 1 }
+      { File = "Patterns/SequencePatterns.fs"; Target = "pSequenceSwitch"; MaxCount = 2 }
+      { File = "Patterns/MutableCallablePatterns.fs"; Target = "pCreateMutableCallable"; MaxCount = 3 }
+      { File = "Patterns/MutableCallablePatterns.fs"; Target = "pReadMutableCallable"; MaxCount = 5 }
+      { File = "Patterns/MutableCallablePatterns.fs"; Target = "pUseCell"; MaxCount = 1 }
+      { File = "Patterns/MutableCallablePatterns.fs"; Target = "pWrite"; MaxCount = 2 }
+      { File = "Patterns/PlatformPatterns.fs"; Target = "pBoundaryCall"; MaxCount = 2 }
+      { File = "Traversal/TransferTypes.fs"; Target = "meetFor"; MaxCount = 1 }
+      { File = "Traversal/TransferTypes.fs"; Target = "requireSSA"; MaxCount = 1 }
+      { File = "Traversal/TransferTypes.fs"; Target = "requireSSAs"; MaxCount = 1 }
+      { File = "Traversal/SMTTransfer.fs"; Target = "scope"; MaxCount = 1 }
+      { File = "Witnesses/LiteralWitness.fs"; Target = "witnessLiteralNode"; MaxCount = 1 }
+      { File = "Witnesses/ControlFlowWitness.fs"; Target = "witnessContinuationDispatch"; MaxCount = 1 }
+      { File = "Witnesses/LambdaWitness.fs"; Target = "witnessLambdaWith"; MaxCount = 4 }
+      { File = "Traversal/StaticStorageValidation.fs"; Target = "validate"; MaxCount = 2 }
+    ]
+    // AXA010: NanopassArchitecture.visitAllNodes calls and ScopeContext.root / createChild / addOp / addOps calls
+    // in the Witnesses/ functions that open a nested scope. No pin names a Patterns/ file.
+    let axa010Pins : DebtPin list = [
+      { File = "Witnesses/ControlFlowWitness.fs"; Target = "witnessBranchScope"; MaxCount = 2 }
+      { File = "Witnesses/ControlFlowWitness.fs"; Target = "witnessControlFlowWith"; MaxCount = 1 }
+      { File = "Witnesses/MatchWitness.fs"; Target = "visitChild"; MaxCount = 1 }
+      { File = "Witnesses/MatchWitness.fs"; Target = "witnessBranchScope"; MaxCount = 1 }
+      { File = "Witnesses/LambdaWitness.fs"; Target = "witnessLambdaWith"; MaxCount = 7 }
+    ]
+    // AXA010: SMTTransfer.operations and SMTTransfer.transfer. The list is empty and stays empty; a site in
+    // Patterns/ or Witnesses/ is refused, including a site inside a function that axa010Pins names.
+    let axa010SmtPins : DebtPin list = []
 
     enforceRatchet "AXA003" "Alex published graph boundary" "Alex must confine Revision.Nodes and Revision.tryNode to Traversal/, XParsec/, or Generation.fs" (fun _ -> false) axa003Pins walkedHits.Axa003
     enforceRatchet "AXA004" "Alex published graph boundary" "Alex must not write recursive SemanticKind or Revision.Nodes catamorphisms outside Traversal/NanopassArchitecture.fs (tryWitnesses)" (fun site -> isNanopassArchitecture && (site.Target = "tryWitnesses" || site.Target = "combineWitnesses.tryWitnesses")) axa004Pins walkedHits.Axa004
+    enforceRatchet "AXA005" "Alex layer purity" "Mutable locals, mutable bindings and ref cells are forbidden in Witnesses/" (fun _ -> false) axa005WitnessPins walkedHits.Axa005Witness
     enforceRatchet "AXA007" "Alex published graph boundary" "Alex must not collapse None from a published-fact or symbol lookup into a fallback value" (fun _ -> false) axa007Pins walkedHits.Axa007
+    enforceRatchet "AXA008" "Alex layer purity" "Alex must not call MLIRAccumulator.bind*, completeVoid, forgetVoid, restoreOperands or registerSSAType, or assign an MLIRAccumulator property, outside Traversal/TransferTypes.fs and Traversal/NanopassArchitecture.fs" (fun _ -> false) axa008Pins walkedHits.Axa008
+    enforceRatchet "AXA009" "Alex published graph boundary" "Alex must not construct an SSA union case outside Traversal/Values.fs" (fun _ -> false) axa009ConstructionPins walkedHits.Axa009Construction
+    enforceRatchet "AXA009" "Alex published graph boundary" "Alex must take SSA names from getNodeSSA / getNodeSSAs; direct uses of the SSA-producing members of Alex.Traversal.Values are confined to Traversal/Values.fs and XParsec/PSGCombinators.fs" (fun _ -> false) axa009Pins walkedHits.Axa009Values
+    enforceRatchet "AXA010" "Alex layer purity" "Alex must not call NanopassArchitecture.visitAllNodes or ScopeContext.root / createChild / addOp / addOps / enterScope / exitScope in Patterns/ or in a Witnesses/ function that is not a pinned scope boundary" (fun _ -> false) axa010Pins walkedHits.Axa010
+    enforceRatchet "AXA010" "Alex layer purity" "Alex must not call SMTTransfer.operations or SMTTransfer.transfer in Patterns/ or Witnesses/" (fun _ -> false) axa010SmtPins walkedHits.Axa010Smt
 
   return diagnostics |> Seq.distinctBy (fun diagnostic -> diagnostic.Code, diagnostic.Range.StartLine, diagnostic.Range.StartColumn, diagnostic.Message) |> List.ofSeq
 }

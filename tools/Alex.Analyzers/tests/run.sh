@@ -146,7 +146,7 @@ run_case() {
   if [[ -n ${ALEX_ANALYZER_ONLY:-} && "$name" != "$ALEX_ANALYZER_ONLY" ]]; then return 0; fi
   executed=$((executed + 1))
   cases+=("$name")
-  case "$name" in forward|revision|semantic-node|breadcrumb|impostor|missing-contract|stale-contract|nominal-*|other-name-field|published-width|published-string|Dialects/*|Elements/*|Patterns/*|Traversal/*|XParsec/*|Generation) analyzer='Alex published boundary' ;; esac
+  case "$name" in forward|revision|semantic-node|breadcrumb|impostor|missing-contract|stale-contract|nominal-*|other-name-field|published-width|published-string|Dialects/*|Elements/*|Patterns/*|Traversal/*|Witnesses/*|XParsec/*|Generation) analyzer='Alex published boundary' ;; esac
   (cd "$tool_dir" && dotnet fsharp-analyzers --script "$scratch/$name.fsx" --analyzers-path "$analyzers" --include-analyzers "$analyzer" --fail-on-type-errors) > "$scratch/$name.log" 2>&1 || rc=$?
   case "$expected" in
     clean|known-miss|policy-pending) [[ $rc -eq 0 ]] && ! rg -q 'AX[AC][0-9]+' "$scratch/$name.log" ;;
@@ -183,6 +183,12 @@ run_case() {
         AXA005-ref) expected=AXA005; reason='Mutable ref cells (ref) are forbidden in non-traversal Alex layers.' ;;
         AXA006) reason='Alex must not extract payloads from BoundaryImport.DeclarationFacts; only key-presence checks (ContainsKey / Map.containsKey) are permitted.' ;;
         AXA007-fn) expected=AXA007; reason="Alex must not collapse None from a published-fact or symbol lookup into a fallback value (in 'bad')." ;;
+        AXA005-witness) expected=AXA005; reason="Mutable locals, mutable bindings and ref cells are forbidden in Witnesses/ (in 'bad')." ;;
+        AXA008-fn) expected=AXA008; reason="Alex must not call MLIRAccumulator.bind*, completeVoid, forgetVoid, restoreOperands or registerSSAType, or assign an MLIRAccumulator property, outside Traversal/TransferTypes.fs and Traversal/NanopassArchitecture.fs (in 'bad')." ;;
+        AXA009-construction) expected=AXA009; reason="Alex must not construct an SSA union case outside Traversal/Values.fs (in 'bad')." ;;
+        AXA009-values) expected=AXA009; reason="Alex must take SSA names from getNodeSSA / getNodeSSAs; direct uses of the SSA-producing members of Alex.Traversal.Values are confined to Traversal/Values.fs and XParsec/PSGCombinators.fs (in 'bad')." ;;
+        AXA010-fn) expected=AXA010; reason="Alex must not call NanopassArchitecture.visitAllNodes or ScopeContext.root / createChild / addOp / addOps / enterScope / exitScope in Patterns/ or in a Witnesses/ function that is not a pinned scope boundary (in 'bad')." ;;
+        AXA010-smt) expected=AXA010; reason="Alex must not call SMTTransfer.operations or SMTTransfer.transfer in Patterns/ or Witnesses/ (in 'bad')." ;;
         AXC001) reason='Clef production code must not use null.' ;;
         AXC002) reason='Clef production code must not depend on .NET library APIs:' ;;
         AXC003) reason='Clef production code must not use task computation expressions.' ;;
@@ -356,7 +362,7 @@ run_case file-reference AXC002 '1,21 1,11'
 run_case file-stream AXC002 '1,18 1,54 1,44'
 run_case stream-reader AXC002 '1,18 1,42'
 run_case invalid type-error
-mkdir -p "$scratch/Dialects/Core" "$scratch/Patterns" "$scratch/Traversal" "$scratch/XParsec" "$scratch/Elements"
+mkdir -p "$scratch/Dialects/Core" "$scratch/Patterns" "$scratch/Traversal" "$scratch/XParsec" "$scratch/Elements" "$scratch/Witnesses"
 printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Nodes.TryFind id\n' "$psg_dll" > "$scratch/Dialects/Core/axel-nodes.fsx"
 printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = Revision.tryNode id g\n' "$psg_dll" > "$scratch/Patterns/axel-trynode.fsx"
 printf '#r "%s"\nopen Fidelity.PSG\nlet bad (r: Revision) = { r with Header = r.Header }\n' "$psg_dll" > "$scratch/Dialects/Core/axel-revision-with.fsx"
@@ -366,7 +372,7 @@ printf '#r "%s"\nopen Fidelity.PSG\nlet ok (g: Revision) (id: NodeId) = g.Nodes.
 printf '#r "%s"\nopen Fidelity.PSG\nlet rec bad (kind: SemanticKind) = match kind with SemanticKind.Literal n -> n | SemanticKind.Binding _ -> bad kind\n' "$psg_dll" > "$scratch/Dialects/Core/axel-cata-kind.fsx"
 printf '#r "%s"\nopen Fidelity.PSG\nlet outer (g: Revision) (id: NodeId) =\n  let rec bad i = match g.Nodes.TryFind i with Some _ -> bad i | None -> Result.Error "stop"\n  bad id\n' "$psg_dll" > "$scratch/Traversal/axel-cata-local-nodes.fsx"
 printf '#r "%s"\nopen Fidelity.PSG\nlet rec exprOrigin (g: Revision) (id: NodeId) =\n  match Revision.tryNode id g with\n  | Some n -> match n.Kind with SemanticKind.Literal v -> Result.Ok v | SemanticKind.Binding _ -> exprOrigin g id\n  | None -> Result.Error "missing"\n' "$psg_dll" > "$scratch/Dialects/Core/axel-expr-origin.fsx"
-printf '#r "%s"\nopen Fidelity.PSG\nlet rec tryWitnesses (kind: SemanticKind) = match kind with SemanticKind.Literal n -> n | SemanticKind.Binding _ -> tryWitnesses kind\n' "$psg_dll" > "$scratch/Traversal/NanopassArchitecture.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet rec tryWitnesses (kind: SemanticKind) = match kind with SemanticKind.Literal n -> n | SemanticKind.Binding _ -> tryWitnesses kind\nlet ok (id: NodeId) (ssa: Alex.Dialects.Core.Types.SSA) (acc: MLIRAccumulator) =\n  MLIRAccumulator.bindNode id ssa "i64" acc\n  acc.SSATypes <- Map.empty\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/NanopassArchitecture.fsx"
 printf '#r "%s"\nopen Fidelity.PSG\nlet ok (kind: SemanticKind) = match kind with SemanticKind.Literal n -> n | SemanticKind.Binding _ -> 0\n' "$psg_dll" > "$scratch/Dialects/Core/axel-nonrec-kind.fsx"
 printf '#r "%s"\ntype Bad = Fidelity.PSG.SemanticNode\n' "$psg_dll" > "$scratch/Elements/axel-elem-node.fsx"
 printf '#r "%s"\n#r "%s"\nlet bad s = Alex.Traversal.PSGZipper.focus s\n' "$psg_dll" "$alex_dll" > "$scratch/Elements/axel-elem-zipper.fsx"
@@ -417,6 +423,32 @@ printf '#r "%s"\nopen Fidelity.PSG\nlet bad (g: Revision) (id: NodeId) = g.Emiss
 printf '#r "%s"\nopen Fidelity.PSG\nlet tryAt (g: Revision) (id: NodeId) = g.Codata.Escapes.TryFind id\nlet bad (g: Revision) (id: NodeId) = tryAt g id |> Option.defaultValue 0\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-helper-ret.fsx"
 printf '#r "%s"\nopen Fidelity.PSG\nlet orZero opt = opt |> Option.defaultValue 0\nlet bad (g: Revision) (id: NodeId) = orZero (g.Codata.Escapes.TryFind id)\n' "$psg_dll" > "$scratch/Traversal/axel-fallback-helper-param.fsx"
 printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet cleanDomainOptional (alignmentOpt: string option) = alignmentOpt |> Option.defaultValue ""\nlet ok (g: Revision) (id: NodeId) (acc: MLIRAccumulator) (optArg: string option) =\n  let _ = cleanDomainOptional optArg\n  let _ = Revision.tryNode id g |> Option.map Result.Ok |> Option.defaultWith (fun () -> Result.Error "missing")\n  let _ = match g.Codata.Escapes.TryFind id with Some n -> Result.Ok n | None -> Result.Error "missing"\n  let _ = match MLIRAccumulator.recallNode id acc with Some _ -> WitnessOutput.error "ok" | None -> WitnessOutput.errorDiag (Diagnostic.error "missing")\n  let _ = match g.Codata.Escapes.TryFind id with Some x -> x > 0 | None -> false\n  let _ = match g.Codata.Escapes.TryFind id with Some _ -> (g.Emission.Entries.TryFind id |> Option.exists (fun s -> s = "ok")) | None -> (g.Emission.Entries.TryFind id |> Option.isSome)\n  Option.isSome (Revision.tryNode id g)\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/axel-fallback-ok.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad (id: NodeId) (ssa: Alex.Dialects.Core.Types.SSA) (acc: MLIRAccumulator) = MLIRAccumulator.bindNode id ssa "i64" acc\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-bind-node.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad (id: NodeId) (ssa: Alex.Dialects.Core.Types.SSA) = MLIRAccumulator.bindNode id ssa "i64"\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-bind-node-partial.fsx"
+printf '#r "%s"\n#r "%s"\nopen Alex.Traversal.TransferTypes\nlet bad (acc: MLIRAccumulator) = acc.SSATypes <- Map.empty\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-accumulator-assign.fsx"
+printf '#r "%s"\n#r "%s"\nlet bad (acc: Alex.Traversal.TransferTypes.MLIRAccumulator) = acc.SSATypes <- Map.empty\n' "$psg_dll" "$alex_dll" > "$scratch/Elements/axel-accumulator-assign.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad (id: NodeId) (ssa: Alex.Dialects.Core.Types.SSA) (acc: MLIRAccumulator) = MLIRAccumulator.bindNode id ssa "i64" acc\n' "$psg_dll" "$alex_dll" > "$scratch/Witnesses/axel-bind-node.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad (id: NodeId) (ssa: Alex.Dialects.Core.Types.SSA) (acc: MLIRAccumulator) =\n  MLIRAccumulator.bindNode id ssa "i64" acc\n  acc.SSATypes <- Map.empty\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/axel-bind-node.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet ok (id: NodeId) (ssa: Alex.Dialects.Core.Types.SSA) (acc: MLIRAccumulator) =\n  MLIRAccumulator.bindNode id ssa "i64" acc\n  MLIRAccumulator.forgetVoid id acc\n  MLIRAccumulator.completeVoid id 0 acc\n  MLIRAccumulator.restoreOperands Map.empty acc\n  MLIRAccumulator.registerSSAType ssa "i64" acc\n  acc.SSATypes <- Map.empty\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/TransferTypes.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad (id: NodeId) (ssa: Alex.Dialects.Core.Types.SSA) (acc: MLIRAccumulator) =\n  MLIRAccumulator.forgetVoid id acc\n  MLIRAccumulator.completeVoid id 0 acc\n  MLIRAccumulator.restoreOperands Map.empty acc\n  MLIRAccumulator.registerSSAType ssa "i64" acc\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-accumulator-helpers.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal.TransferTypes\nlet bad (id: NodeId) (ssa: Alex.Dialects.Core.Types.SSA) (acc: MLIRAccumulator) = MLIRAccumulator.bindNode id ssa "i64" acc\n' "$psg_dll" "$alex_dll" > "$scratch/Dialects/axel-bind-node.fsx"
+printf '#r "%s"\nlet bad () = let mutable x = 0 in x <- 1; x\n' "$psg_dll" > "$scratch/Witnesses/axel-mutable-witness.fsx"
+printf '#r "%s"\nlet bad () = let c = ref 0 in c.Value\n' "$psg_dll" > "$scratch/Witnesses/axel-ref-witness.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nlet bad (id: NodeId) = Alex.Traversal.Values.value id 0, Alex.Traversal.Values.values id, Alex.Traversal.Values.continuationValue id 0 0\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-values-direct.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nlet bad (ids: NodeId list) = ids |> List.map Alex.Traversal.Values.values\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-values-first-class.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nlet bad (id: NodeId) = Alex.Traversal.Values.value id 0\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/axel-values-direct.fsx"
+printf '#r "%s"\n#r "%s"\nopen Alex.Dialects.Core.Types\nlet bad () = SSA.V (1, 0), SSA.Arg 0\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-ssa-union.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Dialects.Core.Types\nlet ok (id: NodeId) = SSA.V (1, 0), SSA.Arg 0, Alex.Traversal.Values.value id 0, Alex.Traversal.Values.prologueValue id 0, Alex.Traversal.Values.resultOf id, Alex.Traversal.Values.undefined\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/Values.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nlet ok (id: NodeId) = Alex.Traversal.Values.value id 0, Alex.Traversal.Values.values id, Alex.Traversal.Values.continuationValue id 0 0, Alex.Traversal.Values.valuesOf id, Alex.Traversal.Values.resultOf id\n' "$psg_dll" "$alex_dll" > "$scratch/XParsec/PSGCombinators.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nopen Alex.Traversal\nlet bad (id: NodeId) =\n  [ Values.meetValue id 0\n    Values.returnMeetValue id\n    Values.unitReturnValue id\n    Values.callableCode id\n    Values.callableAlternative id 0\n    Values.aggregateComponent id id 0 0\n    Values.arrayElementIndex id 0\n    Values.prologueValue id 0\n    Values.hardwareValue id 0\n    Values.solverValue 0\n    Values.undefined ],\n  Values.valuesOf id, Values.resultOf id\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-values-members.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nlet bad (n: SemanticNode) = Alex.Traversal.NanopassArchitecture.visitAllNodes ignore n\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-visit-all.fsx"
+printf '#r "%s"\n#r "%s"\nlet bad (depth: int) = Alex.Traversal.ScopeContext.exitScope (Alex.Traversal.ScopeContext.enterScope depth)\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-scope-transition.fsx"
+printf '#r "%s"\n#r "%s"\nopen Alex.Traversal.ScopeContext\nlet bad (ops: string list) =\n  let child = ScopeContext.createChild (ScopeContext.root ()) BlockLevel\n  ScopeContext.addOps ops (ScopeContext.addOp "op" child)\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-scope-context.fsx"
+printf '#r "%s"\n#r "%s"\nopen Alex.Traversal.ScopeContext\nlet bad (parent: ScopeContext) = ScopeContext.createChild parent BlockLevel\n' "$psg_dll" "$alex_dll" > "$scratch/Witnesses/axel-scope-context.fsx"
+printf '#r "%s"\n#r "%s"\nlet bad (obligations: string list) = Alex.Traversal.SMTTransfer.operations obligations, Alex.Traversal.SMTTransfer.transfer obligations\n' "$psg_dll" "$alex_dll" > "$scratch/Witnesses/axel-smt-transfer.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nlet bad (n: SemanticNode) = Alex.Traversal.NanopassArchitecture.visitAllNodes ignore n\n' "$psg_dll" "$alex_dll" > "$scratch/Witnesses/axel-visit-all.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nlet ok (n: SemanticNode) (depth: int) (obligations: string list) =\n  Alex.Traversal.NanopassArchitecture.visitAllNodes ignore n\n  Alex.Traversal.ScopeContext.exitScope (Alex.Traversal.ScopeContext.enterScope depth), Alex.Traversal.SMTTransfer.operations obligations, Alex.Traversal.SMTTransfer.transfer obligations, Alex.Traversal.ScopeContext.ScopeContext.addOps obligations (Alex.Traversal.ScopeContext.ScopeContext.root ())\n' "$psg_dll" "$alex_dll" > "$scratch/Traversal/axel-visit-all-ok.fsx"
+printf '#r "%s"\n#r "%s"\nopen Fidelity.PSG\nlet ok (id: NodeId) = Alex.XParsec.PSGCombinators.getNodeSSA id, Alex.XParsec.PSGCombinators.getNodeSSAs id\n' "$psg_dll" "$alex_dll" > "$scratch/Patterns/axel-clean-getnodessa.fsx"
 run_case Dialects/Core/axel-nodes AXA003-fn '3,37'
 run_case Patterns/axel-trynode AXA003-fn '3,37'
 run_case Dialects/Core/axel-revision-with AXA001 '3,24'
@@ -477,9 +509,35 @@ run_case Traversal/axel-fallback-toobj AXA007-fn '3,70'
 run_case Traversal/axel-fallback-helper-ret AXA007-fn '4,51'
 run_case Traversal/axel-fallback-helper-param AXA007-fn '4,37'
 run_case Traversal/axel-fallback-ok clean
+run_case Patterns/axel-bind-node AXA008-fn '5,82'
+run_case Patterns/axel-bind-node-partial AXA008-fn '5,59'
+run_case Patterns/axel-accumulator-assign AXA008-fn '4,33'
+run_case Elements/axel-accumulator-assign AXA008-fn '3,62'
+run_case Witnesses/axel-bind-node AXA008-fn '5,82'
+run_case Traversal/axel-bind-node AXA008-fn '6,2 7,2'
+run_case Traversal/TransferTypes clean
+run_case Patterns/axel-accumulator-helpers AXA008-fn '6,2 7,2 8,2 9,2'
+run_case Dialects/axel-bind-node AXA008-fn '5,82'
+run_case Witnesses/axel-mutable-witness AXA005-witness '2,25'
+run_case Witnesses/axel-ref-witness AXA005-witness '2,21'
+run_case Patterns/axel-values-direct AXA009-values '4,23 4,57 4,90'
+run_case Patterns/axel-values-first-class AXA009-values '4,45'
+run_case Traversal/axel-values-direct AXA009-values '4,23'
+run_case Patterns/axel-ssa-union AXA009-construction '4,13 4,27'
+run_case Traversal/Values clean
+run_case XParsec/PSGCombinators clean
+run_case Patterns/axel-values-members AXA009-values '6,4 7,4 8,4 9,4 10,4 11,4 12,4 13,4 14,4 15,4 16,4 17,2 17,22'
+run_case Patterns/axel-visit-all AXA010-fn '4,28'
+run_case Patterns/axel-scope-transition AXA010-fn '3,23 3,62'
+run_case Patterns/axel-scope-context AXA010-fn '5,14 5,40 6,2 6,27'
+run_case Witnesses/axel-scope-context AXA010-fn '4,33'
+run_case Witnesses/axel-smt-transfer AXA010-smt '3,37 3,88'
+run_case Witnesses/axel-visit-all AXA010-fn '4,28'
+run_case Traversal/axel-visit-all-ok clean
+run_case Patterns/axel-clean-getnodessa clean
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 201 ]] || { printf 'Expected 201 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 227 ]] || { printf 'Expected 227 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done
@@ -490,7 +548,7 @@ if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
   separator=''
   for case_name in "${policy_pending[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done
   printf '],"sdk":"%s","analyzer_cli":"0.41.0"}\n' "$(dotnet --version)" >> "$scratch/truth.json"
-  sha256sum "$analyzers/Alex.Analyzers.dll" "$tool_dir/Analyzer.fs" "$tool_dir/tests/run.sh" "$tool_dir/.config/dotnet-tools.json" "$psg_dll" "$impostor_dll" "$alex_dll" "$stale_dll" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/ImpostorFixture/ImpostorFixture.fsproj" "$tool_dir/tests/AlexFixture/Ensure.fs" "$tool_dir/tests/AlexFixture/AlexFixture.fsproj" "$tool_dir/tests/AlexFixture/packages.lock.json" "$tool_dir/tests/StaleContract/Contract.fs" "$tool_dir/tests/StaleContract/StaleContract.fsproj" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$tool_dir/tests/InProject/Cases.fs" "$tool_dir/tests/InProject/Dialects/Cases.fs" "$tool_dir/tests/InProject/Elements/Cases.fs" "$tool_dir/tests/InProject/Elements/CleanCases.fs" "$tool_dir/tests/project-control.sh" "$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256" "$tool_dir/analyze-alex.sh" "$tool_dir/check-project.sh" "$tool_dir/ProjectInputs.fsx" "$tool_dir/VerifyProjectLog.fsx" "$tool_dir/Alex.Analyzers.fsproj" "$tool_dir/Directory.Packages.props" "$tool_dir/packages.lock.json" "$tool_dir/NuGet.Config" "$scratch/truth.json" > "$scratch/truth.sha256"
+  sha256sum "$analyzers/Alex.Analyzers.dll" "$tool_dir/Analyzer.fs" "$tool_dir/tests/run.sh" "$tool_dir/.config/dotnet-tools.json" "$psg_dll" "$impostor_dll" "$alex_dll" "$stale_dll" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/ImpostorFixture/ImpostorFixture.fsproj" "$tool_dir/tests/AlexFixture/Ensure.fs" "$tool_dir/tests/AlexFixture/AlexFixture.fsproj" "$tool_dir/tests/AlexFixture/packages.lock.json" "$tool_dir/tests/StaleContract/Contract.fs" "$tool_dir/tests/StaleContract/StaleContract.fsproj" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$tool_dir/tests/InProject/Cases.fs" "$tool_dir/tests/InProject/Dialects/Cases.fs" "$tool_dir/tests/InProject/Elements/Cases.fs" "$tool_dir/tests/InProject/Elements/CleanCases.fs" "$tool_dir/tests/InProject/Patterns/Cases.fs" "$tool_dir/tests/InProject/Witnesses/Cases.fs" "$tool_dir/tests/InProject/Traversal/Values.fs" "$tool_dir/tests/project-control.sh" "$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256" "$tool_dir/analyze-alex.sh" "$tool_dir/check-project.sh" "$tool_dir/ProjectInputs.fsx" "$tool_dir/VerifyProjectLog.fsx" "$tool_dir/Alex.Analyzers.fsproj" "$tool_dir/Directory.Packages.props" "$tool_dir/packages.lock.json" "$tool_dir/NuGet.Config" "$scratch/truth.json" > "$scratch/truth.sha256"
   sha256sum "$alias_dll" "$tool_dir/tests/AliasFixture/Aliases.fs" "$tool_dir/tests/AliasFixture/AliasFixture.fsproj" "$tool_dir/tests/AliasFixture/packages.lock.json" "$tool_dir/tests/DependencyControls.fsx" >> "$scratch/truth.sha256"
   cp "$scratch/truth.sha256" "${ALEX_ANALYZER_TRUTH_RECEIPT_OUT:-$repo_dir/artifacts/alex-analyzers-tests/latest-truth.sha256}"
   printf 'Truth receipt: %s\n' "$scratch/truth.sha256"
