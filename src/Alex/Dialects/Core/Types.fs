@@ -1322,6 +1322,708 @@ module BoundaryAbi =
         | None -> Ok []
         | Some scalar -> scalarType scalar |> Result.map List.singleton
 
+    let rec private tryRepresentationStructType = function
+        | Fidelity.PSG.ValueRepresentation.Scalar slot -> SettledScalar.tryType slot
+        | Fidelity.PSG.ValueRepresentation.Record(fields, Some(offsets, size, alignment))
+            when size > 0 && alignment > 0 && offsets.Length = fields.Length ->
+            let rec collect acc = function
+                | [] -> Some(TStruct(List.rev acc, Some { Offsets = offsets; Size = size; Align = alignment }))
+                | (name, rep) :: rest ->
+                    match tryRepresentationStructType rep with
+                    | Some ty -> collect ((name, ty) :: acc) rest
+                    | None -> None
+            collect [] fields
+        | _ -> None
+
+    /// Extract the final return TypeIdentity of a curried or uncurried function TypeIdentity.
+    let rec private returnTypeOfSignature = function
+        | Fidelity.PSG.TypeIdentity.Function(_, range) -> returnTypeOfSignature range
+        | other -> other
+
+    /// Check whether a settled Record layout and nominal TypeIdentity match a published shared-buffer StructDescriptor.
+    let private placementMatchesType
+        (typeId: Fidelity.PSG.TypeIdentity)
+        (layoutFields: Fidelity.PSG.SettledField list)
+        (lSize: int)
+        (lAlign: int)
+        (pl: Fidelity.PSG.BoundarySharedBufferPlacementDeclaration)
+        : bool =
+        let st = pl.Placement.StructLayout
+        let nominalMatches =
+            match typeId with
+            | Fidelity.PSG.TypeIdentity.Application(tc, []) when tc.NativeKind.IsNone ->
+                let qualTypeName =
+                    match tc.Declaration.Module with
+                    | [] -> tc.Declaration.Name
+                    | mods -> String.concat "." mods + "." + tc.Declaration.Name
+                if String.exists ((=) '.') st.Name then
+                    qualTypeName = st.Name
+                else
+                    tc.Declaration.Name = st.Name
+            | _ -> false
+        let stFields = Array.toList st.Layout.Fields
+        nominalMatches
+        && st.Layout.Size = lSize
+        && st.Layout.Alignment = lAlign
+        && stFields.Length = layoutFields.Length
+        && (List.zip layoutFields stFields
+            |> List.forall (fun (sf, df) ->
+                sf.Name = df.Name
+                && sf.Offset = Some df.Offset
+                && sf.Size.IsSome
+                && sf.Align.IsSome))
+
+    /// Check whether `typeId` is a settled shared-buffer Record layout matching `pl`.
+    let private typeMatchesPlacement
+        (revision: Fidelity.PSG.Revision)
+        (typeId: Fidelity.PSG.TypeIdentity)
+        (pl: Fidelity.PSG.BoundarySharedBufferPlacementDeclaration)
+        : bool =
+        revision.Emission.Numeric.Layouts
+        |> Map.exists (fun k layout ->
+            k = typeId
+            && (match layout with
+                | Fidelity.PSG.SettledLayout.Record(fields, Some sz, Some al) ->
+                    placementMatchesType typeId fields sz al pl
+                | _ -> false))
+
+    /// Check whether `imp` matches a qualified Clef binding name (`Module.funcName`) in `pl.RegionDescriptor`.
+    /// Note: `AXA006` (`tools/Alex.Analyzers/Analyzer.fs:1640`) forbids payload extraction from
+    /// `BoundaryImport.DeclarationFacts` in `src/Alex` (permitting only `ContainsKey` / `Map.containsKey`);
+    /// `Fidelity.PSG.Integrity.check` validates `imp.DeclarationFacts[imp.Binding]` (`Form = "binding"`),
+    /// while `Alex` resolves the qualified binding name strictly from `SourceReadings.ContextHeaders`
+    /// and `Emission.Callable.Symbols` (`CallableSymbolName.ModuleBinding`).
+    let private importMatchesRegionBinding
+        (revision: Fidelity.PSG.Revision)
+        (imp: Fidelity.PSG.BoundaryImport)
+        (expectedQualName: string)
+        : bool =
+        if Alex.Text.isBlank expectedQualName || not (imp.DeclarationFacts.ContainsKey imp.Binding) then
+            false
+        else
+            let moduleNames =
+                revision.SourceReadings.ContextHeaders
+                |> Map.toList
+                |> List.choose (fun (hid, header) ->
+                    if hid = imp.Scope && not (Alex.Text.isBlank header.Name) then
+                        Some header.Name
+                    else
+                        None)
+            let declBindingNames =
+                revision.Emission.Callable.Symbols
+                |> Map.toList
+                |> List.choose (fun (bid, sym) ->
+                    if bid = imp.Binding then
+                        match sym with
+                        | Fidelity.PSG.CallableSymbolName.ModuleBinding(modName, bindName)
+                            when not (Alex.Text.isBlank modName) && not (Alex.Text.isBlank bindName) ->
+                            Some (modName, bindName)
+                        | _ -> None
+                    else
+                        None)
+            match moduleNames, declBindingNames with
+            | [ modName ], [ (symModName, bindName) ] when modName = symModName ->
+                (modName + "." + bindName) = expectedQualName
+            | _ -> false
+
+    /// Check whether `imp` matches one of the consumer roles (Release, Sync, or ForeignUses) in `pl.RegionDescriptor`.
+    let private importMatchesConsumerRole
+        (revision: Fidelity.PSG.Revision)
+        (imp: Fidelity.PSG.BoundaryImport)
+        (pl: Fidelity.PSG.BoundarySharedBufferPlacementDeclaration)
+        : bool =
+        let rd = pl.RegionDescriptor
+        (match rd.Release with
+         | Some r -> importMatchesRegionBinding revision imp r
+         | None -> false)
+        || (rd.Sync |> Array.exists (importMatchesRegionBinding revision imp))
+        || (rd.ForeignUses |> Array.exists (importMatchesRegionBinding revision imp))
+
+    /// Validate all published shared-buffer placement and view-use rows in the revision.
+    let sharedBufferIntegrityIn (revision: Fidelity.PSG.Revision) : Result<unit, string> =
+        let sharedViolations =
+            Fidelity.PSG.Integrity.check revision
+            |> List.filter (fun v ->
+                Alex.Text.startsWith "Emission.Boundary.SharedBufferPlacements" v.Part
+                || Alex.Text.startsWith "Emission.Boundary.SharedBufferViewUses" v.Part)
+        let boundary = revision.Emission.Boundary
+        let placementRows = Map.toList boundary.SharedBufferPlacements
+        let viewUseRows = Map.toList boundary.SharedBufferViewUses
+        let claimMatchesPlacement
+            (pl: Fidelity.PSG.BoundarySharedBufferPlacementDeclaration)
+            (cid: Fidelity.PSG.NodeId, expectedFormKind: string)
+            : bool =
+            List.contains cid pl.Obligations
+            && (revision.CurrentClaims
+                |> Map.exists (fun k info ->
+                    k = cid
+                    && List.contains info revision.Obligations
+                    && (match info.Body with
+                        | Fidelity.PSG.ObligationBody.SharedBufferPlacementObligation ob ->
+                            let suffix = ":" + pl.Placement.Name
+                            let sourceMatchesPlacement =
+                                ob.Source = pl.Placement.Name
+                                || (String.length ob.Source >= String.length suffix
+                                    && Seq.forall2 (=) suffix (Seq.skip (String.length ob.Source - String.length suffix) ob.Source))
+                            let matchesPlacement =
+                                if expectedFormKind = BAREWire.Platform.FormKind.SharedBufferSpaceExtent then
+                                    ob.Form.A = pl.Space.Capacity
+                                    && Array.contains pl.Placement.Name ob.Form.Names
+                                elif expectedFormKind = BAREWire.Platform.FormKind.SharedBufferLayout
+                                     || expectedFormKind = BAREWire.Platform.FormKind.SharedBufferExclusivity then
+                                    sourceMatchesPlacement
+                                    && ob.Form.A = int64 (Array.length pl.Placement.StructLayout.Layout.Fields)
+                                elif expectedFormKind = BAREWire.Platform.FormKind.SharedBufferExtent then
+                                    sourceMatchesPlacement
+                                    && ob.Form.A = int64 pl.Placement.MeasuredElementSize
+                                elif expectedFormKind = BAREWire.Platform.FormKind.SharedBufferLifetime then
+                                    sourceMatchesPlacement
+                                    && ob.Form.A = 0L
+                                else
+                                    false
+                            info.Id = ob.Id
+                            && info.Kind = ob.Kind
+                            && info.Logic = ob.Logic
+                            && ob.Form.Kind = expectedFormKind
+                            && matchesPlacement
+                        | _ -> false)))
+        let expectedPlacementForms =
+            [ BAREWire.Platform.FormKind.SharedBufferLayout
+              BAREWire.Platform.FormKind.SharedBufferExtent
+              BAREWire.Platform.FormKind.SharedBufferSpaceExtent
+              BAREWire.Platform.FormKind.SharedBufferLifetime
+              BAREWire.Platform.FormKind.SharedBufferExclusivity ]
+        let rec checkPlacements = function
+            | [] -> Ok ()
+            | (Fidelity.PSG.NodeId plId, (pl: Fidelity.PSG.BoundarySharedBufferPlacementDeclaration)) :: rest ->
+                let distinctPlObs = List.distinct pl.Obligations
+                let allFormsPresent =
+                    expectedPlacementForms
+                    |> List.forall (fun fk ->
+                        pl.Obligations |> List.exists (fun cid -> claimMatchesPlacement pl (cid, fk)))
+                if distinctPlObs.Length <> 5 || pl.Obligations.Length <> 5 || not allFormsPresent then
+                    Error (sprintf "Shared-buffer placement %d lacks valid shared-buffer obligations in CurrentClaims." plId)
+                else
+                    checkPlacements rest
+        let callMatchesRole (callId: Fidelity.PSG.NodeId) (expectedBindings: string list) =
+            boundary.Calls
+            |> Map.exists (fun cid call ->
+                cid = callId
+                && call.Site = callId
+                && (boundary.Imports
+                    |> Map.exists (fun impId imp ->
+                        impId = call.Import
+                        && (expectedBindings |> List.exists (importMatchesRegionBinding revision imp)))))
+        let rec checkCrossRowExclusivity seenCalls seenProjs = function
+            | [] -> Ok ()
+            | (Fidelity.PSG.NodeId siteId, (vu: Fidelity.PSG.BoundarySharedBufferViewUse)) :: rest ->
+                let rowCalls =
+                    (vu.RegionAcquisitionCall :: Option.toList vu.RegionReleaseCall)
+                    @ vu.SyncCalls
+                    @ vu.ForeignUseCalls
+                let rowProjs = vu.ViewProjections @ vu.WriteProjections
+                if rowCalls |> List.exists (fun c -> Set.contains c seenCalls) then
+                    Error (sprintf "Shared-buffer view use %d shares a role call site with another view use." siteId)
+                elif rowProjs |> List.exists (fun p -> Set.contains p seenProjs) then
+                    Error (sprintf "Shared-buffer view use %d shares a projection site with another view use." siteId)
+                else
+                    checkCrossRowExclusivity
+                        (Set.union seenCalls (Set.ofList rowCalls))
+                        (Set.union seenProjs (Set.ofList rowProjs))
+                        rest
+        let rec checkViewUses = function
+            | [] ->
+                match checkCrossRowExclusivity Set.empty Set.empty viewUseRows with
+                | Error err -> Error err
+                | Ok () ->
+                    match sharedViolations with
+                    | [] -> Ok ()
+                    | violations -> Error (Fidelity.PSG.Integrity.describe violations)
+            | (key, (vu: Fidelity.PSG.BoundarySharedBufferViewUse)) :: rest ->
+                let (Fidelity.PSG.NodeId siteId) = key
+                if vu.Copies <> 0 then
+                    Error (sprintf "Shared-buffer view use %d has non-zero Copies = %d." siteId vu.Copies)
+                else
+                    match boundary.SharedBufferPlacements.TryFind vu.PlacementDeclaration with
+                    | None ->
+                        Error (sprintf "Shared-buffer view use %d references missing placement declaration." siteId)
+                    | Some pl ->
+                        let isReadOnly =
+                            pl.Placement.SpaceDescriptor.Access = "ReadOnly"
+                            || pl.Placement.ViewLayout.Access = BAREWire.Hardware.AccessKind.ReadOnly
+                            || pl.Space.Access = BAREWire.Platform.Access.ReadOnly
+                        let isWriteOnly =
+                            pl.Placement.SpaceDescriptor.Access = "WriteOnly"
+                            || pl.Placement.ViewLayout.Access = BAREWire.Hardware.AccessKind.WriteOnly
+                            || pl.Space.Access = BAREWire.Platform.Access.WriteOnly
+                        if isReadOnly && not vu.WriteProjections.IsEmpty then
+                            Error (sprintf "Shared-buffer view use %d has write projections on a ReadOnly placement." siteId)
+                        elif isWriteOnly && not vu.ViewProjections.IsEmpty then
+                            Error (sprintf "Shared-buffer view use %d has read projections on a WriteOnly placement." siteId)
+                        else
+                            let vuObIds =
+                                [ vu.LayoutObligation, BAREWire.Platform.FormKind.SharedBufferLayout
+                                  vu.ExtentObligation, BAREWire.Platform.FormKind.SharedBufferExtent
+                                  vu.SpaceExtentObligation, BAREWire.Platform.FormKind.SharedBufferSpaceExtent
+                                  vu.LifetimeObligation, BAREWire.Platform.FormKind.SharedBufferLifetime
+                                  vu.ExclusivityObligation, BAREWire.Platform.FormKind.SharedBufferExclusivity ]
+                            let distinctObIds = vuObIds |> List.map fst |> List.distinct
+                            if distinctObIds.Length <> 5 || pl.Obligations.Length <> 5 || not (vuObIds |> List.forall (claimMatchesPlacement pl)) then
+                                Error (sprintf "Shared-buffer view use %d lacks valid shared-buffer obligations in CurrentClaims." siteId)
+                            else
+                                let roleCallsMatchDescriptor =
+                                    callMatchesRole vu.RegionAcquisitionCall [ pl.RegionDescriptor.Acquire ]
+                                    && (match vu.RegionReleaseCall, pl.RegionDescriptor.Release with
+                                        | None, _ -> true
+                                        | Some relCall, Some relName -> callMatchesRole relCall [ relName ]
+                                        | Some _, None -> false)
+                                    && (vu.SyncCalls |> List.forall (fun sc -> callMatchesRole sc (Array.toList pl.RegionDescriptor.Sync)))
+                                    && (vu.ForeignUseCalls |> List.forall (fun fc -> callMatchesRole fc (Array.toList pl.RegionDescriptor.ForeignUses)))
+                                if not roleCallsMatchDescriptor then
+                                    Error (sprintf "Shared-buffer view use %d role call does not match its placement RegionDescriptor." siteId)
+                                else
+                                    let allUseOrders =
+                                        vu.SyncOrders @ vu.ForeignUseOrders @ vu.ProjectionOrders @ vu.WriteProjectionOrders
+                                    let allOrders =
+                                        vu.AcquisitionOrder :: (Option.toList vu.ReleaseOrder @ allUseOrders)
+                                    let syncDisjointFromForeign =
+                                        vu.SyncCalls |> List.forall (fun sc -> not (List.contains sc vu.ForeignUseCalls))
+                                    let releaseScheduleOk =
+                                        if not pl.Placement.LeakedAtExit then
+                                            match vu.RegionReleaseCall, vu.ReleaseOrder with
+                                            | Some _, Some relOrd ->
+                                                vu.AcquisitionOrder >= 0
+                                                && vu.AcquisitionOrder < relOrd
+                                                && (allUseOrders |> List.forall (fun ord -> vu.AcquisitionOrder < ord && ord < relOrd))
+                                            | _ -> false
+                                        else
+                                            vu.RegionReleaseCall.IsNone
+                                            && vu.ReleaseOrder.IsNone
+                                            && not allUseOrders.IsEmpty
+                                            && vu.AcquisitionOrder >= 0
+                                            && (allUseOrders |> List.forall (fun ord -> vu.AcquisitionOrder < ord))
+                                    let ordersOk =
+                                        releaseScheduleOk
+                                        && (List.distinct allOrders).Length = allOrders.Length
+                                        && syncDisjointFromForeign
+                                        && vu.ViewProjections.Length = vu.ProjectionOrders.Length
+                                        && vu.WriteProjections.Length = vu.WriteProjectionOrders.Length
+                                        && vu.SyncCalls.Length = vu.SyncOrders.Length
+                                        && vu.ForeignUseCalls.Length = vu.ForeignUseOrders.Length
+                                    if not ordersOk then
+                                        Error (sprintf "Shared-buffer view use %d violates acquisition/projection/release order domination." siteId)
+                                    else
+                                        let clefOrders = vu.ProjectionOrders @ vu.WriteProjectionOrders
+                                        let syncBracketOk =
+                                            if vu.ForeignUseOrders.IsEmpty || clefOrders.IsEmpty || isReadOnly then
+                                                true
+                                            else
+                                                not vu.SyncOrders.IsEmpty
+                                                && (vu.ForeignUseOrders |> List.forall (fun fOrd ->
+                                                    clefOrders |> List.forall (fun pOrd ->
+                                                        vu.SyncOrders |> List.exists (fun sOrd ->
+                                                            (fOrd < sOrd && sOrd < pOrd) || (pOrd < sOrd && sOrd < fOrd)))))
+                                        if not syncBracketOk then
+                                            Error (sprintf "Shared-buffer view use %d has unbracketed foreign use call without dominating sync." siteId)
+                                        else
+                                            checkViewUses rest
+        match checkPlacements placementRows with
+        | Error err -> Error err
+        | Ok () -> checkViewUses viewUseRows
+
+    /// Resolve a settled shared-buffer StructDescriptor record type to its TStruct carrier.
+    let sharedBufferStructTypeAt (revision: Fidelity.PSG.Revision) (typeId: Fidelity.PSG.TypeIdentity) : Result<MLIRType, string> =
+        let boundary = revision.Emission.Boundary
+        let numeric = revision.Emission.Numeric
+        match numeric.Layouts.TryFind typeId with
+        | Some(Fidelity.PSG.SettledLayout.Record(layoutFields, Some lSize, Some lAlign)) ->
+            let matchingPlacements =
+                boundary.SharedBufferPlacements.Values
+                |> Seq.filter (placementMatchesType typeId layoutFields lSize lAlign)
+                |> Seq.toList
+            let viewUsePlacementsOk =
+                boundary.SharedBufferViewUses.Values
+                |> Seq.filter (fun vu -> vu.ElementType = typeId)
+                |> Seq.forall (fun vu ->
+                    boundary.SharedBufferPlacements
+                    |> Map.exists (fun k pl ->
+                        k = vu.PlacementDeclaration
+                        && placementMatchesType typeId layoutFields lSize lAlign pl))
+            if matchingPlacements.IsEmpty || not viewUsePlacementsOk then
+                Error "Type is not a published shared-buffer StructDescriptor type."
+            else
+                match numeric.TypeRepresentations.TryFind typeId with
+                | Some(Ok rep) ->
+                    match tryRepresentationStructType rep with
+                    | Some(TStruct(fields, Some bytes) as structTy) ->
+                        let fieldsMatch =
+                            fields.Length = layoutFields.Length
+                            && bytes.Offsets.Length = layoutFields.Length
+                            && (List.zip3 fields bytes.Offsets layoutFields
+                                |> List.forall (fun ((fName, _), fOff, sf) -> fName = sf.Name && Some fOff = sf.Offset))
+                        if bytes.Size = lSize && bytes.Align = lAlign && fieldsMatch then
+                            Ok structTy
+                        else
+                            Error "Shared-buffer type representation disagrees with its settled Record layout."
+                    | _ -> Error "Shared-buffer type representation is not a settled TStruct."
+                | _ -> Error "Shared-buffer type lacks its settled TypeRepresentation."
+        | _ -> Error "Shared-buffer type lacks its settled Record layout."
+
+    let isSharedBufferStructType (revision: Fidelity.PSG.Revision) (typeId: Fidelity.PSG.TypeIdentity) : bool =
+        match sharedBufferStructTypeAt revision typeId with
+        | Ok _ -> true
+        | Error _ -> false
+
+    /// Find placements for which `imp` is a consumer role import (Release, Sync, or ForeignUses).
+    let private placementsForConsumerImport (revision: Fidelity.PSG.Revision) (imp: Fidelity.PSG.BoundaryImport) : Fidelity.PSG.BoundarySharedBufferPlacementDeclaration list =
+        let boundary = revision.Emission.Boundary
+        let callingViewUses =
+            boundary.SharedBufferViewUses.Values
+            |> Seq.filter (fun vu ->
+                (Option.toList vu.RegionReleaseCall @ vu.SyncCalls @ vu.ForeignUseCalls)
+                |> List.exists (fun callId ->
+                    boundary.Calls
+                    |> Map.exists (fun cid c -> cid = callId && c.Import = imp.Identity)))
+            |> Seq.toList
+        let namedByAnyViewUse = not callingViewUses.IsEmpty
+        let fromViewUses =
+            let matchedPerView =
+                callingViewUses
+                |> List.map (fun vu ->
+                    boundary.SharedBufferPlacements
+                    |> Map.toList
+                    |> List.choose (fun (pid, pl) ->
+                        if pid = vu.PlacementDeclaration && importMatchesConsumerRole revision imp pl then
+                            Some pl
+                        else
+                            None))
+            if matchedPerView |> List.exists List.isEmpty then
+                []
+            else
+                matchedPerView
+                |> List.concat
+                |> List.distinctBy (fun pl -> pl.Identity)
+        if namedByAnyViewUse then
+            fromViewUses
+        else
+            boundary.SharedBufferPlacements.Values
+            |> Seq.filter (fun pl ->
+                importMatchesConsumerRole revision imp pl
+                && (imp.Parameters
+                    |> List.exists (fun (formal, scalar) ->
+                        match scalar with
+                        | Fidelity.PSG.BoundaryScalar.ResourceHandle(decl, false)
+                            when decl = formal && imp.DeclarationFacts.ContainsKey formal ->
+                            imp.SourceTypes
+                            |> Map.exists (fun k srcTy ->
+                                k = formal && typeMatchesPlacement revision srcTy pl)
+                        | _ -> false)))
+            |> Seq.toList
+            |> List.distinctBy (fun pl -> pl.Identity)
+
+    /// Resolve a non-null shared-buffer struct formal parameter on a boundary consumer import.
+    let sharedBufferFormalStructTypeAt (revision: Fidelity.PSG.Revision) (imp: Fidelity.PSG.BoundaryImport) (formal: Fidelity.PSG.NodeId) (nullable: bool) : Result<MLIRType, string> =
+        if nullable || not (imp.DeclarationFacts.ContainsKey formal) || not (List.exists (fun (f, _) -> f = formal) imp.Parameters) then
+            Error "Formal parameter is not a non-null parameter of this import."
+        else
+            let placements = placementsForConsumerImport revision imp
+            if placements.IsEmpty then
+                Error "Import is not a published shared-buffer consumer import."
+            else
+                match imp.SourceTypes.TryFind formal with
+                | Some srcTy ->
+                    if placements |> List.forall (typeMatchesPlacement revision srcTy) then
+                        sharedBufferStructTypeAt revision srcTy
+                    else
+                        Error "Formal parameter SourceType does not match the consumer import's shared-buffer placement."
+                | None -> Error "Formal parameter lacks its published SourceType."
+
+    let isSharedBufferFormalAt (revision: Fidelity.PSG.Revision) (imp: Fidelity.PSG.BoundaryImport) (formal: Fidelity.PSG.NodeId) (nullable: bool) : bool =
+        match sharedBufferFormalStructTypeAt revision imp formal nullable with
+        | Ok _ -> true
+        | Error _ -> false
+
+    /// Resolve the shared-buffer TStruct result carrier of a region-acquisition import.
+    let sharedBufferAcquisitionStructTypeAt (revision: Fidelity.PSG.Revision) (imp: Fidelity.PSG.BoundaryImport) : Result<MLIRType, string> =
+        let boundary = revision.Emission.Boundary
+        let isAcqResultScalar =
+            match imp.Result with
+            | Some(Fidelity.PSG.BoundaryScalar.Integer(bits, false)) when bits > 0 -> true
+            | Some(Fidelity.PSG.BoundaryScalar.ResourceHandle(_, false)) -> true
+            | _ -> false
+        if not isAcqResultScalar || not (imp.DeclarationFacts.ContainsKey imp.Binding) then
+            Error "Import result is not a non-null shared-buffer region handle."
+        else
+            let matchingViews =
+                boundary.SharedBufferViewUses.Values
+                |> Seq.filter (fun vu ->
+                    boundary.Calls
+                    |> Map.exists (fun cid acqCall ->
+                        cid = vu.RegionAcquisitionCall && acqCall.Import = imp.Identity))
+                |> Seq.toList
+            match matchingViews with
+            | _ :: _ ->
+                let matchingViewTypes =
+                    matchingViews
+                    |> List.map (fun vu -> vu.ElementType)
+                    |> List.distinct
+                let matchedPlacementsPerView =
+                    matchingViews
+                    |> List.map (fun vu ->
+                        boundary.SharedBufferPlacements
+                        |> Map.toList
+                        |> List.choose (fun (pid, pl) ->
+                            if pid = vu.PlacementDeclaration
+                               && importMatchesRegionBinding revision imp pl.RegionDescriptor.Acquire then
+                                Some pl
+                            else
+                                None))
+                let matchingPlacements =
+                    if matchedPlacementsPerView |> List.exists List.isEmpty then
+                        []
+                    else
+                        matchedPlacementsPerView
+                        |> List.concat
+                        |> List.distinctBy (fun pl -> pl.Identity)
+                match matchingViewTypes with
+                | [ elemType ] when not matchingPlacements.IsEmpty
+                                    && (matchingPlacements |> List.forall (typeMatchesPlacement revision elemType)) ->
+                    sharedBufferStructTypeAt revision elemType
+                | _ -> Error "Region-acquisition import is claimed by disagreeing shared-buffer element types or placements."
+            | [] ->
+                let matchingPlacements =
+                    boundary.SharedBufferPlacements.Values
+                    |> Seq.filter (fun pl ->
+                        importMatchesRegionBinding revision imp pl.RegionDescriptor.Acquire)
+                    |> Seq.toList
+                if matchingPlacements.IsEmpty then
+                    Error "Import is not a published shared-buffer region acquisition."
+                else
+                    match imp.SourceTypes.TryFind imp.Binding with
+                    | Some fnTy ->
+                        let retTy = returnTypeOfSignature fnTy
+                        if matchingPlacements |> List.forall (typeMatchesPlacement revision retTy) then
+                            sharedBufferStructTypeAt revision retTy
+                        else
+                            Error "Shared-buffer acquisition import return type does not match its placement StructDescriptor."
+                    | None -> Error "Shared-buffer acquisition import lacks its published binding SourceType."
+
+    let isSharedBufferAcquisitionImport (revision: Fidelity.PSG.Revision) (imp: Fidelity.PSG.BoundaryImport) : bool =
+        match sharedBufferAcquisitionStructTypeAt revision imp with
+        | Ok _ -> true
+        | Error _ -> false
+
+    /// Validate that every shared-buffer struct parameter or return type on `imp` has a valid published role.
+    let validateSharedBufferFormalsIn (revision: Fidelity.PSG.Revision) (imp: Fidelity.PSG.BoundaryImport) : Result<unit, string> =
+        let rec checkParams = function
+            | [] ->
+                let returnsSharedStruct =
+                    imp.SourceTypes
+                    |> Map.exists (fun k fnTy ->
+                        k = imp.Binding && isSharedBufferStructType revision (returnTypeOfSignature fnTy))
+                if returnsSharedStruct && not (isSharedBufferAcquisitionImport revision imp) then
+                    Error (sprintf "Import '%s' returns a shared-buffer struct type without a valid region-acquisition role." imp.Symbol)
+                else
+                    Ok ()
+            | (formal, scalar) :: rest ->
+                let isSharedStructFormal =
+                    imp.SourceTypes
+                    |> Map.exists (fun k srcTy -> k = formal && isSharedBufferStructType revision srcTy)
+                if isSharedStructFormal then
+                    let validRole =
+                        match scalar with
+                        | Fidelity.PSG.BoundaryScalar.ResourceHandle(decl, false) when decl = formal ->
+                            isSharedBufferFormalAt revision imp formal false
+                        | _ -> false
+                    if validRole then
+                        checkParams rest
+                    else
+                        let (Fidelity.PSG.NodeId formalId) = formal
+                        Error (sprintf "Import '%s' carries shared-buffer formal %d without a valid non-null shared-buffer consumer role." imp.Symbol formalId)
+                else
+                    checkParams rest
+        checkParams imp.Parameters
+
+    /// True when `declaration` is a shared-buffer region acquisition or consumer import.
+    let isSharedBufferImport (revision: Fidelity.PSG.Revision) (declaration: Fidelity.PSG.BoundaryImport) : bool =
+        isSharedBufferAcquisitionImport revision declaration
+        || not ((placementsForConsumerImport revision declaration).IsEmpty)
+        || (declaration.Parameters |> List.exists (fun (formal, scalar) ->
+            match scalar with
+            | Fidelity.PSG.BoundaryScalar.ResourceHandle(decl, false) ->
+                decl = formal && isSharedBufferFormalAt revision declaration formal false
+            | _ -> false))
+
+    /// True when an import carries a non-shared-buffer opaque resource handle.
+    let importCarriesNonSharedResourceHandle (revision: Fidelity.PSG.Revision) (declaration: Fidelity.PSG.BoundaryImport) : bool =
+        let boundary = revision.Emission.Boundary
+        let paramHasOpaqueResource (formal, scalar) =
+            match scalar with
+            | Fidelity.PSG.BoundaryScalar.ResourceHandle(decl, false)
+                when decl = formal && isSharedBufferFormalAt revision declaration formal false ->
+                false
+            | _ -> hasResourceCarrierSeen boundary Set.empty scalar
+        let resultHasOpaqueResource =
+            if isSharedBufferAcquisitionImport revision declaration then false
+            else declaration.Result |> Option.exists (hasResourceCarrierSeen boundary Set.empty)
+        (declaration.Parameters |> List.exists paramHasOpaqueResource)
+        || resultHasOpaqueResource
+
+    let tryParametersInRevision (revision: Fidelity.PSG.Revision) (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
+        let boundary = revision.Emission.Boundary
+        let rec collect acc = function
+            | [] -> Ok (List.rev acc)
+            | (formal, Fidelity.PSG.BoundaryScalar.ResourceHandle(decl, false)) :: rest
+                when decl = formal ->
+                match sharedBufferFormalStructTypeAt revision declaration formal false with
+                | Ok structTy -> collect (structTy :: acc) rest
+                | Error _ -> Error "A resource carrier requires its exact direct-call conversion and cleanup accounts."
+            | (_, scalar) :: rest ->
+                match tryScalarTypeIn boundary Set.empty scalar with
+                | Ok ty -> collect (ty :: acc) rest
+                | Error reason -> Error reason
+        collect [] declaration.Parameters
+
+    let tryResultsInRevision (revision: Fidelity.PSG.Revision) (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
+        let boundary = revision.Emission.Boundary
+        if isSharedBufferAcquisitionImport revision declaration then
+            sharedBufferAcquisitionStructTypeAt revision declaration |> Result.map List.singleton
+        else
+            match declaration.Result with
+            | None -> Ok []
+            | Some ret -> tryScalarTypeIn boundary Set.empty ret |> Result.map List.singleton
+
+    /// Validate a boundary call's participation in a shared-buffer view use.
+    /// Returns `Ok(isSharedCall, isSharedAcquisitionCall)`.
+    let validateSharedBufferCallAt (revision: Fidelity.PSG.Revision) (call: Fidelity.PSG.BoundaryCall) : Result<bool * bool, string> =
+        let boundary = revision.Emission.Boundary
+        let (Fidelity.PSG.NodeId callSiteId) = call.Site
+        let matchingViews =
+            boundary.SharedBufferViewUses.Values
+            |> Seq.filter (fun vu ->
+                vu.RegionAcquisitionCall = call.Site
+                || vu.RegionReleaseCall = Some call.Site
+                || List.contains call.Site vu.SyncCalls
+                || List.contains call.Site vu.ForeignUseCalls)
+            |> Seq.toList
+        let callsSharedImport =
+            boundary.Imports
+            |> Map.exists (fun impId imp ->
+                impId = call.Import && isSharedBufferImport revision imp)
+        if matchingViews.IsEmpty && not callsSharedImport then
+            Ok(false, false)
+        elif call.Resource.IsSome then
+            Error (sprintf "Shared-buffer boundary call %d cannot carry resource lifetime adaptation." callSiteId)
+        else
+            match sharedBufferIntegrityIn revision with
+            | Error reason -> Error reason
+            | Ok () ->
+                match matchingViews with
+                | [ vu ] when vu.Copies = 0 -> Ok(true, vu.RegionAcquisitionCall = call.Site)
+                | [ _ ] ->
+                    Error (sprintf "Shared-buffer boundary call %d has non-zero copy count." callSiteId)
+                | [] ->
+                    Error (sprintf "Shared-buffer boundary call %d lacks its published BoundarySharedBufferViewUse account." callSiteId)
+                | _ ->
+                    Error (sprintf "Shared-buffer boundary call %d is claimed by multiple BoundarySharedBufferViewUse accounts." callSiteId)
+
+    /// Transitively resolve PSG origin nodes across published AliasTargets and BindingUses.
+    let private resolveOriginNodes (revision: Fidelity.PSG.Revision) (startId: Fidelity.PSG.NodeId) : Set<Fidelity.PSG.NodeId> =
+        let aliasPairs = Map.toList revision.Emission.Callable.AliasTargets
+        let bindingUsePairs = Map.toList revision.SourceReadings.BindingUses
+        let rec loop (visited: Set<Fidelity.PSG.NodeId>) = function
+            | [] -> visited
+            | currId :: rest ->
+                if Set.contains currId visited then
+                    loop visited rest
+                else
+                    let visited' = Set.add currId visited
+                    let aliasNext =
+                        aliasPairs
+                        |> List.choose (fun (k, v) -> if k = currId && v <> currId then Some v else None)
+                    let bindingNext =
+                        bindingUsePairs
+                        |> List.choose (fun (k, u) -> if k = currId && u.Binding <> currId then Some u.Binding else None)
+                    loop visited' (aliasNext @ bindingNext @ rest)
+        loop Set.empty [ startId ]
+
+    let private matchesSharedBufferOrigin (revision: Fidelity.PSG.Revision) (structId: Fidelity.PSG.NodeId) (vu: Fidelity.PSG.BoundarySharedBufferViewUse) : bool =
+        Set.contains vu.RegionAcquisitionCall (resolveOriginNodes revision structId)
+
+    let private hasSharedBufferCarrierType (revision: Fidelity.PSG.Revision) (nodeId: Fidelity.PSG.NodeId) : bool =
+        resolveOriginNodes revision nodeId
+        |> Set.exists (fun id ->
+            revision.Emission.Numeric.SourceTypes
+            |> Map.exists (fun k srcTy -> k = id && isSharedBufferStructType revision srcTy))
+
+    /// True when `structId` originates from or carries a zero-copy shared-buffer region view.
+    let isSharedBufferOrigin (revision: Fidelity.PSG.Revision) (structId: Fidelity.PSG.NodeId) : bool =
+        (revision.Emission.Boundary.SharedBufferViewUses.Values
+         |> Seq.exists (matchesSharedBufferOrigin revision structId))
+        || hasSharedBufferCarrierType revision structId
+
+    /// Validate a FieldGet or FieldSet projection on a shared-buffer struct view fail-closed.
+    let validateSharedBufferProjectionAt
+        (revision: Fidelity.PSG.Revision)
+        (site: Fidelity.PSG.NodeId)
+        (structId: Fidelity.PSG.NodeId)
+        (fieldName: string)
+        (isWrite: bool)
+        : Result<unit, string> =
+        let boundary = revision.Emission.Boundary
+        let (Fidelity.PSG.NodeId siteId) = site
+        let siteListed (vu: Fidelity.PSG.BoundarySharedBufferViewUse) =
+            List.contains site vu.ViewProjections || List.contains site vu.WriteProjections
+        let originMatched (vu: Fidelity.PSG.BoundarySharedBufferViewUse) =
+            matchesSharedBufferOrigin revision structId vu
+        let isSharedProjection =
+            (boundary.SharedBufferViewUses.Values
+             |> Seq.exists (fun vu -> siteListed vu || originMatched vu))
+            || hasSharedBufferCarrierType revision structId
+        if not isSharedProjection then
+            Ok ()
+        else
+            let matching =
+                boundary.SharedBufferViewUses.Values
+                |> Seq.filter (fun vu -> siteListed vu || originMatched vu)
+                |> Seq.toList
+            match matching with
+            | [ vu ] ->
+                if not (originMatched vu) then
+                    Error (sprintf "Shared-buffer projection at node %d disagrees with its region acquisition view use." siteId)
+                elif vu.Copies <> 0 then
+                    Error (sprintf "Shared-buffer projection at node %d violates zero-copy contract (Copies = %d)." siteId vu.Copies)
+                elif isWrite && not (List.contains site vu.WriteProjections) then
+                    Error (sprintf "Shared-buffer write projection at node %d is missing from BoundarySharedBufferViewUse.WriteProjections." siteId)
+                elif not isWrite && not (List.contains site vu.ViewProjections) then
+                    Error (sprintf "Shared-buffer read projection at node %d is missing from BoundarySharedBufferViewUse.ViewProjections." siteId)
+                else
+                    match boundary.SharedBufferPlacements.TryFind vu.PlacementDeclaration with
+                    | None ->
+                        let (Fidelity.PSG.NodeId plRawId) = vu.PlacementDeclaration
+                        Error (sprintf "Shared-buffer projection at node %d references missing placement %d." siteId plRawId)
+                    | Some pl ->
+                        let isReadOnly =
+                            pl.Placement.SpaceDescriptor.Access = "ReadOnly"
+                            || pl.Placement.ViewLayout.Access = BAREWire.Hardware.AccessKind.ReadOnly
+                            || pl.Space.Access = BAREWire.Platform.Access.ReadOnly
+                        let isWriteOnly =
+                            pl.Placement.SpaceDescriptor.Access = "WriteOnly"
+                            || pl.Placement.ViewLayout.Access = BAREWire.Hardware.AccessKind.WriteOnly
+                            || pl.Space.Access = BAREWire.Platform.Access.WriteOnly
+                        match pl.Placement.StructLayout.Layout.Fields |> Array.tryFind (fun f -> f.Name = fieldName) with
+                        | None ->
+                            Error (sprintf "Shared-buffer projection at node %d references unknown field '%s'." siteId fieldName)
+                        | Some fDesc ->
+                            if isWrite && (isReadOnly || fDesc.Access = BAREWire.Hardware.AccessKind.ReadOnly) then
+                                Error (sprintf "Shared-buffer write projection at node %d on field '%s' violates ReadOnly permission." siteId fieldName)
+                            elif not isWrite && (isWriteOnly || fDesc.Access = BAREWire.Hardware.AccessKind.WriteOnly) then
+                                Error (sprintf "Shared-buffer read projection at node %d on field '%s' violates WriteOnly permission." siteId fieldName)
+                            else
+                                sharedBufferIntegrityIn revision
+            | _ ->
+                Error (sprintf "Shared-buffer projection at node %d lacks a unique BoundarySharedBufferViewUse account." siteId)
+
 module NativeEntrySlotSymbols =
     open Fidelity.PSG
 

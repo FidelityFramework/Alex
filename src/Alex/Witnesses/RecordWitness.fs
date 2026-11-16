@@ -46,19 +46,24 @@ let private witnessRecordCore (ctx: WitnessContext) (node: SemanticNode) : Witne
 
         if fieldValues.Length <> dataFields.Length then
             WitnessOutput.error $"RecordExpr: Only {fieldValues.Length} of {dataFields.Length} field values witnessed"
+        elif dataFields |> List.exists (fun (_, fNodeId) -> BoundaryAbi.isSharedBufferOrigin ctx.Graph fNodeId) then
+            WitnessOutput.error "RecordExpr: Shared-buffer view cannot be captured as a record field value (Copies = 0)."
         else
             match copyFrom with
             | Some origId ->
                 // Copy-and-update: recall original record SSA, delegate to pBuildRecordCopyWith
                 match MLIRAccumulator.recallNode origId ctx.Accumulator with
                 | Some (origSSA, origTy) ->
-                    let construction =
-                        if componentRows then
-                            pBuildRecordComponentCopy node.Id structTy { SSA = origSSA; Type = origTy } fieldValues (dataFields |> List.map snd)
-                        else pBuildRecordCopyWith node.Id structTy origSSA fieldValues (dataFields |> List.map snd)
-                    match tryMatchWithDiagnostics (withComponents construction) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"RecordExpr copy-with: {diagnostic}"
+                    if BoundaryAbi.isSharedBufferOrigin ctx.Graph origId then
+                        WitnessOutput.error "RecordExpr copy-with: Shared-buffer view cannot be copied via record copy-and-update (Copies = 0)."
+                    else
+                        let construction =
+                            if componentRows then
+                                pBuildRecordComponentCopy node.Id structTy { SSA = origSSA; Type = origTy } fieldValues (dataFields |> List.map snd)
+                            else pBuildRecordCopyWith node.Id structTy origSSA fieldValues (dataFields |> List.map snd)
+                        match tryMatchWithDiagnostics (withComponents construction) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"RecordExpr copy-with: {diagnostic}"
                 | None ->
                     WitnessOutput.error "RecordExpr copy-with: Original record not in accumulator"
             | None ->
@@ -90,6 +95,8 @@ let private witnessRecordCore (ctx: WitnessContext) (node: SemanticNode) : Witne
             let resolved = fieldValues |> List.choose id
             if resolved.Length <> elements.Length then
                 WitnessOutput.error $"TupleExpr: Only {resolved.Length} of {elements.Length} element values witnessed"
+            elif elements |> List.exists (BoundaryAbi.isSharedBufferOrigin ctx.Graph) then
+                WitnessOutput.error "TupleExpr: Shared-buffer view cannot be captured as a tuple element (Copies = 0)."
             else
                 match tryMatchWithDiagnostics (pBuildRecord node.Id structTy resolved elements) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
                 | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
@@ -105,9 +112,15 @@ let private witnessRecordCore (ctx: WitnessContext) (node: SemanticNode) : Witne
         | SemanticKind.FieldSet (structId, fieldName, valueId) ->
             match MLIRAccumulator.recallNode structId ctx.Accumulator, MLIRAccumulator.recallNode valueId ctx.Accumulator with
             | Some (structSSA, (TStruct _ as structTy)), Some (valueSSA, _) ->
-                match tryMatchWithDiagnostics (pRecordFieldSet node.Id structSSA fieldName structTy valueSSA) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                | Result.Error diagnostic -> WitnessOutput.error $"RecordFieldSet '{fieldName}': {diagnostic}"
+                if BoundaryAbi.isSharedBufferOrigin ctx.Graph valueId then
+                    WitnessOutput.error $"RecordFieldSet '{fieldName}': Shared-buffer view cannot be stored into a record field (Copies = 0)."
+                else
+                    match BoundaryAbi.validateSharedBufferProjectionAt ctx.Graph node.Id structId fieldName true with
+                    | Result.Error reason -> WitnessOutput.error $"RecordFieldSet '{fieldName}': {reason}"
+                    | Result.Ok () ->
+                        match tryMatchWithDiagnostics (pRecordFieldSet node.Id structSSA fieldName structTy valueSSA) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"RecordFieldSet '{fieldName}': {diagnostic}"
             | Some (_, structTy), Some _ ->
                 WitnessOutput.error $"FieldSet '{fieldName}': target is not a record (type {structTy})"
             | None, _ -> WitnessOutput.error $"FieldSet '{fieldName}': record value not yet witnessed"
@@ -125,10 +138,13 @@ let private witnessRecordCore (ctx: WitnessContext) (node: SemanticNode) : Witne
             | Some (structSSA, structTy) ->
                 match structTy with
                 | TStruct _ ->
-                    // TStruct field access — handle here
-                    match tryMatchWithDiagnostics (pRecordFieldGet node.Id structSSA fieldName structTy) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                    | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
-                    | Result.Error diagnostic -> WitnessOutput.error $"RecordFieldGet: {diagnostic}"
+                    match BoundaryAbi.validateSharedBufferProjectionAt ctx.Graph node.Id structId fieldName false with
+                    | Result.Error reason -> WitnessOutput.error $"RecordFieldGet: {reason}"
+                    | Result.Ok () ->
+                        // TStruct field access - handle here
+                        match tryMatchWithDiagnostics (pRecordFieldGet node.Id structSSA fieldName structTy) ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                        | Result.Ok ((ops, result), _) -> { InlineOps = ops; TopLevelOps = []; Result = result }
+                        | Result.Error diagnostic -> WitnessOutput.error $"RecordFieldGet: {diagnostic}"
                 | _ ->
                     // Not TStruct — skip, let MemoryWitness handle (strings, closures, DUs)
                     WitnessOutput.skip

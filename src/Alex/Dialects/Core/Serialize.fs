@@ -1093,7 +1093,8 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
                 | TMemRef _ | TMemRefStatic _ | TMemRefScalar _ -> true
                 | TFunc(argTypes, retTypes) -> List.exists containsBufferType argTypes || List.exists containsBufferType retTypes
                 | TVector(_, elemTy) -> containsBufferType elemTy
-                | TStruct(fields, _) -> List.exists (snd >> containsBufferType) fields
+                | TStruct(_, Some _) -> true
+                | TStruct(fields, None) -> List.exists (snd >> containsBufferType) fields
                 | _ -> false
             let requiresTargetMarshalling =
                 (declaration.Parameters |> List.exists (fun (_, scalar) ->

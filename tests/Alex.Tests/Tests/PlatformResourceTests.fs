@@ -2949,3 +2949,1743 @@ module Schema53BoundaryWitnessing =
         match runBoundaryCallAt siteId (mkGraph zeroByteBufferRep) with
         | Result.Error reason -> Assert.Equal("Borrowed result view disagrees with its source-settled representation.", reason)
         | Result.Ok other -> failwithf "Admitted zero-extent BorrowedBytes option result: %A" other
+
+    [<Fact>]
+    let ``M10 SMTTransfer transcribes all five BAREWire SharedBufferPlacementObligation forms and refuses malformed obligations`` () =
+        let space : BAREWire.Platform.MemorySpace =
+            { Name = "ring_shm"
+              Kind = BAREWire.Platform.MemoryKind.ViewBacked
+              Capacity = 4096L
+              Alignment = 64
+              Granularity = 64
+              Growth = BAREWire.Platform.Growth.Fixed
+              Access = BAREWire.Platform.Access.ReadWrite
+              Base = None
+              Notes = ""
+              MapKind = ""
+              Since = ""
+              Until = "" }
+        let bufferSchema : BAREWire.Platform.BufferSchema =
+            { Name = "RingSlotRing"
+              Schema = "RingSlotRing"
+              Capacity = 8L
+              Framing = "unframed"
+              Delimiter = 0
+              TrimDelimiter = false
+              Space = "ring_shm"
+              Lifetime = "process"
+              Access = BAREWire.Platform.Access.ReadWrite
+              Slot = 0 }
+        let structLayout : BAREWire.Hardware.StructDescriptor =
+            { Name = "RingSlot"
+              Layout =
+                { Size = 8
+                  Alignment = 4
+                  Fields =
+                    [| { Name = "Seq"
+                         Offset = 0
+                         Repr = BAREWire.Hardware.Repr.I32
+                         Count = 1
+                         Access = BAREWire.Hardware.AccessKind.ReadWrite
+                         BitFields =
+                           [| { Name = "FlagsLow"
+                                Position = 0
+                                Width = 4
+                                Access = BAREWire.Hardware.AccessKind.ReadWrite }
+                              { Name = "FlagsHigh"
+                                Position = 4
+                                Width = 4
+                                Access = BAREWire.Hardware.AccessKind.ReadWrite } |]
+                         Documentation = None }
+                       { Name = "Payload"
+                         Offset = 4
+                         Repr = BAREWire.Hardware.Repr.I32
+                         Count = 1
+                         Access = BAREWire.Hardware.AccessKind.ReadWrite
+                         BitFields = [||]
+                         Documentation = None } |] }
+              MayAlias = false
+              FlexibleArray = None
+              Documentation = None }
+        let spaceDesc : BAREWire.Descriptors.MemorySpaceDescriptor =
+            { Space = "ring_shm"
+              MemoryRegion = BAREWire.Hardware.MemoryRegionKind.SRAM
+              Access = "ReadWrite"
+              ByteOrder = "little"
+              ElementSize = 8
+              ElementCount = 1
+              RegionByteExtent = 8
+              RegionAlignment = 64
+              RegionLifetimeDepth = 1
+              LibraryRetentionDepth = 2 }
+        let viewLayout : BAREWire.Descriptors.ViewLayoutDescriptor =
+            { Schema = "RingSlotRing"
+              Element = BAREWire.Hardware.Repr.I32
+              Alignment = 4
+              Access = BAREWire.Hardware.AccessKind.ReadWrite }
+        let placement : BAREWire.Platform.SharedBufferPlacement =
+            { Name = "ring_slot_frames"
+              SpaceDescriptor = spaceDesc
+              SpaceOffset = 0L
+              StructLayout = structLayout
+              ViewLayout = viewLayout
+              MeasuredElementSize = 8
+              LayoutAlignment = 4
+              LayoutByteOrder = "little"
+              HasRawPointerFields = false
+              HasVerifiedExports = true
+              MappedDepth = 1
+              FirstUseDepth = 1
+              LastUseDepth = 2
+              LibraryRetentionEndDepth = 2
+              UnmapDepth = 3
+              LeakedAtExit = false
+              ConcurrentClefMutation = false
+              LibraryMutatesBuffer = true
+              OverlappingMutableShare = false
+              MaxAccessedElementIndex = 0 }
+        let desc : BAREWire.Platform.PlatformDescription =
+            { Id = "test-ring-platform"
+              DisplayName = "Test Ring Platform"
+              Substrate = "cpu"
+              Core = Some (BAREWire.Platform.TargetCore.create "linux" "x86_64" 64 "little" "glibc")
+              Spaces = [| space |]
+              ProgramLifetime = None
+              Surfaces = [||]
+              Buffers = [| bufferSchema |]
+              Transports = [||]
+              Lifecycle =
+                { Clocks = [||]
+                  Resets = [||]
+                  Entry = ""
+                  Teardown = ""
+                  Persistence = BAREWire.Platform.Persistence.Volatile }
+              Notes = [||]
+              Limits = [||] }
+        Assert.Empty(BAREWire.Platform.Check.checkSharedBufferPlacement desc placement)
+        let rawObs = BAREWire.Platform.Obligations.sharedBufferObligations desc [| placement |]
+        Assert.Equal(5, rawObs.Length)
+        let extentBare = rawObs[0]
+        let layoutBare = rawObs[1]
+        let lifetimeBare = rawObs[2]
+        let exclusivityBare = rawObs[3]
+        let spaceBare = rawObs[4]
+        let wrap (b: BAREWire.Platform.Obligation) : ObligationInfo =
+            { Id = b.Id
+              Kind = b.Kind
+              Logic = b.Logic
+              Statement = b.Statement
+              Source = b.Source
+              Refs = Array.toList b.Refs
+              Body = ObligationBody.SharedBufferPlacementObligation b }
+        let obs =
+            [ wrap layoutBare
+              wrap extentBare
+              wrap spaceBare
+              wrap lifetimeBare
+              wrap exclusivityBare ]
+        match Alex.Traversal.SMTTransfer.transfer obs with
+        | Result.Error err -> Assert.Fail("Expected M10 SMTTransfer.transfer to succeed, got: " + err)
+        | Result.Ok smtText ->
+            Assert.Contains("fs9220_layout_ring_slot_frames", smtText)
+            Assert.Contains("fs9221_extent_ring_slot_frames", smtText)
+            Assert.Contains("fs9221_space_ring_shm", smtText)
+            Assert.Contains("fs9222_lifetime_ring_slot_frames", smtText)
+            Assert.Contains("fs9223_exclusivity_ring_slot_frames", smtText)
+            Assert.Contains("smt.int.constant 4096", smtText)
+            Assert.Contains("smt.int.constant 64", smtText)
+            Assert.Contains("smt.check sat {} unknown {} unsat {}", smtText)
+
+        let bareObsInOrder = [ layoutBare; extentBare; spaceBare; lifetimeBare; exclusivityBare ]
+        for bareOb in bareObsInOrder do
+            match Alex.Traversal.SMTTransfer.operations [ wrap bareOb ] with
+            | Result.Error err -> Assert.Fail("Expected M10 SMTTransfer.operations to succeed, got: " + err)
+            | Result.Ok ops ->
+                let expectedConjuncts = BAREWire.Platform.Obligations.conclusionConjuncts bareOb
+                let andClauseCounts =
+                    ops
+                    |> List.collect (function
+                        | MLIROp.SMTOp(SMTOp.SMTSolver bodyOps) -> bodyOps
+                        | other -> [ other ])
+                    |> List.choose (function
+                        | MLIROp.SMTOp(SMTOp.SMTAnd(_, clauses)) -> Some clauses.Length
+                        | _ -> None)
+                Assert.Equal(Some expectedConjuncts.Length, List.tryLast andClauseCounts)
+
+        let assertSmtErrorSubstring (expectedSub: string) (res: Result<_, string>) =
+            match res with
+            | Result.Ok _ -> Assert.Fail("Expected SMTTransfer.operations to refuse mutant obligation with: " + expectedSub)
+            | Result.Error msg -> Assert.Contains(expectedSub, msg)
+
+        let badMeta = { wrap layoutBare with Id = "mismatched_id" }
+        assertSmtErrorSubstring "disagrees with its BAREWire obligation metadata" (Alex.Traversal.SMTTransfer.operations [ badMeta ])
+
+        let badSpace =
+            wrap { spaceBare with Form = { spaceBare.Form with Values = [| -1L |] } }
+        assertSmtErrorSubstring "SharedBufferSpaceExtent" (Alex.Traversal.SMTTransfer.operations [ badSpace ])
+
+        let badSpaceNamesArity =
+            wrap { spaceBare with Form = { spaceBare.Form with Names = [| "a"; "b" |]; Values = [| 0L; 8L |] } }
+        assertSmtErrorSubstring "SharedBufferSpaceExtent" (Alex.Traversal.SMTTransfer.operations [ badSpaceNamesArity ])
+
+        let badSpaceBlankName =
+            wrap { spaceBare with Form = { spaceBare.Form with Names = [| "" |]; Values = [| 0L; 8L |] } }
+        assertSmtErrorSubstring "SharedBufferSpaceExtent" (Alex.Traversal.SMTTransfer.operations [ badSpaceBlankName ])
+
+        let badSpaceDupName =
+            wrap { spaceBare with Form = { spaceBare.Form with Names = [| "dup"; "dup" |]; Values = [| 0L; 4L; 4L; 4L |] } }
+        assertSmtErrorSubstring "SharedBufferSpaceExtent" (Alex.Traversal.SMTTransfer.operations [ badSpaceDupName ])
+
+        let badLayout =
+            wrap { layoutBare with Form = { layoutBare.Form with Values = [| 8L |] } }
+        assertSmtErrorSubstring "invalid or duplicate BAREWire symbol bindings" (Alex.Traversal.SMTTransfer.operations [ badLayout ])
+
+        let badLayoutTrailingSymbol =
+            wrap
+                { layoutBare with
+                    Form =
+                        { layoutBare.Form with
+                            Names = Array.append layoutBare.Form.Names [| "field_off_2" |]
+                            Values = Array.append layoutBare.Form.Values [| 8L |] } }
+        assertSmtErrorSubstring "trailing field symbols beyond field count" (Alex.Traversal.SMTTransfer.operations [ badLayoutTrailingSymbol ])
+
+    [<Fact>]
+    let ``M10 shared-buffer zero-copy region witnessing emits memref views and refuses copy, permission, lifetime, and sync defects`` () =
+        let modId = id 2000
+        let fnId = id 2001
+        let fdParamId = id 2002
+        let bodySeqId = id 2003
+        let mmapDeclId = id 2010
+        let mmapDescId = id 2011
+        let mmapFdFormal = id 2012
+        let msyncDeclId = id 2020
+        let msyncDescId = id 2021
+        let msyncSlotFormal = id 2022
+        let kickDeclId = id 2030
+        let kickDescId = id 2031
+        let kickSlotFormal = id 2032
+        let munmapDeclId = id 2040
+        let munmapDescId = id 2041
+        let munmapSlotFormal = id 2042
+        let mmapCallId = id 2050
+        let mmapCalleeId = id 2051
+        let mmapFdArgId = id 2052
+        let slotBindId = id 2053
+        let slotRefGetId = id 2054
+        let getSeqId = id 2055
+        let slotRefSetId = id 2056
+        let val42Id = id 2057
+        let setPayloadId = id 2058
+        let slotRefMsyncId = id 2059
+        let msyncCallId = id 2060
+        let msyncCalleeId = id 2061
+        let slotRefKickId = id 2062
+        let kickCallId = id 2063
+        let kickCalleeId = id 2064
+        let slotRefMunmapId = id 2065
+        let munmapCallId = id 2066
+        let munmapCalleeId = id 2067
+        let plId = id 2070
+        let plDeclId = id 2071
+        let spaceNodeId = id 2072
+        let bufSchemaNodeId = id 2073
+        let spaceDescNodeId = id 2074
+        let structDescNodeId = id 2075
+        let viewDescNodeId = id 2076
+        let regionDescNodeId = id 2077
+        let obLayoutId = id 2080
+        let obExtentId = id 2081
+        let obSpaceId = id 2082
+        let obLifetimeId = id 2083
+        let obExclusivityId = id 2084
+
+        let ringSlotType =
+            TypeIdentity.Application(
+                { Declaration = { Module = [ "RingMod" ]; Name = "RingSlot" }
+                  Parameters = []
+                  NativeKind = None },
+                [])
+        let ringSlotRep =
+            ValueRepresentation.Record(
+                [ "Seq", ValueRepresentation.Scalar(SettledSlot.Integer(32, Some "int32"))
+                  "Payload", ValueRepresentation.Scalar(SettledSlot.Integer(32, Some "int32")) ],
+                Some([ 0; 4 ], 8, 4))
+        let ringSlotLayout =
+            SettledLayout.Record(
+                [ { Name = "Seq"
+                    Offset = Some 0
+                    Size = Some 4
+                    Align = Some 4
+                    Slot = SettledSlot.Integer(32, Some "int32") }
+                  { Name = "Payload"
+                    Offset = Some 4
+                    Size = Some 4
+                    Align = Some 4
+                    Slot = SettledSlot.Integer(32, Some "int32") } ],
+                Some 8,
+                Some 4)
+        let space : BAREWire.Platform.MemorySpace =
+            { Name = "ring_shm"
+              Kind = BAREWire.Platform.MemoryKind.ViewBacked
+              Capacity = 4096L
+              Alignment = 64
+              Granularity = 64
+              Growth = BAREWire.Platform.Growth.Fixed
+              Access = BAREWire.Platform.Access.ReadWrite
+              Base = None
+              Notes = ""
+              MapKind = ""
+              Since = ""
+              Until = "" }
+        let bufferSchema : BAREWire.Platform.BufferSchema =
+            { Name = "RingSlotRing"
+              Schema = "RingSlotRing"
+              Capacity = 8L
+              Framing = "unframed"
+              Delimiter = 0
+              TrimDelimiter = false
+              Space = "ring_shm"
+              Lifetime = "process"
+              Access = BAREWire.Platform.Access.ReadWrite
+              Slot = 0 }
+        let structLayout : BAREWire.Hardware.StructDescriptor =
+            { Name = "RingSlot"
+              Layout =
+                { Size = 8
+                  Alignment = 4
+                  Fields =
+                    [| { Name = "Seq"
+                         Offset = 0
+                         Repr = BAREWire.Hardware.Repr.I32
+                         Count = 1
+                         Access = BAREWire.Hardware.AccessKind.ReadWrite
+                         BitFields = [||]
+                         Documentation = None }
+                       { Name = "Payload"
+                         Offset = 4
+                         Repr = BAREWire.Hardware.Repr.I32
+                         Count = 1
+                         Access = BAREWire.Hardware.AccessKind.ReadWrite
+                         BitFields = [||]
+                         Documentation = None } |] }
+              MayAlias = false
+              FlexibleArray = None
+              Documentation = None }
+        let spaceDesc : BAREWire.Descriptors.MemorySpaceDescriptor =
+            { Space = "ring_shm"
+              MemoryRegion = BAREWire.Hardware.MemoryRegionKind.SRAM
+              Access = "ReadWrite"
+              ByteOrder = "little"
+              ElementSize = 8
+              ElementCount = 1
+              RegionByteExtent = 8
+              RegionAlignment = 64
+              RegionLifetimeDepth = 1
+              LibraryRetentionDepth = 2 }
+        let viewLayout : BAREWire.Descriptors.ViewLayoutDescriptor =
+            { Schema = "RingSlotRing"
+              Element = BAREWire.Hardware.Repr.I32
+              Alignment = 4
+              Access = BAREWire.Hardware.AccessKind.ReadWrite }
+        let barePlacement : BAREWire.Platform.SharedBufferPlacement =
+            { Name = "ring_slot_frames"
+              SpaceDescriptor = spaceDesc
+              SpaceOffset = 0L
+              StructLayout = structLayout
+              ViewLayout = viewLayout
+              MeasuredElementSize = 8
+              LayoutAlignment = 4
+              LayoutByteOrder = "little"
+              HasRawPointerFields = false
+              HasVerifiedExports = true
+              MappedDepth = 1
+              FirstUseDepth = 1
+              LastUseDepth = 2
+              LibraryRetentionEndDepth = 2
+              UnmapDepth = 3
+              LeakedAtExit = false
+              ConcurrentClefMutation = false
+              LibraryMutatesBuffer = true
+              OverlappingMutableShare = false
+              MaxAccessedElementIndex = 0 }
+        let regionDesc : BAREWire.Descriptors.SharedBufferRegionDescriptor =
+            { Placement = "ring_slot_frames"
+              Acquire = "RingMod.mmapRing"
+              Release = Some "RingMod.munmapRing"
+              Sync = [| "RingMod.msyncRing" |]
+              ForeignUses = [| "RingMod.ringKick" |] }
+        let makePlacementDeclFacts
+            (baseId: int)
+            (p: BAREWire.Platform.SharedBufferPlacement)
+            (rDesc: BAREWire.Descriptors.SharedBufferRegionDescriptor)
+            (sp: BAREWire.Platform.MemorySpace)
+            (buf: BAREWire.Platform.BufferSchema)
+            : Map<NodeId, BoundaryDeclarationFact> =
+            let s = p.SpaceDescriptor
+            let mkFact form text numbers refs parent : BoundaryDeclarationFact =
+                let nodeRefs = refs |> List.map NodeId
+                { Form = form; Text = text; Numbers = numbers; References = nodeRefs; Children = nodeRefs; Parent = parent |> Option.map NodeId; SourceType = unitType }
+            let mkStr fid value parent = fid, mkFact "string" [ value ] [] [] (Some parent)
+            let mkInt fid (value: int64) parent = fid, mkFact "integer" [] [ bigint value ] [] (Some parent)
+            let mkBool fid (value: bool) parent = fid, mkFact "boolean" [] [ if value then 1I else 0I ] [] (Some parent)
+            let mkCase fid name refs parent = fid, mkFact "case" [ name ] [] refs (Some parent)
+            let mkArr fid refs parent = fid, mkFact "array" [] [] refs (Some parent)
+            let spNode = baseId + 2
+            let bufNode = baseId + 3
+            let sDescId = baseId + 4
+            let stDescId = baseId + 5
+            let vDescId = baseId + 6
+            let rDescId = baseId + 7
+            let recId = baseId + 20
+            let pFields =
+                [ "Name", mkStr (baseId + 21) p.Name recId
+                  "SpaceDescriptor", (baseId + 38, mkFact "reference" [ "spaceDesc" ] [] [ sDescId ] (Some recId))
+                  "SpaceOffset", mkInt (baseId + 22) p.SpaceOffset recId
+                  "StructLayout", (baseId + 39, mkFact "reference" [ "structLayout" ] [] [ stDescId ] (Some recId))
+                  "ViewLayout", (baseId + 40, mkFact "reference" [ "viewLayout" ] [] [ vDescId ] (Some recId))
+                  "MeasuredElementSize", mkInt (baseId + 23) (int64 p.MeasuredElementSize) recId
+                  "LayoutAlignment", mkInt (baseId + 24) (int64 p.LayoutAlignment) recId
+                  "LayoutByteOrder", mkStr (baseId + 25) p.LayoutByteOrder recId
+                  "HasRawPointerFields", mkBool (baseId + 26) p.HasRawPointerFields recId
+                  "HasVerifiedExports", mkBool (baseId + 27) p.HasVerifiedExports recId
+                  "MappedDepth", mkInt (baseId + 28) (int64 p.MappedDepth) recId
+                  "FirstUseDepth", mkInt (baseId + 29) (int64 p.FirstUseDepth) recId
+                  "LastUseDepth", mkInt (baseId + 30) (int64 p.LastUseDepth) recId
+                  "LibraryRetentionEndDepth", mkInt (baseId + 31) (int64 p.LibraryRetentionEndDepth) recId
+                  "UnmapDepth", mkInt (baseId + 32) (int64 p.UnmapDepth) recId
+                  "LeakedAtExit", mkBool (baseId + 33) p.LeakedAtExit recId
+                  "ConcurrentClefMutation", mkBool (baseId + 34) p.ConcurrentClefMutation recId
+                  "LibraryMutatesBuffer", mkBool (baseId + 35) p.LibraryMutatesBuffer recId
+                  "OverlappingMutableShare", mkBool (baseId + 36) p.OverlappingMutableShare recId
+                  "MaxAccessedElementIndex", mkInt (baseId + 37) (int64 p.MaxAccessedElementIndex) recId ]
+            let sFields =
+                [ "Space", mkStr (baseId + 41) s.Space sDescId
+                  "MemoryRegion", mkStr (baseId + 49) s.MemoryRegion sDescId
+                  "Access", mkStr (baseId + 50) s.Access sDescId
+                  "ByteOrder", mkStr (baseId + 42) s.ByteOrder sDescId
+                  "ElementSize", mkInt (baseId + 43) (int64 s.ElementSize) sDescId
+                  "ElementCount", mkInt (baseId + 44) (int64 s.ElementCount) sDescId
+                  "RegionByteExtent", mkInt (baseId + 45) (int64 s.RegionByteExtent) sDescId
+                  "RegionAlignment", mkInt (baseId + 46) (int64 s.RegionAlignment) sDescId
+                  "RegionLifetimeDepth", mkInt (baseId + 47) (int64 s.RegionLifetimeDepth) sDescId
+                  "LibraryRetentionDepth", mkInt (baseId + 48) (int64 s.LibraryRetentionDepth) sDescId ]
+            let layoutRecId = baseId + 53
+            let fieldsArrId = baseId + 56
+            let fieldRecordsAndProps =
+                p.StructLayout.Layout.Fields
+                |> Array.toList
+                |> List.mapi (fun idx df ->
+                    let fRecId = baseId + 100 + idx * 10
+                    let bfArrId = fRecId + 6
+                    let ff =
+                        [ "Name", mkStr (fRecId + 1) df.Name fRecId
+                          "Offset", mkInt (fRecId + 2) (int64 df.Offset) fRecId
+                          "Repr", mkStr (fRecId + 3) df.Repr fRecId
+                          "Count", mkInt (fRecId + 4) (int64 df.Count) fRecId
+                          "Access", mkStr (fRecId + 5) df.Access fRecId
+                          "BitFields", mkArr bfArrId [] fRecId ]
+                    let fRec = fRecId, mkFact "record" (ff |> List.map fst) [] (ff |> List.map (snd >> fst)) (Some fieldsArrId)
+                    fRecId, fRec :: (ff |> List.map snd))
+            let fRecIds = fieldRecordsAndProps |> List.map fst
+            let fFactEntries = fieldRecordsAndProps |> List.collect snd
+            let lFields =
+                [ "Size", mkInt (baseId + 54) (int64 p.StructLayout.Layout.Size) layoutRecId
+                  "Alignment", mkInt (baseId + 55) (int64 p.StructLayout.Layout.Alignment) layoutRecId
+                  "Fields", mkArr fieldsArrId fRecIds layoutRecId ]
+            let flexNoneId = baseId + 57
+            let stFields =
+                [ "Name", mkStr (baseId + 51) p.StructLayout.Name stDescId
+                  "MayAlias", mkBool (baseId + 52) p.StructLayout.MayAlias stDescId
+                  "FlexibleArray", mkCase flexNoneId "None" [] stDescId
+                  "Layout", (layoutRecId, mkFact "record" (lFields |> List.map fst) [] (lFields |> List.map (snd >> fst)) (Some stDescId)) ]
+            let vFields =
+                [ "Schema", mkStr (baseId + 61) p.ViewLayout.Schema vDescId
+                  "Element", mkStr (baseId + 63) p.ViewLayout.Element vDescId
+                  "Alignment", mkInt (baseId + 62) (int64 p.ViewLayout.Alignment) vDescId
+                  "Access", mkStr (baseId + 64) p.ViewLayout.Access vDescId ]
+            let spNodeFields =
+                [ "Name", mkStr (baseId + 71) sp.Name spNode
+                  "Kind", mkStr (baseId + 72) sp.Kind spNode
+                  "Capacity", mkInt (baseId + 73) sp.Capacity spNode
+                  "Alignment", mkInt (baseId + 74) (int64 sp.Alignment) spNode
+                  "Granularity", mkInt (baseId + 75) (int64 sp.Granularity) spNode
+                  "Growth", mkStr (baseId + 76) sp.Growth spNode
+                  "Access", mkStr (baseId + 77) sp.Access spNode
+                  "Base", mkCase (baseId + 151) "None" [] spNode
+                  "Notes", mkStr (baseId + 152) sp.Notes spNode
+                  "MapKind", mkStr (baseId + 153) sp.MapKind spNode
+                  "Since", mkStr (baseId + 154) sp.Since spNode
+                  "Until", mkStr (baseId + 155) sp.Until spNode ]
+            let bufNodeFields =
+                [ "Name", mkStr (baseId + 81) buf.Name bufNode
+                  "Schema", mkStr (baseId + 82) buf.Schema bufNode
+                  "Capacity", mkInt (baseId + 83) buf.Capacity bufNode
+                  "Framing", mkStr (baseId + 84) buf.Framing bufNode
+                  "Delimiter", mkInt (baseId + 156) (int64 buf.Delimiter) bufNode
+                  "TrimDelimiter", mkBool (baseId + 85) buf.TrimDelimiter bufNode
+                  "Space", mkStr (baseId + 86) buf.Space bufNode
+                  "Lifetime", mkStr (baseId + 157) buf.Lifetime bufNode
+                  "Access", mkStr (baseId + 87) buf.Access bufNode
+                  "Slot", mkInt (baseId + 158) (int64 buf.Slot) bufNode ]
+            let relOptFactId = baseId + 93
+            let relInnerId = baseId + 94
+            let relField, relExtra =
+                match rDesc.Release with
+                | None -> mkCase relOptFactId "None" [] rDescId, []
+                | Some relStr -> mkCase relOptFactId "Some" [ relInnerId ] rDescId, [ mkStr relInnerId relStr relOptFactId ]
+            let syncFactPairs =
+                rDesc.Sync
+                |> Array.toList
+                |> List.mapi (fun idx s ->
+                    let sid = baseId + 160 + idx
+                    sid, mkStr sid s (baseId + 95))
+            let fuFactPairs =
+                rDesc.ForeignUses
+                |> Array.toList
+                |> List.mapi (fun idx f ->
+                    let fid = baseId + 180 + idx
+                    fid, mkStr fid f (baseId + 97))
+            let regNodeFields =
+                [ "Placement", mkStr (baseId + 91) rDesc.Placement rDescId
+                  "Acquire", mkStr (baseId + 92) rDesc.Acquire rDescId
+                  "Release", relField
+                  "Sync", mkArr (baseId + 95) (syncFactPairs |> List.map fst) rDescId
+                  "ForeignUses", mkArr (baseId + 97) (fuFactPairs |> List.map fst) rDescId ]
+            let allEntries =
+                [ baseId, mkFact "quotation" [] [] [ recId ] (Some (baseId + 1))
+                  baseId + 1, mkFact "binding" [ p.Name ] [ 0I; 0I ] [ baseId ] None
+                  spNode, mkFact "record" (spNodeFields |> List.map fst) [] (spNodeFields |> List.map (snd >> fst)) None
+                  bufNode, mkFact "record" (bufNodeFields |> List.map fst) [] (bufNodeFields |> List.map (snd >> fst)) None
+                  sDescId, mkFact "record" (sFields |> List.map fst) [] (sFields |> List.map (snd >> fst)) None
+                  stDescId, mkFact "record" (stFields |> List.map fst) [] (stFields |> List.map (snd >> fst)) None
+                  vDescId, mkFact "record" (vFields |> List.map fst) [] (vFields |> List.map (snd >> fst)) None
+                  rDescId, mkFact "record" (regNodeFields |> List.map fst) [] (regNodeFields |> List.map (snd >> fst)) None
+                  recId, mkFact "record" (pFields |> List.map fst) [] (pFields |> List.map (snd >> fst)) (Some baseId) ]
+                @ (pFields |> List.map snd)
+                @ (sFields |> List.map snd)
+                @ (stFields |> List.map snd)
+                @ (lFields |> List.map snd)
+                @ fFactEntries
+                @ (vFields |> List.map snd)
+                @ (spNodeFields |> List.map snd)
+                @ (bufNodeFields |> List.map snd)
+                @ (regNodeFields |> List.map snd)
+                @ relExtra
+                @ (syncFactPairs |> List.map snd)
+                @ (fuFactPairs |> List.map snd)
+            allEntries |> List.map (fun (fid, f) -> NodeId fid, f) |> Map.ofList
+
+        let desc : BAREWire.Platform.PlatformDescription =
+            { Id = "test-ring-platform"
+              DisplayName = "Test Ring Platform"
+              Substrate = "cpu"
+              Core = Some (BAREWire.Platform.TargetCore.create "linux" "x86_64" 64 "little" "glibc")
+              Spaces = [| space |]
+              ProgramLifetime = None
+              Surfaces = [||]
+              Buffers = [| bufferSchema |]
+              Transports = [||]
+              Lifecycle =
+                { Clocks = [||]
+                  Resets = [||]
+                  Entry = ""
+                  Teardown = ""
+                  Persistence = BAREWire.Platform.Persistence.Volatile }
+              Notes = [||]
+              Limits = [||] }
+        let rawObs = BAREWire.Platform.Obligations.sharedBufferObligations desc [| barePlacement |]
+        let extentBare, layoutBare, lifetimeBare, exclusivityBare, spaceBare =
+            match Array.toList rawObs with
+            | [ o0; o1; o2; o3; o4 ] -> o0, o1, o2, o3, o4
+            | _ -> failwith "Unexpected shared-buffer obligation count"
+        let mkOb (b: BAREWire.Platform.Obligation) : ObligationInfo =
+            { Id = b.Id
+              Kind = b.Kind
+              Logic = b.Logic
+              Statement = b.Statement
+              Source = b.Source
+              Refs = Array.toList b.Refs
+              Body = ObligationBody.SharedBufferPlacementObligation b }
+        let obLayout = mkOb layoutBare
+        let obExtent = mkOb extentBare
+        let obSpace = mkOb spaceBare
+        let obLifetime = mkOb lifetimeBare
+        let obExclusivity = mkOb exclusivityBare
+        let allObs = [ obLayout; obExtent; obSpace; obLifetime; obExclusivity ]
+        let currentClaims =
+            Map.ofList
+                [ obLayoutId, obLayout
+                  obExtentId, obExtent
+                  obSpaceId, obSpace
+                  obLifetimeId, obLifetime
+                  obExclusivityId, obExclusivity ]
+
+        let mkImportBindingFact (shortName: string) (ty: TypeIdentity) : BoundaryDeclarationFact =
+            { Form = "binding"
+              Text = [ shortName ]
+              Numbers = [ 0I; 0I ]
+              References = []
+              Children = []
+              Parent = Some modId
+              SourceType = ty }
+        let mmapImport : BoundaryImport =
+            { Identity = mmapDescId; Binding = mmapDeclId; Scope = modId
+              Library = "ring"; Symbol = "mmap_ring"; CallingConvention = "CDecl"
+              DeclarationPath = [ modId; mmapDeclId ]
+              Parameters = [ mmapFdFormal, BoundaryScalar.Integer(32, true) ]
+              Result = Some(BoundaryScalar.Integer(64, false))
+              Participants = Set.ofList [ modId; mmapDeclId; mmapDescId; mmapFdFormal ]
+              SourceTypes = Map.ofList [ mmapDeclId, functionFrom intType ringSlotType; mmapFdFormal, intType ]
+              DeclarationFacts =
+                Map.ofList
+                    [ mmapDeclId, mkImportBindingFact "mmapRing" (functionFrom intType ringSlotType)
+                      mmapFdFormal, { emptyFact "binding" with SourceType = intType } ] }
+        let mkSlotImport (descId: NodeId) (declId: NodeId) (slotFormal: NodeId) (clefName: string) (sym: string) : BoundaryImport =
+            { Identity = descId; Binding = declId; Scope = modId
+              Library = "ring"; Symbol = sym; CallingConvention = "CDecl"
+              DeclarationPath = [ modId; declId ]
+              Parameters = [ slotFormal, BoundaryScalar.ResourceHandle(slotFormal, false) ]
+              Result = None
+              Participants = Set.ofList [ modId; declId; descId; slotFormal ]
+              SourceTypes = Map.ofList [ declId, functionFrom ringSlotType unitType; slotFormal, ringSlotType ]
+              DeclarationFacts =
+                Map.ofList
+                    [ declId, mkImportBindingFact clefName (functionFrom ringSlotType unitType)
+                      slotFormal, { emptyFact "binding" with SourceType = ringSlotType } ] }
+        let msyncImport = mkSlotImport msyncDescId msyncDeclId msyncSlotFormal "msyncRing" "msync_ring"
+        let kickImport = mkSlotImport kickDescId kickDeclId kickSlotFormal "ringKick" "ring_kick"
+        let munmapImport = mkSlotImport munmapDescId munmapDeclId munmapSlotFormal "munmapRing" "munmap_ring"
+
+        let mmapCall : BoundaryCall =
+            { Site = mmapCallId; Import = mmapDescId; Callee = mmapCalleeId; Entry = None; Resource = None
+              Arguments =
+                [ { Actual = mmapFdArgId; Formal = mmapFdFormal
+                    Abi = BoundaryScalar.Integer(32, true)
+                    Adaptation = None; OptionalEntry = None; BufferAbsence = None } ]
+              ErasedUnitArguments = []
+              Result = Some(BoundaryScalar.Integer(64, false))
+              ResultAdaptation = None
+              Participants = Set.ofList [ mmapCallId; mmapCalleeId; mmapFdArgId ]
+              SourceTypes = Map.empty }
+        let mkSlotCall (site: NodeId) (descId: NodeId) (callee: NodeId) (actual: NodeId) (formal: NodeId) : BoundaryCall =
+            { Site = site; Import = descId; Callee = callee; Entry = None; Resource = None
+              Arguments =
+                [ { Actual = actual; Formal = formal
+                    Abi = BoundaryScalar.ResourceHandle(formal, false)
+                    Adaptation = None; OptionalEntry = None; BufferAbsence = None } ]
+              ErasedUnitArguments = []
+              Result = None
+              ResultAdaptation = None
+              Participants = Set.ofList [ site; callee; actual ]
+              SourceTypes = Map.empty }
+        let msyncCall = mkSlotCall msyncCallId msyncDescId msyncCalleeId slotRefMsyncId msyncSlotFormal
+        let kickCall = mkSlotCall kickCallId kickDescId kickCalleeId slotRefKickId kickSlotFormal
+        let munmapCall = mkSlotCall munmapCallId munmapDescId munmapCalleeId slotRefMunmapId munmapSlotFormal
+
+        let placementParticipants =
+            [ 2070 .. 2077 ]
+            |> List.mapi (fun idx nid -> { Role = ParticipantRole.Site; Node = NodeId nid; Ordinal = idx; Group = plId })
+        let placement : BoundarySharedBufferPlacementDeclaration =
+            { Identity = plId
+              Declaration = plDeclId
+              SpaceNode = spaceNodeId
+              BufferSchemaNode = bufSchemaNodeId
+              SpaceDescriptorNode = spaceDescNodeId
+              StructDescriptorNode = structDescNodeId
+              ViewDescriptorNode = viewDescNodeId
+              RegionDescriptorNode = regionDescNodeId
+              Placement = barePlacement
+              RegionDescriptor = regionDesc
+              Space = space
+              BufferSchema = bufferSchema
+              PlatformEndianness = "little"
+              Obligations = [ obLayoutId; obExtentId; obSpaceId; obLifetimeId; obExclusivityId ]
+              DeclarationFacts = makePlacementDeclFacts 2070 barePlacement regionDesc space bufferSchema
+              Participants = ParticipantEvidence.Established placementParticipants }
+        let useParticipantNodes =
+            [ getSeqId
+              plId
+              mmapCallId
+              munmapCallId
+              msyncCallId
+              kickCallId
+              setPayloadId
+              obLayoutId
+              obExtentId
+              obSpaceId
+              obLifetimeId
+              obExclusivityId ]
+        let viewUse : BoundarySharedBufferViewUse =
+            { Site = getSeqId
+              PlacementDeclaration = plId
+              ElementType = ringSlotType
+              ElementSlot = SettledSlot.InlineBytes(8, 4)
+              RegionAcquisitionCall = mmapCallId
+              RegionReleaseCall = Some munmapCallId
+              SyncCalls = [ msyncCallId ]
+              ForeignUseCalls = [ kickCallId ]
+              ViewProjections = [ getSeqId ]
+              WriteProjections = [ setPayloadId ]
+              AcquisitionOrder = 1
+              ProjectionOrders = [ 2 ]
+              WriteProjectionOrders = [ 3 ]
+              SyncOrders = [ 4 ]
+              ForeignUseOrders = [ 5 ]
+              ReleaseOrder = Some 6
+              Copies = 0
+              LayoutObligation = obLayoutId
+              ExtentObligation = obExtentId
+              SpaceExtentObligation = obSpaceId
+              LifetimeObligation = obLifetimeId
+              ExclusivityObligation = obExclusivityId
+              Participants =
+                ParticipantEvidence.Established
+                    (useParticipantNodes
+                     |> List.mapi (fun idx n -> { Role = ParticipantRole.Site; Node = n; Ordinal = idx; Group = getSeqId })) }
+
+        let platformPremise : BoundaryPlatformPremise =
+            { Id = "test-ring-platform"
+              Description = None
+              Loading = None
+              LibraryPath = None
+              SourcePaths = Set.empty
+              Architecture = Some "x86_64"
+              OS = Some "linux"
+              Endianness = Some "little"
+              RuntimeClaim = None
+              Substrate = None
+              Dimensions = Map.empty
+              Representations = Map.empty
+              EndpointReturns = Map.empty
+              Spaces = [ space ]
+              Buffers = [ bufferSchema ]
+              SharedBufferRegions = [ regionDesc ] }
+        let boundaryDomain : BoundaryDomain =
+            { ResourceEvidence = None
+              Premises = Map.empty
+              Platform = Some platformPremise
+              Meets = Map.empty
+              Declarations = []
+              WritableBufferDeclarations = []
+              WritableBufferUses = []
+              ReadOnlyBufferDeclarations = []
+              ReadOnlyBufferUses = []
+              BorrowedResultViewDeclarations = []
+              BorrowedResultViewUses = []
+              BufferAbsences = []
+              CountedEntryArrays = []
+              ResourceDeclarations = []
+              ResourceAccesses = []
+              ResourceEvaluationRoots = []
+              ResourceEvaluationRelations = []
+              Imports = []
+              Loading = None
+              Entries = []
+              Calls = []
+              ByteViews = []
+              StringExtents = []
+              StringOriginRelations = None
+              StringOriginRoots = None
+              StringComparisons = []
+              StringLengthComparisons = []
+              StringComparisonReads = []
+              StringBorrowSnapshots = []
+              StringBorrowCopies = []
+              StringBorrowAllocations = []
+              IntrinsicDeclarations = []
+              IntrinsicImports = []
+              IntrinsicCalls = []
+              IntrinsicProofs = []
+              StringStorage = None
+              DeclarationLeaves = Set.empty
+              DeclarationOnly = Set.empty
+              Links = Set.empty
+              Failures = []
+              ResultHypotheses = []
+              CallbackInvocations = []
+              CallbackAbsences = []
+              ClosedEntries = [] }
+        let domainEdge : Hyperedge =
+            { Class = EdgeClass.Boundary
+              Role = EdgeRole.BoundaryDomain boundaryDomain
+              Ordinal = 0
+              Sources = []
+              Target = modId }
+
+        let i32Rep = ValueRepresentation.Scalar(SettledSlot.Integer(32, Some "int32"))
+        let unitRep = ValueRepresentation.Scalar SettledSlot.Unit
+        let baseGraph = revision []
+        let mkNodeWithParent nid ty kind children parentOpt =
+            { mkNode nid ty kind children with Parent = parentOpt }
+        let graph : Revision =
+            { baseGraph with
+                Edges = [ domainEdge ]
+                Nodes =
+                    Map.ofList
+                        [ modId, mkNodeWithParent modId unitType (SemanticKind.ModuleDef("RingMod", [ fnId ])) [] None
+                          fnId, mkNodeWithParent fnId (functionFrom intType intType) (SemanticKind.Lambda([ "fd", intType, fdParamId ], bodySeqId, [], None, LambdaContext.RegularClosure)) [ fdParamId; bodySeqId ] (Some modId)
+                          fdParamId, mkNodeWithParent fdParamId intType (SemanticKind.PatternBinding "fd") [] (Some fnId)
+                          bodySeqId, mkNodeWithParent bodySeqId intType (SemanticKind.Sequential [ slotBindId; getSeqId; setPayloadId; msyncCallId; kickCallId; munmapCallId ]) [ slotBindId; getSeqId; setPayloadId; msyncCallId; kickCallId; munmapCallId ] (Some fnId)
+                          slotBindId, mkNodeWithParent slotBindId ringSlotType (SemanticKind.Binding("slot", false, false, None)) [ mmapCallId ] (Some bodySeqId)
+                          mmapCallId, mkNodeWithParent mmapCallId ringSlotType (SemanticKind.Application(mmapCalleeId, [ mmapFdArgId ])) [ mmapCalleeId; mmapFdArgId ] (Some slotBindId)
+                          mmapCalleeId, mkNodeWithParent mmapCalleeId (functionFrom intType ringSlotType) (SemanticKind.VarRef("mmapRing", Some mmapDeclId)) [] (Some mmapCallId)
+                          mmapFdArgId, mkNodeWithParent mmapFdArgId intType (SemanticKind.VarRef("fd", Some fdParamId)) [] (Some mmapCallId)
+                          slotRefGetId, mkNodeWithParent slotRefGetId ringSlotType (SemanticKind.VarRef("slot", Some slotBindId)) [] (Some getSeqId)
+                          getSeqId, mkNodeWithParent getSeqId intType (SemanticKind.FieldGet(slotRefGetId, "Seq")) [ slotRefGetId ] (Some bodySeqId)
+                          slotRefSetId, mkNodeWithParent slotRefSetId ringSlotType (SemanticKind.VarRef("slot", Some slotBindId)) [] (Some setPayloadId)
+                          val42Id, mkNodeWithParent val42Id intType (SemanticKind.Literal(NativeLiteral.Int(42L, NTUKind.NTUint(NTUWidth.Fixed 32)))) [] (Some setPayloadId)
+                          setPayloadId, mkNodeWithParent setPayloadId unitType (SemanticKind.FieldSet(slotRefSetId, "Payload", val42Id)) [ slotRefSetId; val42Id ] (Some bodySeqId)
+                          slotRefMsyncId, mkNodeWithParent slotRefMsyncId ringSlotType (SemanticKind.VarRef("slot", Some slotBindId)) [] (Some msyncCallId)
+                          msyncCallId, mkNodeWithParent msyncCallId unitType (SemanticKind.Application(msyncCalleeId, [ slotRefMsyncId ])) [ msyncCalleeId; slotRefMsyncId ] (Some bodySeqId)
+                          msyncCalleeId, mkNodeWithParent msyncCalleeId (functionFrom ringSlotType unitType) (SemanticKind.VarRef("msyncRing", Some msyncDeclId)) [] (Some msyncCallId)
+                          slotRefKickId, mkNodeWithParent slotRefKickId ringSlotType (SemanticKind.VarRef("slot", Some slotBindId)) [] (Some kickCallId)
+                          kickCallId, mkNodeWithParent kickCallId unitType (SemanticKind.Application(kickCalleeId, [ slotRefKickId ])) [ kickCalleeId; slotRefKickId ] (Some bodySeqId)
+                          kickCalleeId, mkNodeWithParent kickCalleeId (functionFrom ringSlotType unitType) (SemanticKind.VarRef("ringKick", Some kickDeclId)) [] (Some kickCallId)
+                          slotRefMunmapId, mkNodeWithParent slotRefMunmapId ringSlotType (SemanticKind.VarRef("slot", Some slotBindId)) [] (Some munmapCallId)
+                          munmapCallId, mkNodeWithParent munmapCallId unitType (SemanticKind.Application(munmapCalleeId, [ slotRefMunmapId ])) [ munmapCalleeId; slotRefMunmapId ] (Some bodySeqId)
+                          munmapCalleeId, mkNodeWithParent munmapCalleeId (functionFrom ringSlotType unitType) (SemanticKind.VarRef("munmapRing", Some munmapDeclId)) [] (Some munmapCallId)
+                          obLayoutId, mkNode obLayoutId unitType (SemanticKind.Obligation obLayout) []
+                          obExtentId, mkNode obExtentId unitType (SemanticKind.Obligation obExtent) []
+                          obSpaceId, mkNode obSpaceId unitType (SemanticKind.Obligation obSpace) []
+                          obLifetimeId, mkNode obLifetimeId unitType (SemanticKind.Obligation obLifetime) []
+                          obExclusivityId, mkNode obExclusivityId unitType (SemanticKind.Obligation obExclusivity) [] ]
+                Obligations = allObs
+                CurrentClaims = currentClaims
+                Emission =
+                    { baseGraph.Emission with
+                        Callable =
+                            { baseGraph.Emission.Callable with
+                                Symbols =
+                                    Map.ofList
+                                        [ mmapDeclId, CallableSymbolName.ModuleBinding("RingMod", "mmapRing")
+                                          msyncDeclId, CallableSymbolName.ModuleBinding("RingMod", "msyncRing")
+                                          kickDeclId, CallableSymbolName.ModuleBinding("RingMod", "ringKick")
+                                          munmapDeclId, CallableSymbolName.ModuleBinding("RingMod", "munmapRing") ]
+                                AliasTargets =
+                                    Map.ofList
+                                        [ mmapCallId, mmapCallId
+                                          slotBindId, mmapCallId
+                                          slotRefGetId, mmapCallId
+                                          slotRefSetId, mmapCallId
+                                          slotRefMsyncId, mmapCallId
+                                          slotRefKickId, mmapCallId
+                                          slotRefMunmapId, mmapCallId
+                                          getSeqId, getSeqId
+                                          setPayloadId, setPayloadId
+                                          msyncCallId, msyncCallId
+                                          kickCallId, kickCallId
+                                          munmapCallId, munmapCallId ] }
+                        Numeric =
+                            { baseGraph.Emission.Numeric with
+                                SourceTypes =
+                                    Map.ofList
+                                        [ mmapCallId, ringSlotType
+                                          slotBindId, ringSlotType
+                                          slotRefGetId, ringSlotType
+                                          slotRefSetId, ringSlotType
+                                          slotRefMsyncId, ringSlotType
+                                          slotRefKickId, ringSlotType
+                                          slotRefMunmapId, ringSlotType ]
+                                Layouts = Map.ofList [ ringSlotType, ringSlotLayout ]
+                                TypeRepresentations =
+                                    Map.ofList
+                                        [ ringSlotType, Result.Ok ringSlotRep
+                                          intType, Result.Ok i32Rep
+                                          unitType, Result.Ok unitRep ]
+                                OccurrenceRepresentations =
+                                    Map.ofList
+                                        [ fdParamId, Result.Ok i32Rep
+                                          mmapFdArgId, Result.Ok i32Rep
+                                          mmapFdFormal, Result.Ok i32Rep
+                                          mmapCallId, Result.Ok ringSlotRep
+                                          slotBindId, Result.Ok ringSlotRep
+                                          slotRefGetId, Result.Ok ringSlotRep
+                                          slotRefSetId, Result.Ok ringSlotRep
+                                          slotRefMsyncId, Result.Ok ringSlotRep
+                                          slotRefKickId, Result.Ok ringSlotRep
+                                          slotRefMunmapId, Result.Ok ringSlotRep
+                                          msyncSlotFormal, Result.Ok ringSlotRep
+                                          kickSlotFormal, Result.Ok ringSlotRep
+                                          munmapSlotFormal, Result.Ok ringSlotRep
+                                          getSeqId, Result.Ok i32Rep
+                                          val42Id, Result.Ok i32Rep
+                                          setPayloadId, Result.Ok unitRep
+                                          msyncCallId, Result.Ok unitRep
+                                          kickCallId, Result.Ok unitRep
+                                          munmapCallId, Result.Ok unitRep
+                                          bodySeqId, Result.Ok i32Rep ] }
+                        Boundary =
+                            { baseGraph.Emission.Boundary with
+                                ByScope = Map.ofList [ modId, [ mmapDescId; msyncDescId; kickDescId; munmapDescId ] ]
+                                Imports =
+                                    Map.ofList
+                                        [ mmapDescId, mmapImport
+                                          msyncDescId, msyncImport
+                                          kickDescId, kickImport
+                                          munmapDescId, munmapImport ]
+                                Calls =
+                                    Map.ofList
+                                        [ mmapCallId, mmapCall
+                                          msyncCallId, msyncCall
+                                          kickCallId, kickCall
+                                          munmapCallId, munmapCall ]
+                                SharedBufferPlacements = Map.ofList [ plId, placement ]
+                                SharedBufferViewUses = Map.ofList [ getSeqId, viewUse ] } } }
+            |> declareTraversalReadings
+
+        let sharedIntegrityViolations =
+            Fidelity.PSG.Integrity.check graph
+            |> List.filter (fun v ->
+                v.Part.StartsWith("Emission.Boundary.SharedBufferPlacements")
+                || v.Part.StartsWith("Emission.Boundary.SharedBufferViewUses"))
+        Assert.Empty(sharedIntegrityViolations)
+
+        let expectedStructTy =
+            TStruct(
+                [ "Seq", TInt(IntWidth 32); "Payload", TInt(IntWidth 32) ],
+                Some { Offsets = [ 0; 4 ]; Size = 8; Align = 4 })
+
+        match Alex.Patterns.PlatformPatterns.boundaryImportsIn modId graph with
+        | Result.Error err -> Assert.Fail("Expected boundaryImportsIn to succeed, got: " + err)
+        | Result.Ok importOps ->
+            Assert.Equal(4, importOps.Length)
+            let expectedImportOps : MLIROp list =
+                [ MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(mmapImport, [ TInt(IntWidth 32) ], [ expectedStructTy ]))
+                  MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(msyncImport, [ expectedStructTy ], []))
+                  MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(kickImport, [ expectedStructTy ], []))
+                  MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(munmapImport, [ expectedStructTy ], [])) ]
+            Assert.Equal<MLIROp list>(expectedImportOps, importOps)
+            Assert.Equal(
+                Result.Ok ModuleText.NeedsTargetRealization,
+                Alex.Dialects.Core.Serialize.moduleText (Result.Ok 64) (Some "ring_imports") importOps)
+
+            match Alex.Patterns.PlatformPatterns.boundaryImportsAt modId graph.Emission.Boundary with
+            | Result.Error msg -> Assert.Contains("boundaryImportsIn", msg)
+            | Result.Ok _ -> Assert.Fail("Expected boundaryImportsAt to refuse shared-buffer revisions")
+
+            let boundaryScopeGraph =
+                { graph with
+                    Nodes = graph.Nodes.Remove modId
+                    SourceReadings =
+                        { graph.SourceReadings with
+                            Entries = [ { Focus = modId; Reason = SourceEntryReason.BoundaryScope; Context = [] } ] } }
+            let boundaryScopeAcc =
+                Alex.Traversal.NanopassArchitecture.executeNanopasses
+                    (Alex.Traversal.WitnessRegistry.createRegistry Alex.Target.CPU)
+                    boundaryScopeGraph
+                    (coeffects 64)
+            Assert.True(boundaryScopeAcc.BoundaryScopes.Contains modId)
+            Assert.Equal<MLIROp list>(expectedImportOps, List.rev boundaryScopeAcc.AllOps)
+
+        match runBoundaryCallAt mmapCallId graph with
+        | Result.Ok(([ MLIROp.BoundaryBufferCall(site, [ { Type = TInt(IntWidth 32) } ], [], [], [ { Type = acqTy } ]) ], TRValue { Type = retTy }), _) ->
+            Assert.Equal(mmapCallId, site)
+            Assert.Equal(expectedStructTy, acqTy)
+            Assert.Equal(expectedStructTy, retTy)
+        | Result.Ok _ -> Assert.Fail("Unexpected mmap_ring call witness operations")
+        | Result.Error err -> Assert.Fail("Expected mmap_ring call witness to succeed, got: " + err)
+
+        let mkAccWithSlot () =
+            let acc = MLIRAccumulator.empty ()
+            for (nid, ssa, ty) in
+                [ fdParamId, Arg 0, TInt(IntWidth 32)
+                  mmapFdArgId, Arg 0, TInt(IntWidth 32)
+                  slotBindId, V(2050, 0), expectedStructTy
+                  slotRefGetId, V(2050, 0), expectedStructTy
+                  slotRefSetId, V(2050, 0), expectedStructTy
+                  slotRefMsyncId, V(2050, 0), expectedStructTy
+                  slotRefKickId, V(2050, 0), expectedStructTy
+                  slotRefMunmapId, V(2050, 0), expectedStructTy
+                  val42Id, V(2057, 0), TInt(IntWidth 32) ] do
+                MLIRAccumulator.bindNode nid ssa ty acc
+            acc
+
+        let nodeAt (g: Revision) (nid: NodeId) =
+            Map.tryFind nid g.Nodes
+            |> Option.defaultWith (fun () -> failwith "Missing test node")
+
+        let runCallWithSlot site (g: Revision) =
+            let acc = mkAccWithSlot ()
+            matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus g (nodeAt g site)) 64 acc, acc
+
+        match fst (runCallWithSlot msyncCallId graph) with
+        | Result.Ok(([ MLIROp.BoundaryBufferCall(site, [ { SSA = V(2050, 0); Type = argTy } ], [], [], []) ], TRVoid), _) ->
+            Assert.Equal(msyncCallId, site)
+            Assert.Equal(expectedStructTy, argTy)
+        | Result.Ok _ -> Assert.Fail("Unexpected msync_ring call witness operations")
+        | Result.Error err -> Assert.Fail("Expected msync_ring call witness to succeed, got: " + err)
+
+        match fst (runCallWithSlot kickCallId graph) with
+        | Result.Ok(([ MLIROp.BoundaryBufferCall(site, [ { SSA = V(2050, 0); Type = argTy } ], [], [], []) ], TRVoid), _) ->
+            Assert.Equal(kickCallId, site)
+            Assert.Equal(expectedStructTy, argTy)
+        | Result.Ok _ -> Assert.Fail("Unexpected ring_kick call witness operations")
+        | Result.Error err -> Assert.Fail("Expected ring_kick call witness to succeed, got: " + err)
+
+        match fst (runCallWithSlot munmapCallId graph) with
+        | Result.Ok(([ MLIROp.BoundaryBufferCall(site, [ { SSA = V(2050, 0); Type = argTy } ], [], [], []) ], TRVoid), _) ->
+            Assert.Equal(munmapCallId, site)
+            Assert.Equal(expectedStructTy, argTy)
+        | Result.Ok _ -> Assert.Fail("Unexpected munmap_ring call witness operations")
+        | Result.Error err -> Assert.Fail("Expected munmap_ring call witness to succeed, got: " + err)
+
+        let runRecordNodeAt site (g: Revision) =
+            let acc = mkAccWithSlot ()
+            let scope = ref (Alex.Traversal.ScopeContext.ScopeContext.root ())
+            let visited = ref Set.empty
+            let targetNode = nodeAt g site
+            let ctx : WitnessContext =
+                { Coeffects = coeffects 64
+                  Accumulator = acc
+                  RootAccumulator = acc
+                  ScopeContext = scope
+                  RootScopeContext = scope
+                  Graph = g
+                  Zipper = focus g targetNode
+                  GlobalVisited = visited
+                  TraversalVisited = visited }
+            Alex.Witnesses.RecordWitness.nanopass.Witness ctx targetNode, acc
+
+        let assertRecordErrorSubstring (expectedSub: string) (site: NodeId) (g: Revision) =
+            let output, acc = runRecordNodeAt site g
+            Assert.Empty(output.InlineOps)
+            Assert.Empty(output.TopLevelOps)
+            Assert.True((MLIRAccumulator.recallNode site acc).IsNone)
+            match output.Result with
+            | TRError diag -> Assert.Contains(expectedSub, diag.Message)
+            | _ -> Assert.Fail("Expected RecordWitness error containing: " + expectedSub)
+
+        let assertCallErrorSubstring (expectedSub: string) (site: NodeId) (g: Revision) =
+            let res, acc = runCallWithSlot site g
+            Assert.True((MLIRAccumulator.recallNode site acc).IsNone)
+            match res with
+            | Result.Error msg -> Assert.Contains(expectedSub, msg)
+            | Result.Ok _ -> Assert.Fail("Expected pBoundaryCall error containing: " + expectedSub)
+
+        let getOutput, _ = runRecordNodeAt getSeqId graph
+        match getOutput.Result with
+        | TRError diag -> Assert.Fail("Expected FieldGet on shared buffer to succeed, got: " + diag.Message)
+        | _ -> ()
+        Assert.False(getOutput.InlineOps |> List.exists (function MLIROp.MemRefOp(MemRefOp.Alloca _) | MLIROp.MemRefOp(MemRefOp.Copy _) -> true | _ -> false))
+        match Alex.Dialects.Core.Serialize.moduleToString (Result.Ok 64) "get_view" getOutput.InlineOps with
+        | Result.Error err -> Assert.Fail("Expected get_view serialization to succeed: " + err)
+        | Result.Ok text ->
+            Assert.Contains("memref.view %v2050_0[", text)
+            Assert.Contains("memref<8xi8> to memref<1xi32>", text)
+            Assert.DoesNotContain("memref.alloca", text)
+
+        let setOutput, _ = runRecordNodeAt setPayloadId graph
+        match setOutput.Result with
+        | TRError diag -> Assert.Fail("Expected FieldSet on shared buffer to succeed, got: " + diag.Message)
+        | _ -> ()
+        Assert.False(setOutput.InlineOps |> List.exists (function MLIROp.MemRefOp(MemRefOp.Alloca _) | MLIROp.MemRefOp(MemRefOp.Copy _) -> true | _ -> false))
+        match Alex.Dialects.Core.Serialize.moduleToString (Result.Ok 64) "set_view" setOutput.InlineOps with
+        | Result.Error err -> Assert.Fail("Expected set_view serialization to succeed: " + err)
+        | Result.Ok text ->
+            Assert.Contains("memref.view %v2050_0[", text)
+            Assert.Contains("memref<8xi8> to memref<1xi32>", text)
+            Assert.DoesNotContain("memref.alloca", text)
+
+        // Mutant 1: Non-zero copy count (Copies = 1) must be refused fail-closed
+        let copiesMutantGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                SharedBufferViewUses = Map.ofList [ getSeqId, { viewUse with Copies = 1 } ] } } }
+        match Alex.Patterns.PlatformPatterns.boundaryImportsIn modId copiesMutantGraph with
+        | Result.Error msg -> Assert.Contains("Copies", msg)
+        | Result.Ok _ -> Assert.Fail("Expected boundaryImportsIn to refuse Copies = 1")
+        assertCallErrorSubstring "Copies" mmapCallId copiesMutantGraph
+        assertRecordErrorSubstring "Copies" getSeqId copiesMutantGraph
+
+        // Mutant 2: Missing FS9223 exclusivity obligation from CurrentClaims must be refused fail-closed
+        let missingObGraph =
+            { graph with
+                Nodes = graph.Nodes.Remove obExclusivityId
+                CurrentClaims = graph.CurrentClaims.Remove obExclusivityId }
+        match Alex.Patterns.PlatformPatterns.boundaryImportsIn modId missingObGraph with
+        | Result.Error msg -> Assert.Contains("obligations", msg)
+        | Result.Ok _ -> Assert.Fail("Expected boundaryImportsIn to refuse missing obligation")
+        assertCallErrorSubstring "obligations" mmapCallId missingObGraph
+        assertRecordErrorSubstring "obligations" setPayloadId missingObGraph
+
+        // Mutant 3: Swapped/wrong-placement obligation form in CurrentClaims must be refused fail-closed
+        let wrongPlacementBareOb =
+            { layoutBare with
+                Source = "platform:test-ring-platform:shared_buffer:other_placement"
+                Form = { layoutBare.Form with A = 3L } }
+        let wrongObInfo = mkOb wrongPlacementBareOb
+        let swappedObGraph =
+            { graph with
+                Obligations = [ wrongObInfo; obExtent; obSpace; obLifetime; obExclusivity ]
+                CurrentClaims = graph.CurrentClaims.Add(obLayoutId, wrongObInfo) }
+        assertCallErrorSubstring "obligations" mmapCallId swappedObGraph
+        assertRecordErrorSubstring "obligations" getSeqId swappedObGraph
+
+        // Mutant 4: Write projection on ReadOnly shared-buffer placement must be refused fail-closed
+        let readOnlyPlacement =
+            { placement with Space = { space with Access = BAREWire.Platform.Access.ReadOnly } }
+        let readOnlyMutantGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                SharedBufferPlacements = Map.ofList [ plId, readOnlyPlacement ] } } }
+        assertRecordErrorSubstring "ReadOnly" setPayloadId readOnlyMutantGraph
+
+        // Mutant 5: Read projection on WriteOnly shared-buffer placement must be refused fail-closed
+        let writeOnlyPlacement =
+            { placement with Space = { space with Access = BAREWire.Platform.Access.WriteOnly } }
+        let writeOnlyMutantGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                SharedBufferPlacements = Map.ofList [ plId, writeOnlyPlacement ] } } }
+        assertRecordErrorSubstring "WriteOnly" getSeqId writeOnlyMutantGraph
+
+        // Mutant 6: Write projection on a field-level ReadOnly field inside a ReadWrite placement must be refused
+        let f0, f1 =
+            match Array.toList structLayout.Layout.Fields with
+            | [ a; b ] -> a, b
+            | _ -> failwith "Unexpected structLayout field count"
+        let fieldReadOnlyStructLayout =
+            { structLayout with
+                Layout =
+                    { structLayout.Layout with
+                        Fields =
+                            [| f0
+                               { f1 with Access = BAREWire.Hardware.AccessKind.ReadOnly } |] } }
+        let fieldReadOnlyBarePlacement = { barePlacement with StructLayout = fieldReadOnlyStructLayout }
+        let fieldRoObs = BAREWire.Platform.Obligations.sharedBufferObligations desc [| fieldReadOnlyBarePlacement |]
+        let fieldRoExclInfo =
+            match Array.toList fieldRoObs with
+            | [ _; _; _; exclOb; _ ] -> mkOb exclOb
+            | _ -> failwith "Unexpected fieldRoObs count"
+        let fieldReadOnlyPlacement =
+            { placement with
+                Placement = fieldReadOnlyBarePlacement
+                DeclarationFacts = makePlacementDeclFacts 2070 fieldReadOnlyBarePlacement regionDesc space bufferSchema }
+        let fieldReadOnlyGraph =
+            { graph with
+                Nodes = graph.Nodes.Add(obExclusivityId, mkNode obExclusivityId unitType (SemanticKind.Obligation fieldRoExclInfo) [])
+                Obligations = [ obLayout; obExtent; obSpace; obLifetime; fieldRoExclInfo ]
+                CurrentClaims = graph.CurrentClaims.Add(obExclusivityId, fieldRoExclInfo)
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                SharedBufferPlacements = Map.ofList [ plId, fieldReadOnlyPlacement ] } } }
+        assertRecordErrorSubstring "violates ReadOnly permission" setPayloadId fieldReadOnlyGraph
+
+        // Mutant 7: Lifetime order violation (ReleaseOrder <= WriteProjectionOrders) must be refused fail-closed
+        let badOrderGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                SharedBufferViewUses = Map.ofList [ getSeqId, { viewUse with ReleaseOrder = Some 2 } ] } } }
+        assertCallErrorSubstring "order domination" munmapCallId badOrderGraph
+
+        // Mutant 8: Missing ReleaseOrder / RegionReleaseCall on LeakedAtExit = false must be refused fail-closed
+        let missingReleaseGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                SharedBufferViewUses =
+                                    Map.ofList [ getSeqId, { viewUse with RegionReleaseCall = None; ReleaseOrder = None } ] } } }
+        assertCallErrorSubstring "order domination" mmapCallId missingReleaseGraph
+
+        // Mutant 9: Unsynchronized foreign use call after write projection must be refused fail-closed
+        let unsyncGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                SharedBufferViewUses = Map.ofList [ getSeqId, { viewUse with SyncCalls = []; SyncOrders = [] } ] } } }
+        assertCallErrorSubstring "unbracketed foreign use" kickCallId unsyncGraph
+
+        // Mutant 10: Unregistered projection missing from ViewProjections must be refused fail-closed
+        let unregisteredProjGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                SharedBufferViewUses =
+                                    Map.ofList [ getSeqId, { viewUse with ViewProjections = []; ProjectionOrders = [] } ] } } }
+        assertRecordErrorSubstring "ViewProjections" getSeqId unregisteredProjGraph
+
+        // Mutant 11: Unlisted projection through a 2-hop alias chain must be refused fail-closed
+        let aliasBindId = id 2085
+        let aliasRefId = id 2086
+        let unlistedGetId = id 2087
+        let twoHopGraph =
+            { graph with
+                Nodes =
+                    graph.Nodes
+                        .Add(aliasBindId, mkNodeWithParent aliasBindId ringSlotType (SemanticKind.Binding("slotAlias", false, false, None)) [ slotRefGetId ] (Some bodySeqId))
+                        .Add(aliasRefId, mkNodeWithParent aliasRefId ringSlotType (SemanticKind.VarRef("slotAlias", Some aliasBindId)) [] (Some unlistedGetId))
+                        .Add(unlistedGetId, mkNodeWithParent unlistedGetId intType (SemanticKind.FieldGet(aliasRefId, "Seq")) [ aliasRefId ] (Some bodySeqId))
+                Emission =
+                    { graph.Emission with
+                        Callable =
+                            { graph.Emission.Callable with
+                                AliasTargets =
+                                    graph.Emission.Callable.AliasTargets
+                                        .Add(aliasBindId, slotRefGetId)
+                                        .Add(aliasRefId, aliasBindId)
+                                        .Add(unlistedGetId, unlistedGetId) }
+                        Numeric =
+                            { graph.Emission.Numeric with
+                                SourceTypes =
+                                    graph.Emission.Numeric.SourceTypes
+                                        .Add(aliasBindId, ringSlotType)
+                                        .Add(aliasRefId, ringSlotType)
+                                OccurrenceRepresentations =
+                                    graph.Emission.Numeric.OccurrenceRepresentations
+                                        .Add(aliasBindId, Result.Ok ringSlotRep)
+                                        .Add(aliasRefId, Result.Ok ringSlotRep)
+                                        .Add(unlistedGetId, Result.Ok i32Rep) } } }
+            |> declareTraversalReadings
+        let accTwoHop = mkAccWithSlot ()
+        MLIRAccumulator.bindNode aliasBindId (V(2085, 0)) expectedStructTy accTwoHop
+        MLIRAccumulator.bindNode aliasRefId (V(2086, 0)) expectedStructTy accTwoHop
+        let scopeTwoHop = ref (Alex.Traversal.ScopeContext.ScopeContext.root ())
+        let visitedTwoHop = ref Set.empty
+        let unlistedGetTargetNode = nodeAt twoHopGraph unlistedGetId
+        let ctxTwoHop : WitnessContext =
+            { Coeffects = coeffects 64
+              Accumulator = accTwoHop
+              RootAccumulator = accTwoHop
+              ScopeContext = scopeTwoHop
+              RootScopeContext = scopeTwoHop
+              Graph = twoHopGraph
+              Zipper = focus twoHopGraph unlistedGetTargetNode
+              GlobalVisited = visitedTwoHop
+              TraversalVisited = visitedTwoHop }
+        let outTwoHop = Alex.Witnesses.RecordWitness.nanopass.Witness ctxTwoHop unlistedGetTargetNode
+        Assert.Empty(outTwoHop.InlineOps)
+        Assert.Empty(outTwoHop.TopLevelOps)
+        Assert.Empty(Alex.Traversal.ScopeContext.ScopeContext.getOps (!scopeTwoHop))
+        Assert.Equal(None, MLIRAccumulator.recallNode unlistedGetId accTwoHop)
+        match outTwoHop.Result with
+        | TRError diag -> Assert.Contains("Shared-buffer read projection at node", diag.Message)
+        | _ -> Assert.Fail("Expected 2-hop unlisted projection on shared buffer to be refused")
+
+        // Mutant 12: Shared-buffer call tampered with call.Resource = Some ... must be refused fail-closed
+        let tamperedResourceCall =
+            { msyncCall with
+                Resource =
+                    Some(
+                        BoundaryResourceUse.ReleaseOwned
+                            { Declaration = plId
+                              Acquisition = mmapCallId
+                              Cleanup = obLifetimeId }) }
+        let tamperedResourceGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                Calls = graph.Emission.Boundary.Calls.Add(msyncCallId, tamperedResourceCall) } } }
+        assertCallErrorSubstring "cannot carry resource lifetime adaptation" msyncCallId tamperedResourceGraph
+
+        // Mutant 13: RecordExpr copy-with from a zero-copy shared-buffer origin must be refused fail-closed
+        let copyWithId = id 2090
+        let copyWithNode =
+            mkNode copyWithId ringSlotType (SemanticKind.RecordExpr([ "Payload", val42Id ], Some slotRefGetId)) [ slotRefGetId; val42Id ]
+        let copyWithGraph =
+            { graph with
+                Nodes = graph.Nodes.Add(copyWithId, copyWithNode)
+                Codata = { graph.Codata with Escapes = Map.ofList [ copyWithId, EscapeKind.StackScoped ] }
+                Emission =
+                    { graph.Emission with
+                        Callable = { graph.Emission.Callable with AliasTargets = graph.Emission.Callable.AliasTargets.Add(copyWithId, copyWithId) }
+                        Numeric =
+                            { graph.Emission.Numeric with
+                                SourceTypes = graph.Emission.Numeric.SourceTypes.Add(copyWithId, ringSlotType)
+                                OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Add(copyWithId, Result.Ok ringSlotRep) } } }
+            |> declareTraversalReadings
+        assertRecordErrorSubstring "Shared-buffer view cannot be copied via record copy-and-update" copyWithId copyWithGraph
+
+        // Mutant 14: TupleExpr capturing a zero-copy shared-buffer origin must be refused fail-closed
+        let tupleCaptureId = id 2091
+        let tupleType =
+            TypeIdentity.Tuple(false, [ ringSlotType; intType ])
+        let tupleRep =
+            ValueRepresentation.Record(
+                [ "Item1", ringSlotRep; "Item2", i32Rep ],
+                Some([ 0; 8 ], 16, 4))
+        let tupleCaptureNode =
+            mkNode tupleCaptureId tupleType (SemanticKind.TupleExpr [ slotRefGetId; val42Id ]) [ slotRefGetId; val42Id ]
+        let tupleCaptureGraph =
+            { graph with
+                Nodes = graph.Nodes.Add(tupleCaptureId, tupleCaptureNode)
+                Emission =
+                    { graph.Emission with
+                        Numeric =
+                            { graph.Emission.Numeric with
+                                TypeRepresentations = graph.Emission.Numeric.TypeRepresentations.Add(tupleType, Result.Ok tupleRep)
+                                OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Add(tupleCaptureId, Result.Ok tupleRep) } } }
+            |> declareTraversalReadings
+        assertRecordErrorSubstring "Shared-buffer view cannot be captured as a tuple element" tupleCaptureId tupleCaptureGraph
+
+        // Mutant 15: Mutable binding capturing a zero-copy shared-buffer origin must be refused fail-closed
+        let mutBindId = id 2092
+        let mutBindNode =
+            mkNode mutBindId ringSlotType (SemanticKind.Binding("mutSlot", true, false, None)) [ slotRefGetId ]
+        let mutBindGraph =
+            { graph with
+                Nodes = graph.Nodes.Add(mutBindId, mutBindNode)
+                Emission =
+                    { graph.Emission with
+                        Numeric =
+                            { graph.Emission.Numeric with
+                                SourceTypes = graph.Emission.Numeric.SourceTypes.Add(mutBindId, ringSlotType)
+                                OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Add(mutBindId, Result.Ok ringSlotRep) } } }
+            |> declareTraversalReadings
+        let accMut = mkAccWithSlot ()
+        let scopeMut = ref (Alex.Traversal.ScopeContext.ScopeContext.root ())
+        let visitedMut = ref Set.empty
+        let mutBindTargetNode = nodeAt mutBindGraph mutBindId
+        let ctxMut : WitnessContext =
+            { Coeffects = coeffects 64
+              Accumulator = accMut
+              RootAccumulator = accMut
+              ScopeContext = scopeMut
+              RootScopeContext = scopeMut
+              Graph = mutBindGraph
+              Zipper = focus mutBindGraph mutBindTargetNode
+              GlobalVisited = visitedMut
+              TraversalVisited = visitedMut }
+        let outMut = Alex.Witnesses.BindingWitness.nanopass.Witness ctxMut mutBindTargetNode
+        Assert.Empty(outMut.InlineOps)
+        Assert.Empty(outMut.TopLevelOps)
+        Assert.Empty(Alex.Traversal.ScopeContext.ScopeContext.getOps (!scopeMut))
+        Assert.Equal(None, MLIRAccumulator.recallNode mutBindId accMut)
+        match outMut.Result with
+        | TRError diag -> Assert.Contains("Shared-buffer view cannot be bound to a mutable cell", diag.Message)
+        | _ -> Assert.Fail("Expected mutable binding of shared-buffer view to be refused")
+
+        // Mutant 16: FnPtr.ofExtern / nativeEntrySlotType and pImportedFunctionAddress on a shared-buffer import must be refused fail-closed
+        Assert.True(Alex.Dialects.Core.Types.BoundaryAbi.isSharedBufferImport graph mmapImport)
+        Assert.True(Alex.Dialects.Core.Types.BoundaryAbi.isSharedBufferImport graph msyncImport)
+        Assert.True(Alex.Dialects.Core.Types.BoundaryAbi.isSharedBufferImport graph kickImport)
+        Assert.True(Alex.Dialects.Core.Types.BoundaryAbi.isSharedBufferImport graph munmapImport)
+        let formationId = id 2093
+        let fnPtrCalleeId = id 2094
+        let loadingId = id 2095
+        let fnPtrCtor : ConstructorIdentity =
+            { Declaration = { Module = []; Name = "FnPtr" }
+              Parameters = [ TypeParamKind.Type ]
+              NativeKind = Some NTUKind.NTUfnptr }
+        let msyncFnType = functionFrom ringSlotType unitType
+        let msyncFnPtrType = TypeIdentity.Application(fnPtrCtor, [ msyncFnType ])
+        let mmapFnType = functionFrom intType ringSlotType
+        let mmapFnPtrType = TypeIdentity.Application(fnPtrCtor, [ mmapFnType ])
+        let linkContract : BAREWire.Platform.ProcessLinkContract =
+            { Identity = "ring-process-link"
+              Version = "1"
+              Source = "test"
+              Library = "ring"
+              Runtime = "libc"
+              Os = "linux"
+              Arch = "x86_64"
+              LoadAt = "ProcessStartup"
+              LiveUntil = "ProcessTermination"
+              Unloading = "Forbidden"
+              ExportedLibrary = "Forbidden" }
+        let loadingRow : BoundaryLoading =
+            { Identity = loadingId
+              Binding = loadingId
+              Platform = loadingId
+              Core = loadingId
+              Selector = "linux-x86_64"
+              Contract = linkContract
+              DeclarationFacts = Map.empty
+              Participants = Set.singleton loadingId }
+        let entryRow : BoundaryEntry =
+            { Formation = formationId
+              Declaration = msyncDeclId
+              Import = msyncDescId
+              Operand = msyncCalleeId
+              Loading = loadingId
+              SourceType = msyncFnPtrType
+              Transport = Set.ofList [ formationId; msyncCalleeId; msyncDeclId ]
+              Participants = Set.ofList [ formationId; msyncCalleeId; msyncDeclId; loadingId ] }
+        let storageEntry : ProgramStorageEntry =
+            { Identity = ProgramStorageIdentity.BindingSlot formationId
+              SourceType = msyncFnPtrType
+              Shape = ProgramStorageShape.NativeEntry formationId
+              Bytes = 8
+              Alignment = 8
+              SpaceNode = spaceNodeId
+              Space = space
+              Participants = Set.singleton formationId }
+        let fnPtrGraph =
+            { graph with
+                Nodes =
+                    graph.Nodes
+                        .Add(fnPtrCalleeId, mkNode fnPtrCalleeId unitType (SemanticKind.Intrinsic { Module = IntrinsicModule.FnPtr; Operation = "ofExtern"; Category = IntrinsicCategory.Memory; FullName = "FnPtr.ofExtern" }) [])
+                        .Add(formationId, mkNode formationId msyncFnPtrType (SemanticKind.Application(fnPtrCalleeId, [ msyncCalleeId ])) [ fnPtrCalleeId; msyncCalleeId ])
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                Loading = Some loadingRow
+                                Entries = Map.ofList [ formationId, entryRow ] } } }
+            |> declareTraversalReadings
+        match Alex.CodeGeneration.TypeMapping.nativeEntrySlotType fnPtrGraph storageEntry with
+        | Result.Error msg -> Assert.Contains("Resource-bearing imports require a direct source call", msg)
+        | Result.Ok _ -> Assert.Fail("Expected nativeEntrySlotType to refuse shared-buffer import")
+        let accFnPtr = mkAccWithSlot ()
+        let fnPtrRes =
+            matchAt
+                (Alex.Patterns.PlatformPatterns.pImportedFunctionAddress formationId)
+                (focus fnPtrGraph (nodeAt fnPtrGraph formationId))
+                64
+                accFnPtr
+        Assert.Empty(accFnPtr.AllOps)
+        Assert.Equal(None, MLIRAccumulator.recallNode formationId accFnPtr)
+        match fnPtrRes with
+        | Result.Error msg -> Assert.Contains("Resource-bearing imports require a direct source call", msg)
+        | Result.Ok _ -> Assert.Fail("Expected pImportedFunctionAddress to refuse shared-buffer import")
+
+        let mmapEntryRow : BoundaryEntry =
+            { Formation = formationId
+              Declaration = mmapDeclId
+              Import = mmapDescId
+              Operand = mmapCalleeId
+              Loading = loadingId
+              SourceType = mmapFnPtrType
+              Transport = Set.ofList [ formationId; mmapCalleeId; mmapDeclId ]
+              Participants = Set.ofList [ formationId; mmapCalleeId; mmapDeclId; loadingId ] }
+        let mmapStorageEntry : ProgramStorageEntry =
+            { storageEntry with SourceType = mmapFnPtrType }
+        let mmapFnPtrGraph =
+            { graph with
+                Nodes =
+                    graph.Nodes
+                        .Add(fnPtrCalleeId, mkNode fnPtrCalleeId unitType (SemanticKind.Intrinsic { Module = IntrinsicModule.FnPtr; Operation = "ofExtern"; Category = IntrinsicCategory.Memory; FullName = "FnPtr.ofExtern" }) [])
+                        .Add(formationId, mkNode formationId mmapFnPtrType (SemanticKind.Application(fnPtrCalleeId, [ mmapCalleeId ])) [ fnPtrCalleeId; mmapCalleeId ])
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                Loading = Some loadingRow
+                                Entries = Map.ofList [ formationId, mmapEntryRow ] } } }
+            |> declareTraversalReadings
+        match Alex.CodeGeneration.TypeMapping.nativeEntrySlotType mmapFnPtrGraph mmapStorageEntry with
+        | Result.Error msg -> Assert.Contains("Resource-bearing imports require a direct source call", msg)
+        | Result.Ok _ -> Assert.Fail("Expected nativeEntrySlotType to refuse shared-buffer acquisition import (mmapImport)")
+        let accMmapFnPtr = mkAccWithSlot ()
+        let mmapFnPtrRes =
+            matchAt
+                (Alex.Patterns.PlatformPatterns.pImportedFunctionAddress formationId)
+                (focus mmapFnPtrGraph (nodeAt mmapFnPtrGraph formationId))
+                64
+                accMmapFnPtr
+        Assert.Empty(accMmapFnPtr.AllOps)
+        Assert.Equal(None, MLIRAccumulator.recallNode formationId accMmapFnPtr)
+        match mmapFnPtrRes with
+        | Result.Error msg -> Assert.Contains("Resource-bearing imports require a direct source call", msg)
+        | Result.Ok _ -> Assert.Fail("Expected pImportedFunctionAddress to refuse shared-buffer acquisition import (mmapImport)")
+
+        // Mutant 17 (GA-A5-R2-1): Unlisted foreign import taking RingSlot must be refused by boundaryImportsIn,
+        // while a 2-placement RingSlot graph with distinct RegionDescriptor role bindings succeeds
+        let unlistedDeclId = id 2096
+        let unlistedDescId = id 2097
+        let unlistedFormalId = id 2098
+        let unlistedImport = mkSlotImport unlistedDescId unlistedDeclId unlistedFormalId "unlistedFn" "unlisted_c"
+        let unlistedImportGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Callable =
+                            { graph.Emission.Callable with
+                                Symbols =
+                                    graph.Emission.Callable.Symbols.Add(
+                                        unlistedDeclId,
+                                        CallableSymbolName.ModuleBinding("RingMod", "unlistedFn")) }
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                ByScope =
+                                    Map.ofList
+                                        [ modId, [ mmapDescId; msyncDescId; kickDescId; munmapDescId; unlistedDescId ] ]
+                                Imports = graph.Emission.Boundary.Imports.Add(unlistedDescId, unlistedImport) } } }
+        match Alex.Patterns.PlatformPatterns.boundaryImportsIn modId unlistedImportGraph with
+        | Result.Error msg -> Assert.Contains("without a valid non-null shared-buffer consumer role", msg)
+        | Result.Ok _ -> Assert.Fail("Expected boundaryImportsIn to refuse unlisted foreign import taking RingSlot")
+
+        let extraHandleFormalId = id 2099
+        let unlistedDualHandleImport : BoundaryImport =
+            { unlistedImport with
+                Parameters =
+                    [ extraHandleFormalId, BoundaryScalar.ResourceHandle(extraHandleFormalId, false)
+                      unlistedFormalId, BoundaryScalar.ResourceHandle(unlistedFormalId, false) ]
+                Participants = Set.add extraHandleFormalId unlistedImport.Participants
+                SourceTypes = unlistedImport.SourceTypes.Add(extraHandleFormalId, intType)
+                DeclarationFacts =
+                    unlistedImport.DeclarationFacts.Add(
+                        extraHandleFormalId,
+                        { emptyFact "binding" with SourceType = intType }) }
+        let unlistedDualHandleGraph =
+            { unlistedImportGraph with
+                Emission =
+                    { unlistedImportGraph.Emission with
+                        Boundary =
+                            { unlistedImportGraph.Emission.Boundary with
+                                Imports = graph.Emission.Boundary.Imports.Add(unlistedDescId, unlistedDualHandleImport) } } }
+        match Alex.Patterns.PlatformPatterns.boundaryImportsIn modId unlistedDualHandleGraph with
+        | Result.Error msg -> Assert.Contains("without a valid non-null shared-buffer consumer role", msg)
+        | Result.Ok _ -> Assert.Fail("Expected boundaryImportsIn to refuse unlisted dual-handle import taking (h: Handle, slot: RingSlot)")
+
+        let pl2Id = id 2200
+        let pl2DeclId = id 2201
+        let space2NodeId = id 2202
+        let buf2NodeId = id 2203
+        let space2DescNodeId = id 2204
+        let struct2DescNodeId = id 2205
+        let view2DescNodeId = id 2206
+        let region2DescNodeId = id 2207
+        let ob2LayoutId = id 2210
+        let ob2ExtentId = id 2211
+        let ob2LifetimeId = id 2212
+        let ob2ExclusivityId = id 2213
+        let mmap2DeclId = id 2220
+        let mmap2DescId = id 2221
+        let mmap2FdFormal = id 2222
+        let msync2DeclId = id 2230
+        let msync2DescId = id 2231
+        let msync2SlotFormal = id 2232
+        let kick2DeclId = id 2240
+        let kick2DescId = id 2241
+        let kick2SlotFormal = id 2242
+        let munmap2DeclId = id 2250
+        let munmap2DescId = id 2251
+        let munmap2SlotFormal = id 2252
+        let barePlacement2 =
+            { barePlacement with
+                Name = "ring_slot_aux"
+                SpaceOffset = 64L }
+        let regionDesc2 : BAREWire.Descriptors.SharedBufferRegionDescriptor =
+            { Placement = "ring_slot_aux"
+              Acquire = "RingMod.mmapRingAux"
+              Release = Some "RingMod.munmapRingAux"
+              Sync = [| "RingMod.msyncRingAux" |]
+              ForeignUses = [| "RingMod.ringKickAux" |] }
+        let rawObs2 = BAREWire.Platform.Obligations.sharedBufferObligations desc [| barePlacement; barePlacement2 |]
+        let ob1Extent, ob1Layout, ob1Lifetime, ob1Exclusivity, ob2Extent, ob2Layout, ob2Lifetime, ob2Exclusivity, obBothSpace =
+            match Array.toList rawObs2 with
+            | [ r0; r1; r2; r3; r4; r5; r6; r7; r8 ] ->
+                mkOb r0, mkOb r1, mkOb r2, mkOb r3, mkOb r4, mkOb r5, mkOb r6, mkOb r7, mkOb r8
+            | _ -> failwith "Unexpected 2-placement shared-buffer obligation count"
+        let placement1ForTwo =
+            { placement with
+                Obligations = [ obLayoutId; obExtentId; obSpaceId; obLifetimeId; obExclusivityId ] }
+        let placement2Participants =
+            [ 2200 .. 2207 ]
+            |> List.mapi (fun idx nid -> { Role = ParticipantRole.Site; Node = NodeId nid; Ordinal = idx; Group = pl2Id })
+        let placement2 : BoundarySharedBufferPlacementDeclaration =
+            { Identity = pl2Id
+              Declaration = pl2DeclId
+              SpaceNode = space2NodeId
+              BufferSchemaNode = buf2NodeId
+              SpaceDescriptorNode = space2DescNodeId
+              StructDescriptorNode = struct2DescNodeId
+              ViewDescriptorNode = view2DescNodeId
+              RegionDescriptorNode = region2DescNodeId
+              Placement = barePlacement2
+              RegionDescriptor = regionDesc2
+              Space = space
+              BufferSchema = bufferSchema
+              PlatformEndianness = "little"
+              Obligations = [ ob2LayoutId; ob2ExtentId; obSpaceId; ob2LifetimeId; ob2ExclusivityId ]
+              DeclarationFacts = makePlacementDeclFacts 2200 barePlacement2 regionDesc2 space bufferSchema
+              Participants = ParticipantEvidence.Established placement2Participants }
+        let mmap2Import : BoundaryImport =
+            { Identity = mmap2DescId; Binding = mmap2DeclId; Scope = modId
+              Library = "ring"; Symbol = "mmap_ring_aux"; CallingConvention = "CDecl"
+              DeclarationPath = [ modId; mmap2DeclId ]
+              Parameters = [ mmap2FdFormal, BoundaryScalar.Integer(32, true) ]
+              Result = Some(BoundaryScalar.Integer(64, false))
+              Participants = Set.ofList [ modId; mmap2DeclId; mmap2DescId; mmap2FdFormal ]
+              SourceTypes = Map.ofList [ mmap2DeclId, functionFrom intType ringSlotType; mmap2FdFormal, intType ]
+              DeclarationFacts =
+                Map.ofList
+                    [ mmap2DeclId, mkImportBindingFact "mmapRingAux" (functionFrom intType ringSlotType)
+                      mmap2FdFormal, { emptyFact "binding" with SourceType = intType } ] }
+        let msync2Import = mkSlotImport msync2DescId msync2DeclId msync2SlotFormal "msyncRingAux" "msync_ring_aux"
+        let kick2Import = mkSlotImport kick2DescId kick2DeclId kick2SlotFormal "ringKickAux" "ring_kick_aux"
+        let munmap2Import = mkSlotImport munmap2DescId munmap2DeclId munmap2SlotFormal "munmapRingAux" "munmap_ring_aux"
+        let platformPremise2 =
+            { platformPremise with SharedBufferRegions = [ regionDesc; regionDesc2 ] }
+        let boundaryDomain2 =
+            { boundaryDomain with Platform = Some platformPremise2 }
+        let domainEdge2 : Hyperedge =
+            { domainEdge with Role = EdgeRole.BoundaryDomain boundaryDomain2 }
+        let twoPlacementGraph =
+            { graph with
+                Edges = [ domainEdge2 ]
+                Nodes =
+                    graph.Nodes
+                        .Add(obLayoutId, mkNode obLayoutId unitType (SemanticKind.Obligation ob1Layout) [])
+                        .Add(obExtentId, mkNode obExtentId unitType (SemanticKind.Obligation ob1Extent) [])
+                        .Add(obSpaceId, mkNode obSpaceId unitType (SemanticKind.Obligation obBothSpace) [])
+                        .Add(obLifetimeId, mkNode obLifetimeId unitType (SemanticKind.Obligation ob1Lifetime) [])
+                        .Add(obExclusivityId, mkNode obExclusivityId unitType (SemanticKind.Obligation ob1Exclusivity) [])
+                        .Add(ob2LayoutId, mkNode ob2LayoutId unitType (SemanticKind.Obligation ob2Layout) [])
+                        .Add(ob2ExtentId, mkNode ob2ExtentId unitType (SemanticKind.Obligation ob2Extent) [])
+                        .Add(ob2LifetimeId, mkNode ob2LifetimeId unitType (SemanticKind.Obligation ob2Lifetime) [])
+                        .Add(ob2ExclusivityId, mkNode ob2ExclusivityId unitType (SemanticKind.Obligation ob2Exclusivity) [])
+                Obligations =
+                    [ ob1Layout; ob1Extent; obBothSpace; ob1Lifetime; ob1Exclusivity
+                      ob2Layout; ob2Extent; ob2Lifetime; ob2Exclusivity ]
+                CurrentClaims =
+                    Map.ofList
+                        [ obLayoutId, ob1Layout
+                          obExtentId, ob1Extent
+                          obSpaceId, obBothSpace
+                          obLifetimeId, ob1Lifetime
+                          obExclusivityId, ob1Exclusivity
+                          ob2LayoutId, ob2Layout
+                          ob2ExtentId, ob2Extent
+                          ob2LifetimeId, ob2Lifetime
+                          ob2ExclusivityId, ob2Exclusivity ]
+                Emission =
+                    { graph.Emission with
+                        Callable =
+                            { graph.Emission.Callable with
+                                Symbols =
+                                    graph.Emission.Callable.Symbols
+                                        .Add(mmap2DeclId, CallableSymbolName.ModuleBinding("RingMod", "mmapRingAux"))
+                                        .Add(msync2DeclId, CallableSymbolName.ModuleBinding("RingMod", "msyncRingAux"))
+                                        .Add(kick2DeclId, CallableSymbolName.ModuleBinding("RingMod", "ringKickAux"))
+                                        .Add(munmap2DeclId, CallableSymbolName.ModuleBinding("RingMod", "munmapRingAux")) }
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                ByScope =
+                                    Map.ofList
+                                        [ modId,
+                                          [ mmapDescId; msyncDescId; kickDescId; munmapDescId
+                                            mmap2DescId; msync2DescId; kick2DescId; munmap2DescId ] ]
+                                Imports =
+                                    graph.Emission.Boundary.Imports
+                                        .Add(mmap2DescId, mmap2Import)
+                                        .Add(msync2DescId, msync2Import)
+                                        .Add(kick2DescId, kick2Import)
+                                        .Add(munmap2DescId, munmap2Import)
+                                SharedBufferPlacements =
+                                    Map.ofList
+                                        [ plId, placement1ForTwo
+                                          pl2Id, placement2 ] } } }
+            |> declareTraversalReadings
+        match Alex.Patterns.PlatformPatterns.boundaryImportsIn modId twoPlacementGraph with
+        | Result.Error err -> Assert.Fail("Expected 2-placement RingSlot boundaryImportsIn to succeed, got: " + err)
+        | Result.Ok twoPlacementOps ->
+            Assert.Equal(8, twoPlacementOps.Length)
+            Assert.Contains(
+                MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(mmap2Import, [ TInt(IntWidth 32) ], [ expectedStructTy ])),
+                twoPlacementOps)
+
+        let wrongPlacementRoleCall =
+            mkSlotCall msyncCallId msync2DescId msyncCalleeId slotRefMsyncId msync2SlotFormal
+        let wrongPlacementRoleGraph =
+            { twoPlacementGraph with
+                Emission =
+                    { twoPlacementGraph.Emission with
+                        Boundary =
+                            { twoPlacementGraph.Emission.Boundary with
+                                Calls = twoPlacementGraph.Emission.Boundary.Calls.Add(msyncCallId, wrongPlacementRoleCall) } } }
+        match Alex.Patterns.PlatformPatterns.boundaryImportsIn modId wrongPlacementRoleGraph with
+        | Result.Error msg -> Assert.Contains("RegionDescriptor", msg)
+        | Result.Ok _ -> Assert.Fail("Expected boundaryImportsIn to refuse msync2Import called in placement 1's SyncCalls")
+        assertCallErrorSubstring "RegionDescriptor" msyncCallId wrongPlacementRoleGraph
+
+        // Mutant 18 (GA-A5-R2-2): Ordinary stack record with identical ValueRepresentation but distinct nominal TypeIdentity
+        // must succeed in FieldGet, FieldSet, and RecordExpr without false-positive shared-buffer refusal
+        let ordinaryPairType =
+            TypeIdentity.Application(
+                { Declaration = { Module = [ "RingMod" ]; Name = "OrdinaryPair" }
+                  Parameters = []
+                  NativeKind = None },
+                [])
+        let ordOrigId = id 2350
+        let ordGetId = id 2351
+        let ordSetId = id 2352
+        let ordRecId = id 2353
+        let ordinaryGraph =
+            { graph with
+                Nodes =
+                    graph.Nodes
+                        .Add(ordOrigId, mkNode ordOrigId ordinaryPairType (SemanticKind.PatternBinding "ord") [])
+                        .Add(ordGetId, mkNode ordGetId intType (SemanticKind.FieldGet(ordOrigId, "Seq")) [ ordOrigId ])
+                        .Add(ordSetId, mkNode ordSetId unitType (SemanticKind.FieldSet(ordOrigId, "Payload", val42Id)) [ ordOrigId; val42Id ])
+                        .Add(ordRecId, mkNode ordRecId ordinaryPairType (SemanticKind.RecordExpr([ "Seq", val42Id; "Payload", val42Id ], None)) [ val42Id; val42Id ])
+                Codata = { graph.Codata with Escapes = Map.ofList [ ordRecId, EscapeKind.StackScoped ] }
+                Emission =
+                    { graph.Emission with
+                        Callable =
+                            { graph.Emission.Callable with
+                                AliasTargets =
+                                    graph.Emission.Callable.AliasTargets
+                                        .Add(ordOrigId, ordOrigId)
+                                        .Add(ordGetId, ordGetId)
+                                        .Add(ordSetId, ordSetId)
+                                        .Add(ordRecId, ordRecId) }
+                        Numeric =
+                            { graph.Emission.Numeric with
+                                SourceTypes =
+                                    graph.Emission.Numeric.SourceTypes
+                                        .Add(ordOrigId, ordinaryPairType)
+                                        .Add(ordGetId, intType)
+                                        .Add(ordSetId, unitType)
+                                        .Add(ordRecId, ordinaryPairType)
+                                Layouts = graph.Emission.Numeric.Layouts.Add(ordinaryPairType, ringSlotLayout)
+                                TypeRepresentations = graph.Emission.Numeric.TypeRepresentations.Add(ordinaryPairType, Result.Ok ringSlotRep)
+                                OccurrenceRepresentations =
+                                    graph.Emission.Numeric.OccurrenceRepresentations
+                                        .Add(ordOrigId, Result.Ok ringSlotRep)
+                                        .Add(ordGetId, Result.Ok i32Rep)
+                                        .Add(ordSetId, Result.Ok unitRep)
+                                        .Add(ordRecId, Result.Ok ringSlotRep) } } }
+            |> declareTraversalReadings
+        Assert.False(Alex.Dialects.Core.Types.BoundaryAbi.isSharedBufferOrigin ordinaryGraph ordOrigId)
+        let runOrdinaryRecordAt site =
+            let accOrd = mkAccWithSlot ()
+            MLIRAccumulator.bindNode ordOrigId (V(2350, 0)) expectedStructTy accOrd
+            let scopeOrd = ref (Alex.Traversal.ScopeContext.ScopeContext.root ())
+            let visitedOrd = ref Set.empty
+            let ordTargetNode = nodeAt ordinaryGraph site
+            let ctxOrd : WitnessContext =
+                { Coeffects = coeffects 64
+                  Accumulator = accOrd
+                  RootAccumulator = accOrd
+                  ScopeContext = scopeOrd
+                  RootScopeContext = scopeOrd
+                  Graph = ordinaryGraph
+                  Zipper = focus ordinaryGraph ordTargetNode
+                  GlobalVisited = visitedOrd
+                  TraversalVisited = visitedOrd }
+            Alex.Witnesses.RecordWitness.nanopass.Witness ctxOrd ordTargetNode
+        let ordGetOut = runOrdinaryRecordAt ordGetId
+        match ordGetOut.Result with
+        | TRError diag -> Assert.Fail("Expected ordinary record FieldGet to succeed, got: " + diag.Message)
+        | _ -> Assert.NotEmpty(ordGetOut.InlineOps)
+        let ordSetOut = runOrdinaryRecordAt ordSetId
+        match ordSetOut.Result with
+        | TRError diag -> Assert.Fail("Expected ordinary record FieldSet to succeed, got: " + diag.Message)
+        | _ -> Assert.NotEmpty(ordSetOut.InlineOps)
+        let ordRecOut = runOrdinaryRecordAt ordRecId
+        match ordRecOut.Result with
+        | TRError diag -> Assert.Fail("Expected ordinary record RecordExpr to succeed, got: " + diag.Message)
+        | _ -> Assert.NotEmpty(ordRecOut.InlineOps)

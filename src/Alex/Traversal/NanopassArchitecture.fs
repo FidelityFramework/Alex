@@ -375,7 +375,7 @@ let runAllNanopasses
                     refuse entry.Focus "boundary owner" "The source boundary entry has no assigned import plan."
                     importedScopes
                 else
-                    match Alex.Patterns.PlatformPatterns.boundaryImportsAt entry.Focus boundary with
+                    match Alex.Patterns.PlatformPatterns.boundaryImportsIn entry.Focus graph with
                     | Result.Error reason ->
                         refuse entry.Focus "boundary owner" reason
                         importedScopes

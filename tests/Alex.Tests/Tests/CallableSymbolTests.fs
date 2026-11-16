@@ -928,8 +928,9 @@ let private conditionalOptionalBoundaryFixture reversed =
       cbLambda.Id, premise "lambda" ["RegularClosure"; "x"] [1I; 0I; 0I] [cbFormal.Id; cbBody.Id] [cbFormal.Id; cbBody.Id] (Some cbBinding.Id) ordinarySig [intType] true ]
   let target : BoundaryPlatformPremise =
     { Id = "alex-conditional-optional-entry"; Description = None; LibraryPath = None; Loading = None; SourcePaths = Set.singleton range.File
-      Architecture = Some "x86_64"; OS = Some "linux"; RuntimeClaim = Some RuntimeModel.Libc; Substrate = Some SubstrateKind.CPU
-      Dimensions = Map.ofList ["Pointer", 64; "Register", 64]; Representations = Map.empty; EndpointReturns = Map.empty }
+      Architecture = Some "x86_64"; OS = Some "linux"; Endianness = None; RuntimeClaim = Some RuntimeModel.Libc; Substrate = Some SubstrateKind.CPU
+      Dimensions = Map.ofList ["Pointer", 64; "Register", 64]; Representations = Map.empty; EndpointReturns = Map.empty
+      Spaces = []; Buffers = []; SharedBufferRegions = [] }
   let contract : CallableContract =
     { Identity = cbLambda.Id; Kind = CallableKind.NativeEntry
       Convention = CallableConvention.CompilerOwnedPortable {

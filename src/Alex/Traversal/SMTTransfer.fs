@@ -27,6 +27,20 @@ open Alex.Dialects.Core.Types
 open Alex.Dialects.Core.Serialize
 open Fidelity.PSG
 
+type private SharedTerm =
+    | STVar of string
+    | STConst of int64
+    | STAdd of SharedTerm * SharedTerm
+    | STMul of SharedTerm * SharedTerm
+    | STMod of SharedTerm * SharedTerm
+
+type private SharedPred =
+    | SPEq of SharedTerm * SharedTerm
+    | SPCmp of SMTCmpPred * SharedTerm * SharedTerm
+    | SPAnd of SharedPred list
+    | SPOr of SharedPred list
+    | SPNot of SharedPred
+
 /// Transcribe one obligation into an isolated smt.solver scope.
 /// SSA numbering is fresh per scope (solver regions are isolated).
 let private scope (ob: ObligationInfo) : Result<MLIROp list, string> =
@@ -205,10 +219,430 @@ let private scope (ob: ObligationInfo) : Result<MLIROp list, string> =
         let body = (clauses |> List.collect snd) @ [ smt (SMTAnd(conjunction, List.map fst clauses)) ]
         anchor conjunction body
 
+    let sharedBufferObligation (bareOb: BAREWire.Platform.Obligation) : Result<MLIROp list, string> =
+        if ob.Id <> bareOb.Id || ob.Kind <> bareOb.Kind || ob.Logic <> bareOb.Logic || Alex.Text.isBlank bareOb.Id then
+            Error (sprintf "Obligation '%s' disagrees with its BAREWire obligation metadata." ob.Id)
+        else
+            let f = bareOb.Form
+            let gtVar nm k = SPCmp(SmtGt, STVar nm, STConst k)
+            let geVar nm k = SPCmp(SmtGe, STVar nm, STConst k)
+            let leVar nm k = SPCmp(SmtLe, STVar nm, STConst k)
+            let eqVar nm k = SPEq(STVar nm, STConst k)
+            let eqVars lhs rhs = SPEq(STVar lhs, STVar rhs)
+            let pow2Constants = [ for k in 0 .. 30 -> 1L <<< k ]
+            let elemWidthConstants = [ 1L; 2L; 4L; 8L ]
+            let pow2Disjunction (varName: string) : SharedPred =
+                SPOr (pow2Constants |> List.map (fun c -> eqVar varName c))
+            let dividesBothFrom (constants: int64 list) (dividend1: string) (dividend2: string) (divisor: string) : SharedPred =
+                SPOr (
+                    constants
+                    |> List.map (fun c ->
+                        SPAnd
+                            [ eqVar divisor c
+                              SPEq(STMod(STVar dividend1, STConst c), STConst 0L)
+                              SPEq(STMod(STVar dividend2, STConst c), STConst 0L) ]))
+            let fieldGeometryFrom (constants: int64 list) (fOff: string) (fCount: string) (fLen: string) (fAlign: string) : SharedPred =
+                SPOr (
+                    constants
+                    |> List.map (fun c ->
+                        SPAnd
+                            [ eqVar fAlign c
+                              SPEq(STMod(STVar fOff, STConst c), STConst 0L)
+                              SPEq(STVar fLen, STMul(STVar fCount, STConst c)) ]))
+            let transcribeNamedSharedBufferForm (buildPreds: Map<string, SSA> -> Result<SharedPred list, string>) : Result<MLIROp list, string> =
+                if Array.length f.Names = 0
+                   || Array.length f.Names <> Array.length f.Values
+                   || (f.Names |> Array.exists Alex.Text.isBlank)
+                   || (Set.ofArray f.Names).Count <> Array.length f.Names then
+                    Error (sprintf "Obligation '%s' has invalid or duplicate BAREWire symbol bindings." ob.Id)
+                else
+                    let pairs = Array.zip f.Names f.Values |> Array.toList
+                    let boundVars =
+                        pairs
+                        |> List.map (fun (nm, value) ->
+                            let varSSA = v ()
+                            let valSSA = v ()
+                            let eqSSA = v ()
+                            let ops =
+                                [ smt (SMTDeclareFun(varSSA, nm, SMTInt))
+                                  smt (SMTIntConstant(valSSA, value))
+                                  smt (SMTEq(eqSSA, varSSA, valSSA, SMTInt))
+                                  smt (SMTAssert eqSSA) ]
+                            (nm, varSSA), ops)
+                    let varMap = boundVars |> List.map fst |> Map.ofList
+                    let declAndPinOps = boundVars |> List.collect snd
+                    let rec evalTerm (term: SharedTerm) : Result<SSA * MLIROp list, string> =
+                        match term with
+                        | STVar name ->
+                            match Map.tryFind name varMap with
+                            | Some ssa -> Ok(ssa, [])
+                            | None -> Error (sprintf "Obligation '%s' references undeclared BAREWire symbol '%s'." ob.Id name)
+                        | STConst k ->
+                            let c = v ()
+                            Ok(c, [ smt (SMTIntConstant(c, k)) ])
+                        | STAdd(lhs, rhs) ->
+                            match evalTerm lhs, evalTerm rhs with
+                            | Ok(l, lOps), Ok(r, rOps) ->
+                                let out = v ()
+                                Ok(out, lOps @ rOps @ [ smt (SMTIntAdd(out, l, r)) ])
+                            | Error e, _ | _, Error e -> Error e
+                        | STMul(lhs, rhs) ->
+                            match evalTerm lhs, evalTerm rhs with
+                            | Ok(l, lOps), Ok(r, rOps) ->
+                                let out = v ()
+                                Ok(out, lOps @ rOps @ [ smt (SMTIntMul(out, l, r)) ])
+                            | Error e, _ | _, Error e -> Error e
+                        | STMod(lhs, rhs) ->
+                            match evalTerm lhs, evalTerm rhs with
+                            | Ok(l, lOps), Ok(r, rOps) ->
+                                let out = v ()
+                                Ok(out, lOps @ rOps @ [ smt (SMTIntMod(out, l, r)) ])
+                            | Error e, _ | _, Error e -> Error e
+                    let rec evalPred (pred: SharedPred) : Result<SSA * MLIROp list, string> =
+                        let evalPredList (items: SharedPred list) : Result<SSA list * MLIROp list, string> =
+                            let rec loop accSSAs accOps remaining =
+                                match remaining with
+                                | [] -> Ok(List.rev accSSAs, List.rev accOps |> List.concat)
+                                | p :: rest ->
+                                    match evalPred p with
+                                    | Ok(ssa, ops) -> loop (ssa :: accSSAs) (ops :: accOps) rest
+                                    | Error err -> Error err
+                            loop [] [] items
+                        match pred with
+                        | SPEq(lhs, rhs) ->
+                            match evalTerm lhs, evalTerm rhs with
+                            | Ok(l, lOps), Ok(r, rOps) ->
+                                let out = v ()
+                                Ok(out, lOps @ rOps @ [ smt (SMTEq(out, l, r, SMTInt)) ])
+                            | Error e, _ | _, Error e -> Error e
+                        | SPCmp(cmpPred, lhs, rhs) ->
+                            match evalTerm lhs, evalTerm rhs with
+                            | Ok(l, lOps), Ok(r, rOps) ->
+                                let out = v ()
+                                Ok(out, lOps @ rOps @ [ smt (SMTIntCmp(out, cmpPred, l, r)) ])
+                            | Error e, _ | _, Error e -> Error e
+                        | SPAnd [] ->
+                            let out, ops = boolConst true
+                            Ok(out, ops)
+                        | SPAnd [ single ] -> evalPred single
+                        | SPAnd items ->
+                            match evalPredList items with
+                            | Ok(ssas, ops) ->
+                                let out = v ()
+                                Ok(out, ops @ [ smt (SMTAnd(out, ssas)) ])
+                            | Error err -> Error err
+                        | SPOr [] ->
+                            let out, ops = boolConst false
+                            Ok(out, ops)
+                        | SPOr [ single ] -> evalPred single
+                        | SPOr items ->
+                            match evalPredList items with
+                            | Ok(ssas, ops) ->
+                                let out = v ()
+                                Ok(out, ops @ [ smt (SMTOr(out, ssas)) ])
+                            | Error err -> Error err
+                        | SPNot inner ->
+                            match evalPred inner with
+                            | Ok(innerSSA, ops) ->
+                                let out = v ()
+                                Ok(out, ops @ [ smt (SMTNot(out, innerSSA)) ])
+                            | Error err -> Error err
+                    match buildPreds varMap with
+                    | Error err -> Error err
+                    | Ok preds ->
+                        let rec evalAll accSSAs accOps remaining =
+                            match remaining with
+                            | [] -> Ok(List.rev accSSAs, List.rev accOps |> List.concat)
+                            | p :: rest ->
+                                match evalPred p with
+                                | Ok(ssa, ops) -> evalAll (ssa :: accSSAs) (ops :: accOps) rest
+                                | Error err -> Error err
+                        match evalAll [] [] preds with
+                        | Error err -> Error err
+                        | Ok(clauseSSAs, clauseOps) ->
+                            let conclusion = v ()
+                            let body =
+                                declAndPinOps
+                                @ clauseOps
+                                @ [ smt (SMTAnd(conclusion, clauseSSAs)) ]
+                            Ok (anchor conclusion body)
+            match f.Kind with
+            | BAREWire.Platform.FormKind.SharedBufferSpaceExtent ->
+                if Array.length f.Names = 0
+                   || Array.length f.Values <> 2 * Array.length f.Names
+                   || (f.Names |> Array.exists Alex.Text.isBlank)
+                   || (Set.ofArray f.Names).Count <> Array.length f.Names then
+                    Error (sprintf "Obligation '%s' has invalid SharedBufferSpaceExtent values." ob.Id)
+                else
+                    let count = Array.length f.Names
+                    let spaceCap = v ()
+                    let capConst = v ()
+                    let capEq = v ()
+                    let capPremise =
+                        [ smt (SMTDeclareFun(spaceCap, "space_cap", SMTInt))
+                          smt (SMTIntConstant(capConst, f.A))
+                          smt (SMTEq(capEq, spaceCap, capConst, SMTInt))
+                          smt (SMTAssert capEq) ]
+                    let rec declareRegions idx accDecls accRegions =
+                        if idx >= count then
+                            Ok(List.rev accDecls |> List.concat, List.rev accRegions)
+                        else
+                            match Array.tryItem (2 * idx) f.Values, Array.tryItem (2 * idx + 1) f.Values with
+                            | Some offVal, Some lenVal ->
+                                let offSSA = v ()
+                                let offC = v ()
+                                let offEq = v ()
+                                let lenSSA = v ()
+                                let lenC = v ()
+                                let lenEq = v ()
+                                let ops =
+                                    [ smt (SMTDeclareFun(offSSA, sprintf "off_%d" idx, SMTInt))
+                                      smt (SMTIntConstant(offC, offVal))
+                                      smt (SMTEq(offEq, offSSA, offC, SMTInt))
+                                      smt (SMTAssert offEq)
+                                      smt (SMTDeclareFun(lenSSA, sprintf "len_%d" idx, SMTInt))
+                                      smt (SMTIntConstant(lenC, lenVal))
+                                      smt (SMTEq(lenEq, lenSSA, lenC, SMTInt))
+                                      smt (SMTAssert lenEq) ]
+                                declareRegions (idx + 1) (ops :: accDecls) ((offSSA, lenSSA) :: accRegions)
+                            | _ ->
+                                Error (sprintf "Obligation '%s' has truncated SharedBufferSpaceExtent values." ob.Id)
+                    match declareRegions 0 [] [] with
+                    | Error err -> Error err
+                    | Ok(regionPremises, regions) ->
+                        let zero = v ()
+                        let zeroOp = [ smt (SMTIntConstant(zero, 0L)) ]
+                        let perRegion =
+                            regions
+                            |> List.map (fun (offSSA, lenSSA) ->
+                                let geZero = v ()
+                                let gtZero = v ()
+                                let endSSA = v ()
+                                let leCap = v ()
+                                let ops =
+                                    [ smt (SMTIntCmp(geZero, SmtGe, offSSA, zero))
+                                      smt (SMTIntCmp(gtZero, SmtGt, lenSSA, zero))
+                                      smt (SMTIntAdd(endSSA, offSSA, lenSSA))
+                                      smt (SMTIntCmp(leCap, SmtLe, endSSA, spaceCap)) ]
+                                (offSSA, lenSSA, endSSA), [ geZero; gtZero; leCap ], ops)
+                        let regionTriples = perRegion |> List.map (fun (t, _, _) -> t)
+                        let perRegionClauses = perRegion |> List.collect (fun (_, c, _) -> c)
+                        let perRegionOps = perRegion |> List.collect (fun (_, _, o) -> o)
+                        let sumClause, sumOps =
+                            match regionTriples |> List.map (fun (_, lenSSA, _) -> lenSSA) with
+                            | [] ->
+                                let leCap = v ()
+                                leCap, [ smt (SMTIntCmp(leCap, SmtLe, zero, spaceCap)) ]
+                            | firstLen :: restLens ->
+                                let totalSSA, addOps =
+                                    restLens
+                                    |> List.fold (fun (accSSA, accOps) nextLen ->
+                                        let nextSum = v ()
+                                        nextSum, accOps @ [ smt (SMTIntAdd(nextSum, accSSA, nextLen)) ]) (firstLen, [])
+                                let leCap = v ()
+                                leCap, addOps @ [ smt (SMTIntCmp(leCap, SmtLe, totalSSA, spaceCap)) ]
+                        let indexedTriples = List.indexed regionTriples
+                        let disjPairs =
+                            [ for (i, (offI, _, endI)) in indexedTriples do
+                                for (_, (offJ, _, endJ)) in List.skip (i + 1) indexedTriples do
+                                    let leftBefore = v ()
+                                    let rightBefore = v ()
+                                    let disj = v ()
+                                    yield
+                                        disj,
+                                        [ smt (SMTIntCmp(leftBefore, SmtLe, endI, offJ))
+                                          smt (SMTIntCmp(rightBefore, SmtLe, endJ, offI))
+                                          smt (SMTOr(disj, [ leftBefore; rightBefore ])) ] ]
+                        let disjClauses = disjPairs |> List.map fst
+                        let disjOps = disjPairs |> List.collect snd
+                        let allClauses = perRegionClauses @ [ sumClause ] @ disjClauses
+                        let conclusion = v ()
+                        let body =
+                            capPremise
+                            @ regionPremises
+                            @ zeroOp
+                            @ perRegionOps
+                            @ sumOps
+                            @ disjOps
+                            @ [ smt (SMTAnd(conclusion, allClauses)) ]
+                        Ok (anchor conclusion body)
+            | BAREWire.Platform.FormKind.SharedBufferExtent ->
+                transcribeNamedSharedBufferForm (fun _ ->
+                    let stride = f.A
+                    Ok
+                        [ gtVar "elem_size" 0L
+                          gtVar "measured_size" 0L
+                          eqVar "measured_size" stride
+                          eqVars "elem_size" "measured_size"
+                          gtVar "elem_count" 0L
+                          gtVar "region_bytes" 0L
+                          gtVar "space_cap" 0L
+                          gtVar "buffer_cap" 0L
+                          SPEq(STVar "required_bytes", STMul(STVar "elem_count", STConst stride))
+                          leVar "required_bytes" 2147483647L
+                          SPCmp(SmtGe, STVar "region_bytes", STVar "required_bytes")
+                          SPCmp(SmtLe, STVar "region_bytes", STVar "space_cap")
+                          SPCmp(SmtLe, STVar "region_bytes", STVar "buffer_cap")
+                          geVar "space_offset" 0L
+                          SPCmp(SmtLe, STAdd(STVar "space_offset", STVar "region_bytes"), STVar "space_cap")
+                          geVar "max_elem_idx" 0L
+                          SPCmp(SmtLt, STVar "max_elem_idx", STVar "elem_count") ])
+            | BAREWire.Platform.FormKind.SharedBufferLayout ->
+                transcribeNamedSharedBufferForm (fun varMap ->
+                    if f.A <= 0L || f.A > 1024L then
+                        Error (sprintf "Obligation '%s' has out-of-range field count %d." ob.Id f.A)
+                    else
+                        let fieldCount = int f.A
+                        if Map.containsKey (sprintf "field_name_len_%d" fieldCount) varMap
+                           || Map.containsKey (sprintf "field_off_%d" fieldCount) varMap then
+                            Error (sprintf "Obligation '%s' has trailing field symbols beyond field count %d." ob.Id fieldCount)
+                        else
+                            let mayAlias = f.B <> 0L
+                            let basePreds =
+                                [ gtVar "placement_name_len" 0L
+                                  gtVar "measured_size" 0L
+                                  gtVar "struct_bytes" 0L
+                                  eqVars "elem_size" "measured_size"
+                                  eqVars "struct_bytes" "measured_size"
+                                  eqVars "struct_align" "layout_align"
+                                  eqVars "view_align" "layout_align"
+                                  SPCmp(SmtGe, STVar "region_align", STVar "layout_align")
+                                  SPCmp(SmtLe, STVar "region_align", STVar "space_align")
+                                  geVar "space_offset" 0L
+                                  pow2Disjunction "space_align"
+                                  dividesBothFrom pow2Constants "measured_size" "region_align" "layout_align"
+                                  dividesBothFrom pow2Constants "space_align" "space_offset" "region_align"
+                                  gtVar "view_schema_len" 0L
+                                  gtVar "buffer_schema_len" 0L
+                                  SPCmp(SmtGe, STVar "measured_size", STVar "view_elem_width")
+                                  SPCmp(SmtGe, STVar "view_align", STVar "view_elem_width")
+                                  SPCmp(SmtGe, STVar "layout_align", STVar "view_elem_width")
+                                  dividesBothFrom elemWidthConstants "measured_size" "view_align" "view_elem_width"
+                                  SPOr [ eqVar "core_byte_order" 1L; eqVar "core_byte_order" 2L ]
+                                  eqVars "space_byte_order" "core_byte_order"
+                                  eqVars "layout_byte_order" "space_byte_order"
+                                  SPOr
+                                      [ SPAnd [ eqVar "space_kind" 1L; eqVar "memory_region" 1L ]
+                                        SPAnd [ eqVar "space_kind" 2L; eqVar "memory_region" 2L ]
+                                        SPAnd [ eqVar "space_kind" 3L; eqVar "memory_region" 3L ]
+                                        SPAnd [ eqVar "space_kind" 4L; eqVar "memory_region" 4L ]
+                                        SPAnd [ eqVar "space_kind" 5L; SPOr [ eqVar "memory_region" 1L; eqVar "memory_region" 2L ] ] ]
+                                  eqVar "raw_ptr_field_count" 0L
+                                  eqVar "flex_array_count" 0L
+                                  eqVar "unverified_export_count" 0L
+                                  eqVar "duplicate_name_count" 0L
+                                  gtVar "field_count" 0L ]
+                            let fieldAndBitfieldPreds =
+                                [ for fk in 0 .. fieldCount - 1 do
+                                    let fNameLen = sprintf "field_name_len_%d" fk
+                                    let fDupName = sprintf "field_dup_name_%d" fk
+                                    let fOff = sprintf "field_off_%d" fk
+                                    let fCount = sprintf "field_elem_count_%d" fk
+                                    let fLen = sprintf "field_len_%d" fk
+                                    let fAlign = sprintf "field_align_%d" fk
+                                    yield gtVar fNameLen 0L
+                                    yield eqVar fDupName 0L
+                                    yield geVar fOff 0L
+                                    yield gtVar fCount 0L
+                                    yield gtVar fLen 0L
+                                    yield SPCmp(SmtLe, STAdd(STVar fOff, STVar fLen), STVar "measured_size")
+                                    yield SPCmp(SmtGe, STVar "layout_align", STVar fAlign)
+                                    yield fieldGeometryFrom elemWidthConstants fOff fCount fLen fAlign
+                                    let rec countBf b =
+                                        if Map.containsKey (sprintf "bf_pos_%d_%d" fk b) varMap then
+                                            countBf (b + 1)
+                                        else b
+                                    let bfCount = countBf 0
+                                    for b in 0 .. bfCount - 1 do
+                                        let bfNameLen = sprintf "bf_name_len_%d_%d" fk b
+                                        let bfDupName = sprintf "bf_dup_name_%d_%d" fk b
+                                        let bfPos = sprintf "bf_pos_%d_%d" fk b
+                                        let bfWidth = sprintf "bf_width_%d_%d" fk b
+                                        let bfAccess = sprintf "bf_access_%d_%d" fk b
+                                        yield gtVar bfNameLen 0L
+                                        yield eqVar bfDupName 0L
+                                        yield geVar bfPos 0L
+                                        yield gtVar bfWidth 0L
+                                        yield SPCmp(SmtLe, STAdd(STVar bfPos, STVar bfWidth), STMul(STVar fAlign, STConst 8L))
+                                        yield geVar bfAccess 1L
+                                        yield leVar bfAccess 3L
+                                    if bfCount >= 2 then
+                                        for ba in 0 .. bfCount - 2 do
+                                            let posA = STVar(sprintf "bf_pos_%d_%d" fk ba)
+                                            let widA = STVar(sprintf "bf_width_%d_%d" fk ba)
+                                            for bb in ba + 1 .. bfCount - 1 do
+                                                let posB = STVar(sprintf "bf_pos_%d_%d" fk bb)
+                                                let widB = STVar(sprintf "bf_width_%d_%d" fk bb)
+                                                yield SPOr [ SPCmp(SmtLe, STAdd(posA, widA), posB); SPCmp(SmtLe, STAdd(posB, widB), posA) ] ]
+                            let nonOverlapPreds =
+                                if not mayAlias && fieldCount >= 2 then
+                                    [ for fi in 0 .. fieldCount - 2 do
+                                        let offI = STVar(sprintf "field_off_%d" fi)
+                                        let lenI = STVar(sprintf "field_len_%d" fi)
+                                        for fj in fi + 1 .. fieldCount - 1 do
+                                            let offJ = STVar(sprintf "field_off_%d" fj)
+                                            let lenJ = STVar(sprintf "field_len_%d" fj)
+                                            yield SPOr [ SPCmp(SmtLe, STAdd(offI, lenI), offJ); SPCmp(SmtLe, STAdd(offJ, lenJ), offI) ] ]
+                                else []
+                            Ok(basePreds @ fieldAndBitfieldPreds @ nonOverlapPreds))
+            | BAREWire.Platform.FormKind.SharedBufferLifetime ->
+                transcribeNamedSharedBufferForm (fun _ ->
+                    Ok
+                        [ gtVar "region_depth" 0L
+                          geVar "lib_retention_depth" 0L
+                          SPCmp(SmtLe, STVar "region_depth", STVar "lib_retention_depth")
+                          geVar "mapped_depth" 0L
+                          SPCmp(SmtLe, STVar "mapped_depth", STVar "first_use_depth")
+                          SPCmp(SmtLe, STVar "first_use_depth", STVar "last_use_depth")
+                          SPCmp(SmtLe, STVar "last_use_depth", STVar "lib_retention_end_depth")
+                          SPCmp(SmtLt, STVar "lib_retention_end_depth", STVar "unmap_depth")
+                          eqVar "leaked" 0L ])
+            | BAREWire.Platform.FormKind.SharedBufferExclusivity ->
+                transcribeNamedSharedBufferForm (fun varMap ->
+                    if f.A <= 0L || f.A > 1024L then
+                        Error (sprintf "Obligation '%s' has out-of-range field count %d." ob.Id f.A)
+                    else
+                        let fieldCount = int f.A
+                        if Map.containsKey (sprintf "field_access_%d" fieldCount) varMap then
+                            Error (sprintf "Obligation '%s' has trailing field_access symbols beyond field count %d." ob.Id fieldCount)
+                        else
+                            let basePreds =
+                                [ SPOr
+                                      [ SPAnd [ eqVar "declared_access" 1L; eqVar "view_access" 1L ]
+                                        SPAnd [ eqVar "declared_access" 2L; eqVar "view_access" 2L ]
+                                        SPAnd [ eqVar "declared_access" 3L; eqVar "view_access" 3L ]
+                                        SPAnd [ eqVar "declared_access" 4L; eqVar "view_access" 3L ] ]
+                                  SPOr
+                                      [ SPAnd [ eqVar "declared_access" 1L; SPOr [ eqVar "space_access" 1L; eqVar "space_access" 3L ] ]
+                                        SPAnd [ eqVar "declared_access" 2L; SPOr [ eqVar "space_access" 2L; eqVar "space_access" 3L ] ]
+                                        SPAnd [ SPOr [ eqVar "declared_access" 3L; eqVar "declared_access" 4L ]; eqVar "space_access" 3L ] ]
+                                  SPOr
+                                      [ SPAnd [ eqVar "declared_access" 1L; SPOr [ eqVar "buffer_access" 1L; eqVar "buffer_access" 3L ] ]
+                                        SPAnd [ eqVar "declared_access" 2L; SPOr [ eqVar "buffer_access" 2L; eqVar "buffer_access" 3L ] ]
+                                        SPAnd [ SPOr [ eqVar "declared_access" 3L; eqVar "declared_access" 4L ]; eqVar "buffer_access" 3L ] ]
+                                  SPOr [ eqVar "lib_mutates" 0L; eqVar "lib_mutates" 1L ]
+                                  SPNot (SPAnd [ eqVar "declared_access" 1L; eqVar "lib_mutates" 1L ])
+                                  eqVar "concurrent_clef_write" 0L
+                                  eqVar "overlap_mutable_share" 0L ]
+                            let fieldPreds =
+                                [ for fk in 0 .. fieldCount - 1 ->
+                                    let fa = sprintf "field_access_%d" fk
+                                    SPOr
+                                        [ SPAnd [ eqVar "declared_access" 1L; eqVar fa 1L ]
+                                          SPAnd [ eqVar "declared_access" 2L; eqVar fa 2L ]
+                                          SPAnd
+                                              [ SPOr [ eqVar "declared_access" 3L; eqVar "declared_access" 4L ]
+                                                SPOr [ eqVar fa 1L; eqVar fa 3L ] ] ] ]
+                            Ok(basePreds @ fieldPreds))
+            | _ ->
+                Error (sprintf "Obligation '%s' has unsupported shared-buffer form kind." ob.Id)
+
     let opsResult : Result<MLIROp list, string> =
         match ob.Body with
         | ObligationBody.Pending _ ->
             Error "A Pending obligation has no solver scope."
+        | ObligationBody.SharedBufferPlacementObligation bareOb ->
+            sharedBufferObligation bareOb
         | ObligationBody.ZeroCopyBufferExtent model ->
             let maxCount, maxCountOps = intConst model.MaximumCount
             let elemBytes, elemBytesOps = int64Const model.ElementBytes

@@ -743,8 +743,9 @@ let private nativeFixture union =
                                    [NodeId 0; NodeId 1] (Some binding.Id) ordinaryType [boolType] ]
     let target : BoundaryPlatformPremise =
         { Id = "alex-native-component"; Description = None; LibraryPath = None; Loading = None; SourcePaths = Set.singleton range.File
-          Architecture = Some "x86_64"; OS = Some "linux"; RuntimeClaim = Some RuntimeModel.Libc; Substrate = Some SubstrateKind.CPU
-          Dimensions = Map.ofList ["Pointer", 64; "Register", 64]; Representations = Map.empty; EndpointReturns = Map.empty }
+          Architecture = Some "x86_64"; OS = Some "linux"; Endianness = None; RuntimeClaim = Some RuntimeModel.Libc; Substrate = Some SubstrateKind.CPU
+          Dimensions = Map.ofList ["Pointer", 64; "Register", 64]; Representations = Map.empty; EndpointReturns = Map.empty
+          Spaces = []; Buffers = []; SharedBufferRegions = [] }
     let contract = c.Contracts[NodeId 2]
     let lifetime =
         [scope.Id; binding.Id; implementation.Id] |> List.mapi (fun ordinal id -> p ParticipantRole.CallableLifetime ordinal contract.Identity id)

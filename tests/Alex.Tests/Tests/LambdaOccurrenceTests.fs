@@ -966,8 +966,9 @@ let private nativeUnitBlock (mode: string) =
             { Identity = entry.Formation; Kind = CallableKind.NativeEntry
               Convention = CallableConvention.CompilerOwnedPortable
                 { Target = { Id = "fixture"; Description = None; Loading = None; LibraryPath = None; SourcePaths = Set.empty
-                             Architecture = None; OS = None; RuntimeClaim = None; Substrate = None; Dimensions = Map.empty
-                             Representations = Map.empty; EndpointReturns = Map.empty }
+                             Architecture = None; OS = None; Endianness = None; RuntimeClaim = None; Substrate = None; Dimensions = Map.empty
+                             Representations = Map.empty; EndpointReturns = Map.empty
+                             Spaces = []; Buffers = []; SharedBufferRegions = [] }
                   ParameterConversions = []; ResultConversion = CallableConversion.Identity(ValueRepresentation.Scalar SettledSlot.Unit)
                   CodeLifetime = entry.Lifetime }
               ParameterTypes = [unitType]; OmittedParameters = [0]; ParameterRepresentations = []

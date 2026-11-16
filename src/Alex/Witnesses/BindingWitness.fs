@@ -112,50 +112,56 @@ let private witnessBinding (ctx: WitnessContext) (node: SemanticNode) : WitnessO
                     // Module-level value: initialize its program-lifetime slot (memref.global).
                     // References reload from the slot in whatever function they occur.
                     elif ModuleValues.isSlotBinding ctx.Coeffects.TargetPlatform ctx.Graph node then
-                        // The initializer is recalled at its declared occurrence. A block is
-                        // bound to the value it forwards by its own witness.
-                        match MLIRAccumulator.recallNode valueId ctx.Accumulator with
-                        | Some (initialSSA, initialTy) ->
-                            // the slot's element type at the binding's range width on fabric
-                            match adaptOperand ctx.Coeffects ctx.Graph node.Id valueId initialSSA initialTy, mapTypeAt node.Id ctx with
-                            | Result.Ok (meetOps, valueSSA, _), Result.Ok valueTy ->
-                                let globalName = ModuleValues.globalName name node.Id
-                                match tryMatchWithDiagnostics (pGlobalSlotInit node.Id globalName valueSSA valueTy)
-                                              ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                                | Result.Ok ((ops, result), _) ->
-                                    { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
-                                | Result.Error diagnostic ->
-                                    WitnessOutput.error $"Module value '{name}': {diagnostic}"
-                            | Result.Error err, _
-                            | _, Result.Error err ->
-                                WitnessOutput.error $"Module value '{name}': {err}"
-                        | None ->
-                            WitnessOutput.error $"Module value '{name}': Initial value not yet witnessed"
+                        if BoundaryAbi.isSharedBufferOrigin ctx.Graph valueId then
+                            WitnessOutput.error $"Module value '{name}': Shared-buffer view cannot be stored in a module-level slot (Copies = 0)."
+                        else
+                            // The initializer is recalled at its declared occurrence. A block is
+                            // bound to the value it forwards by its own witness.
+                            match MLIRAccumulator.recallNode valueId ctx.Accumulator with
+                            | Some (initialSSA, initialTy) ->
+                                // the slot's element type at the binding's range width on fabric
+                                match adaptOperand ctx.Coeffects ctx.Graph node.Id valueId initialSSA initialTy, mapTypeAt node.Id ctx with
+                                | Result.Ok (meetOps, valueSSA, _), Result.Ok valueTy ->
+                                    let globalName = ModuleValues.globalName name node.Id
+                                    match tryMatchWithDiagnostics (pGlobalSlotInit node.Id globalName valueSSA valueTy)
+                                                  ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                                    | Result.Ok ((ops, result), _) ->
+                                        { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
+                                    | Result.Error diagnostic ->
+                                        WitnessOutput.error $"Module value '{name}': {diagnostic}"
+                                | Result.Error err, _
+                                | _, Result.Error err ->
+                                    WitnessOutput.error $"Module value '{name}': {err}"
+                            | None ->
+                                WitnessOutput.error $"Module value '{name}': Initial value not yet witnessed"
                     // Check if binding is mutable
                     elif isMut then
-                        // MUTABLE BINDING: the cell at the binding node's width (the join of its
-                        // value and every assignment); the initial value adapted to it by the
-                        // meet SSAAssignment derived for (binding, value)
-                        match MLIRAccumulator.recallNode valueId ctx.Accumulator with
-                        | Some (rawInitSSA, rawInitTy) ->
-                            let (NodeId nodeIdInt) = node.Id
-                            match adaptOperand ctx.Coeffects ctx.Graph node.Id valueId rawInitSSA rawInitTy, mapTypeAt node.Id ctx with
-                            | Result.Ok (meetOps, initSSA, initTy), Result.Ok elemType ->
-                                let pattern = parser {
-                                    do! ensure (initTy = elemType) "Mutable initializer lacks the source-settled cell representation."
-                                    return! pBuildMutableBinding nodeIdInt elemType initSSA
-                                  }
-                                match tryMatchWithDiagnostics pattern
-                                              ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
-                                | Result.Ok ((ops, result), _) ->
-                                    { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
-                                | Result.Error diagnostic ->
-                                    WitnessOutput.error $"Mutable binding '{name}': {diagnostic}"
-                            | Result.Error err, _
-                            | _, Result.Error err ->
-                                WitnessOutput.error $"Mutable binding '{name}': {err}"
-                        | None ->
-                            WitnessOutput.error $"Mutable binding '{name}': Initial value not yet witnessed"
+                        if BoundaryAbi.isSharedBufferOrigin ctx.Graph valueId then
+                            WitnessOutput.error $"Mutable binding '{name}': Shared-buffer view cannot be bound to a mutable cell (Copies = 0)."
+                        else
+                            // MUTABLE BINDING: the cell at the binding node's width (the join of its
+                            // value and every assignment); the initial value adapted to it by the
+                            // meet SSAAssignment derived for (binding, value)
+                            match MLIRAccumulator.recallNode valueId ctx.Accumulator with
+                            | Some (rawInitSSA, rawInitTy) ->
+                                let (NodeId nodeIdInt) = node.Id
+                                match adaptOperand ctx.Coeffects ctx.Graph node.Id valueId rawInitSSA rawInitTy, mapTypeAt node.Id ctx with
+                                | Result.Ok (meetOps, initSSA, initTy), Result.Ok elemType ->
+                                    let pattern = parser {
+                                        do! ensure (initTy = elemType) "Mutable initializer lacks the source-settled cell representation."
+                                        return! pBuildMutableBinding nodeIdInt elemType initSSA
+                                      }
+                                    match tryMatchWithDiagnostics pattern
+                                                  ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
+                                    | Result.Ok ((ops, result), _) ->
+                                        { InlineOps = meetOps @ ops; TopLevelOps = []; Result = result }
+                                    | Result.Error diagnostic ->
+                                        WitnessOutput.error $"Mutable binding '{name}': {diagnostic}"
+                                | Result.Error err, _
+                                | _, Result.Error err ->
+                                    WitnessOutput.error $"Mutable binding '{name}': {err}"
+                            | None ->
+                                WitnessOutput.error $"Mutable binding '{name}': Initial value not yet witnessed"
                     else
                         // IMMUTABLE BINDING: the value's SSA, brought to the binding's width where a
                         // declaration (a spelled annotation, a descriptor) holds the binding at a

@@ -31,6 +31,9 @@ let pBoundaryDeclaration : PSGParser<MLIROp list * TransferResult> =
 /// Witness exactly the imports assigned to this source scope. No call inventory,
 /// signature discovery, symbol reconciliation or declaration hoisting occurs here.
 let boundaryImportsAt (scope: NodeId) (boundary: BoundaryEmissionProjection) : Result<MLIROp list, string> =
+    if not boundary.SharedBufferPlacements.IsEmpty || not boundary.SharedBufferViewUses.IsEmpty then
+        Result.Error "Shared-buffer revisions require boundaryImportsIn."
+    else
     let publishedDeclaration (declaration: BoundaryImport) =
         if BoundaryAbi.importCarriesResourceHandle boundary declaration then
             // The current source import remains the authority. Its resource
@@ -63,11 +66,57 @@ let boundaryImportsAt (scope: NodeId) (boundary: BoundaryEmissionProjection) : R
                         |> Seq.filter (fun declaration -> declaration.Scope = scope)
                         |> Seq.map publishedIntrinsicWriteDecl |> Seq.toList))
 
+let boundaryImportsIn (scope: NodeId) (graph: Revision) : Result<MLIROp list, string> =
+    let boundary = graph.Emission.Boundary
+    if boundary.SharedBufferPlacements.IsEmpty && boundary.SharedBufferViewUses.IsEmpty then
+        boundaryImportsAt scope boundary
+    else
+        match BoundaryAbi.sharedBufferIntegrityIn graph with
+        | Result.Error reason -> Result.Error reason
+        | Result.Ok () ->
+            let publishedDeclaration (declaration: BoundaryImport) =
+                BoundaryAbi.validateSharedBufferFormalsIn graph declaration
+                |> Result.bind (fun () ->
+                    if BoundaryAbi.importCarriesNonSharedResourceHandle graph declaration then
+                        BoundaryAbi.validateImportCarriersIn boundary declaration
+                        |> Result.map (fun () -> ResourceImport declaration)
+                    else
+                        BoundaryAbi.tryParametersInRevision graph declaration
+                        |> Result.bind (fun paramTypes ->
+                            BoundaryAbi.tryResultsInRevision graph declaration
+                            |> Result.map (fun resultTypes ->
+                                MLIROp.FuncOp (FuncOp.BoundaryFuncDecl(declaration, paramTypes, resultTypes)))))
+            let rec foreign ids =
+                match ids with
+                | [] -> Result.Ok []
+                | id :: rest ->
+                    match boundary.Imports.TryFind id with
+                    | None -> Result.Error "Published import scope names an absent declaration."
+                    | Some declaration when declaration.Scope <> scope ->
+                        Result.Error "Published import has a different source owner scope."
+                    | Some declaration ->
+                        publishedDeclaration declaration
+                        |> Result.bind (fun op -> foreign rest |> Result.map (fun following -> op :: following))
+            let hasIntrinsicForScope =
+                boundary.IntrinsicWriteImports.Values
+                |> Seq.exists (fun declaration -> declaration.Scope = scope)
+            let scopedIdsResult =
+                match boundary.ByScope |> Map.toList |> List.choose (fun (k, ids) -> if k = scope then Some ids else None) with
+                | [ ids ] -> Result.Ok ids
+                | [] when hasIntrinsicForScope -> Result.Ok []
+                | _ -> Result.Error "The source boundary entry has no assigned import plan."
+            scopedIdsResult
+            |> Result.bind foreign
+            |> Result.map (fun declarations ->
+                declarations @ (boundary.IntrinsicWriteImports.Values
+                                |> Seq.filter (fun declaration -> declaration.Scope = scope)
+                                |> Seq.map publishedIntrinsicWriteDecl |> Seq.toList))
+
 let pBoundaryImports : PSGParser<MLIROp list> =
     parser {
         let! node = getCurrentNode
-        let! boundary = pBoundary
-        match boundaryImportsAt node.Id boundary with
+        let! state = getUserState
+        match boundaryImportsIn node.Id state.Graph with
         | Result.Ok declarations -> return declarations
         | Result.Error reason -> return! fail (Message reason)
     }
@@ -304,8 +353,8 @@ let private importedEntry (boundary: BoundaryEmissionProjection) formation =
         | _ -> Result.Error "Imported entry no longer has its exact declaration, import and loading contract."
     | _ -> Result.Error "Imported entry has no current source-published loading assumption."
 
-let private importedFunctionType boundary (declaration: BoundaryImport) : Result<MLIRType, string> =
-    if BoundaryAbi.importCarriesResourceHandle boundary declaration then
+let private importedFunctionType (revision: Revision) boundary (declaration: BoundaryImport) : Result<MLIRType, string> =
+    if BoundaryAbi.isSharedBufferImport revision declaration || BoundaryAbi.importCarriesResourceHandle boundary declaration then
         Result.Error "Resource-bearing imports require a direct source call, not a generic function pointer."
     else
         BoundaryAbi.tryParametersIn boundary declaration
@@ -321,6 +370,7 @@ let private importedFunctionType boundary (declaration: BoundaryImport) : Result
 let pImportedFunctionAddress formation : PSGParser<MLIROp list * TransferResult> =
     parser {
         let! node = getCurrentNode
+        let! state = getUserState
         let! boundary = pBoundary
         do! ensure (node.Id = formation) "Imported address must be witnessed at its actual formation."
 
@@ -341,7 +391,7 @@ let pImportedFunctionAddress formation : PSGParser<MLIROp list * TransferResult>
                 "Imported address differs from its declared extern operand."
 
         let! fnType =
-            match importedFunctionType boundary declaration with
+            match importedFunctionType state.Graph boundary declaration with
             | Result.Ok ty -> preturn ty
             | Result.Error reason -> fail (Message reason)
 
@@ -435,18 +485,24 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                     }) |> Alex.XParsec.Extensions.sequence
                 return ()
             }
+            let! isSharedCall, isSharedAcquisitionCall =
+                match BoundaryAbi.validateSharedBufferCallAt state.Graph call with
+                | Result.Ok flags -> preturn flags
+                | Result.Error reason -> fail (Message reason)
             match boundary.Imports.TryFind call.Import with
             | None -> return! fail (Message "Published boundary call names an absent import.")
             | Some declaration when call.Resource.IsSome -> return! pResourceCall call declaration
             | Some declaration ->
                 let resultIsResourceHandle =
-                    ((Option.toList declaration.Result @ Option.toList call.Result)
-                     |> List.exists (function BoundaryScalar.ResourceHandle _ -> true | _ -> false))
+                    not isSharedAcquisitionCall
+                    && ((Option.toList declaration.Result @ Option.toList call.Result)
+                        |> List.exists (function BoundaryScalar.ResourceHandle _ -> true | _ -> false))
                 let invalidBorrowedResource =
                     declaration.Parameters |> List.exists (fun (formal, scalar) ->
                         match scalar with
                         | BoundaryScalar.ResourceHandle(decl, nullable) ->
                             not (boundary.ResourceDeclarations.ContainsKey decl
+                                 || (decl = formal && BoundaryAbi.isSharedBufferFormalAt state.Graph declaration formal nullable)
                                  || (decl = formal && (BoundaryAbi.borrowedCHandleRepAt state.Graph declaration formal nullable).IsSome))
                         | _ -> false)
                 if resultIsResourceHandle || invalidBorrowedResource then
@@ -473,7 +529,7 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                     "Writable byte calls require their exact direct signature and complete ordered actuals."
                             return! pWritableResult call declaration
                         }
-                    elif hasReadOnly || hasBorrowedResult || hasBufferAbsence || hasBorrowedResource then
+                    elif hasReadOnly || hasBorrowedResult || hasBufferAbsence || hasBorrowedResource || isSharedCall then
                         ensure
                             (call.Entry.IsNone && call.Result = declaration.Result
                              && declaration.Parameters = (call.Arguments |> List.map (fun actual -> actual.Formal, actual.Abi)))
@@ -485,19 +541,24 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                             "Direct boundary calls require their exact direct signature and complete ordered actuals."
                     else preturn ()
                 let matchesBorrowedHandleType (imp: BoundaryImport) (formal: NodeId) (decl: NodeId) (nullable: bool) (ty: MLIRType) =
-                    match boundary.ResourceDeclarations.TryFind decl with
-                    | Some res when res.Identity = decl && res.PointerBits > 0 ->
-                        match nullable, ty with
-                        | false, TOpaqueHandle(handleType, bits, alignment) ->
-                            handleType = res.HandleType && bits = res.PointerBits && alignment > 0
-                        | true, TResourceOption rep ->
-                            BoundaryAbi.matchesCHandleRepresentation true (Some res.HandleType) (Some res.PointerBits) rep
-                        | _ -> false
-                    | _ ->
+                    if not (boundary.ResourceDeclarations.ContainsKey decl) then
                         decl = formal
-                        && (BoundaryAbi.borrowedCHandleRepAt state.Graph imp decl nullable
-                            |> Option.bind (Alex.CodeGeneration.TypeMapping.tryRepresentationType >> Result.toOption)
-                            |> Option.exists (fun expected -> ty = expected))
+                        && ((match BoundaryAbi.sharedBufferFormalStructTypeAt state.Graph imp decl nullable with
+                             | Result.Ok expected -> ty = expected
+                             | Result.Error _ -> false)
+                            || (BoundaryAbi.borrowedCHandleRepAt state.Graph imp decl nullable
+                                |> Option.bind (Alex.CodeGeneration.TypeMapping.tryRepresentationType >> Result.toOption)
+                                |> Option.exists (fun expected -> ty = expected)))
+                    else
+                        match boundary.ResourceDeclarations.TryFind decl with
+                        | Some res when res.Identity = decl && res.PointerBits > 0 ->
+                            match nullable, ty with
+                            | false, TOpaqueHandle(handleType, bits, alignment) ->
+                                handleType = res.HandleType && bits = res.PointerBits && alignment > 0
+                            | true, TResourceOption rep ->
+                                BoundaryAbi.matchesCHandleRepresentation true (Some res.HandleType) (Some res.PointerBits) rep
+                            | _ -> false
+                        | _ -> false
                 let rec arguments ordinal (witnessed: Map<NodeId, Meet option * Val * Val>) (operands: BoundaryOperand list) : PSGParser<MLIROp list * Val list * OptionalEntrySlot list * BufferAbsenceSlot list> = parser {
                     match operands with
                     | [] -> return [], [], [], []
@@ -708,28 +769,42 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                     match call.Result with
                     | None -> preturn []
                     | Some ty -> parser {
-                        let! abiType =
-                            match BoundaryAbi.tryScalarTypeIn boundary Set.empty ty with
-                            | Result.Ok scalarTy -> preturn scalarTy
-                            | Result.Error reason -> fail (Message reason)
                         let! resultSSA = getNodeSSA node.Id
                         let! resultType =
-                            match ty with
-                            | BoundaryScalar.BorrowedBytes _ -> parser {
+                            if isSharedAcquisitionCall then parser {
+                                do! ensure call.ResultAdaptation.IsNone
+                                           "Shared-buffer region acquisition cannot be replaced by a numeric result adaptation."
+                                let! expectedStructTy =
+                                    match BoundaryAbi.sharedBufferAcquisitionStructTypeAt state.Graph declaration with
+                                    | Result.Ok structTy -> preturn structTy
+                                    | Result.Error reason -> fail (Message reason)
                                 let! nodeType = pValueTypeAt node.Id
-                                do! ensure (BoundaryAbi.matchesBorrowedResultViewAt state.Graph node.Id nodeType)
-                                           "Borrowed result view disagrees with its source-settled representation."
-                                return nodeType
+                                do! ensure (nodeType = expectedStructTy)
+                                           "Shared-buffer region acquisition result disagrees with its settled StructDescriptor representation."
+                                return expectedStructTy
                               }
-                            | _ -> preturn abiType
+                            else parser {
+                                let! abiType =
+                                    match BoundaryAbi.tryScalarTypeIn boundary Set.empty ty with
+                                    | Result.Ok scalarTy -> preturn scalarTy
+                                    | Result.Error reason -> fail (Message reason)
+                                match ty with
+                                | BoundaryScalar.BorrowedBytes _ ->
+                                    let! nodeType = pValueTypeAt node.Id
+                                    do! ensure (BoundaryAbi.matchesBorrowedResultViewAt state.Graph node.Id nodeType)
+                                               "Borrowed result view disagrees with its source-settled representation."
+                                    return nodeType
+                                | _ ->
+                                    return abiType
+                              }
                         return [{ SSA = resultSSA; Type = resultType }]
                       }
                 let isPureOptionalEntry =
-                    not slots.IsEmpty && not writable && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult
+                    not slots.IsEmpty && not writable && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall
                 let isPureWritable =
-                    writable && slots.IsEmpty && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult
+                    writable && slots.IsEmpty && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall
                 let isBoundaryBufferCall =
-                    hasReadOnly || not absenceSlots.IsEmpty || hasBorrowedResult || (writable && not slots.IsEmpty)
+                    hasReadOnly || not absenceSlots.IsEmpty || hasBorrowedResult || (writable && not slots.IsEmpty) || isSharedCall
                 let! operation =
                     if isPureOptionalEntry then parser {
                         do! ensure (call.Entry.IsNone && call.Resource.IsNone)
@@ -755,7 +830,7 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                     entry.Transport.Contains call.Callee)
                                 "Imported invocation differs from its source entry and pointer transport."
                         let! importedFnType =
-                            match importedFunctionType boundary declaration with
+                            match importedFunctionType state.Graph boundary declaration with
                             | Result.Ok ty -> preturn ty
                             | Result.Error reason -> fail (Message reason)
                         let! pointerSSA, pointerType = pRecallNode call.Callee

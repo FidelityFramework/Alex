@@ -99,11 +99,14 @@ let nativeEntrySlotType (graph: Revision) (storage: ProgramStorageEntry) =
                 && entry.Loading = loading.Identity
                 && imported.Library = loading.Contract.Library
                 ->
-                match BoundaryAbi.parameters imported, BoundaryAbi.results imported with
-                | Ok parameters, Ok results ->
-                    Ok(entry, TFunc(parameters, results))
-                | Error reason, _ | _, Error reason ->
-                    Error reason
+                if BoundaryAbi.isSharedBufferImport graph imported then
+                    Error "Resource-bearing imports require a direct source call, not a generic function pointer."
+                else
+                    match BoundaryAbi.parameters imported, BoundaryAbi.results imported with
+                    | Ok parameters, Ok results ->
+                        Ok(entry, TFunc(parameters, results))
+                    | Error reason, _ | _, Error reason ->
+                        Error reason
             | _ -> Error "Native entry slot has no matching current import and selected loading account."
         | _ -> Error "Native entry slot has no matching current source formation."
     | _ -> Error "Native entry slot requires its source-issued native entry storage shape."
