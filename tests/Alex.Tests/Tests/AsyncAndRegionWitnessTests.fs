@@ -66,7 +66,7 @@ let private captured sample =
     let limits : Binary.Limits =
         {MaxBytes=256*1024*1024;MaxCollectionLength=2000000;MaxDepth=256
          MaxStringBytes=4*1024*1024;MaxBigIntegerBytes=4096;MaxValues=100000000}
-    let take = function Result.Ok value -> value | Result.Error error -> failwithf "Invalid frozen PSG capture: %A" error
+    let take = function Result.Ok value -> value | Result.Error error -> failwith (sprintf "Invalid frozen PSG capture for %s: %s" sample (string error))
     Binary.openSource limits (BAREWire.Memory.ByteSource.ofArray(output.ToArray())) |> take |> Binary.readRevision |> take
 
 [<Theory>]

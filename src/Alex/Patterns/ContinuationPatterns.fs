@@ -28,6 +28,8 @@ let private pSlotType (slot: ContinuationSlot) : PSGParser<MLIRType> = parser {
         | SettledSlot.Char | SettledSlot.Unit -> return TInt(IntWidth 32)
         | SettledSlot.Real 32 -> return TFloat F32
         | SettledSlot.Real 64 -> return TFloat F64
+        | SettledSlot.CHandle(identity, bits, alignment) when bits > 0 && alignment > 0 ->
+            return TOpaqueHandle(identity, bits, alignment)
         | SettledSlot.Pointer 1 -> return TIndex
         | _ -> return! fail (Message $"Continuation slot {NodeId.value slot.Source} has unsupported scalar representation {settled}")
     | CaptureSlotKind.CellView payload ->

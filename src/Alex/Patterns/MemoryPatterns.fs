@@ -648,6 +648,26 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
     let memory = state.Graph.Emission.Memory
     match memory.Operations.TryFind state.Current.Id with
     | None -> return! fail (Message "Memory operation lacks its source-published contract.")
+    | Some(MemoryWitnessOperation.ReadOnlyArrayView view) ->
+        do! ensure (view.Site = state.Current.Id) "Read-only array view names another occurrence."
+        let! sourceType =
+            match Alex.CodeGeneration.TypeMapping.tryRepresentationType view.SourceCarrier with
+            | Ok ty -> preturn ty
+            | Result.Error reason -> fail (Message reason)
+        let! resultType =
+            match Alex.CodeGeneration.TypeMapping.tryRepresentationType view.ResultCarrier with
+            | Ok ty -> preturn ty
+            | Result.Error reason -> fail (Message reason)
+        let! source, actual = pRecallNode view.Source
+        do! ensure (actual = sourceType) "Read-only array view source differs from its published descriptor."
+        match sourceType, resultType with
+        | TMemRef element, TMemRef target when element = target ->
+            return [], [], TRValue { SSA = source; Type = resultType }
+        | TMemRefStatic(_, element), TMemRef target when element = target ->
+            let! result = getNodeSSA view.Site
+            let! cast = pMemRefCast result source sourceType resultType
+            return [cast], [], TRValue { SSA = result; Type = resultType }
+        | _ -> return! fail (Message "Read-only array view lacks compatible published descriptors.")
     | Some (MemoryWitnessOperation.Region row) ->
         do! ensure (row.Site=state.Current.Id) "Region memory names another occurrence."
         let! element=pMemorySlot row.Element

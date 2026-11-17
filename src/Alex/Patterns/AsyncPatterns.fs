@@ -78,10 +78,11 @@ let pAsyncActivation (ctx: WitnessContext) (row: AsyncActivation) : PSGParser<ML
         | Some formation -> preturn formation
         | None -> fail (Message (sprintf "Async activation %d names formation %d, which has no Codata.AsyncFormations row." site (NodeId.value row.Formation)))
     let! _, arguments = pApplication
-    let! operand =
+    let! operand, destination =
         match arguments with
-        | [operand] -> preturn operand
-        | _ -> fail (Message (sprintf "Async activation %d is not an application to exactly one activated computation." site))
+        | [operand] -> preturn (operand, None)
+        | [operand; destination] when destination = row.ResultTarget -> preturn (operand, Some destination)
+        | _ -> fail (Message (sprintf "Async activation %d lacks its exact computation and declared result destination operands." site))
     let! activated, carrier = pWitnessedCallable "Async activation" row.Site operand
     do! ensure (carrier.Implementation = formation.Callable)
             (sprintf "Async activation %d: operand %d carries implementation %d, and the published formation %d names deferred callable %d." site (NodeId.value operand) (NodeId.value carrier.Implementation) (NodeId.value row.Formation) (NodeId.value formation.Callable))
@@ -97,6 +98,15 @@ let pAsyncActivation (ctx: WitnessContext) (row: AsyncActivation) : PSGParser<ML
         | Some _, _ -> fail (Message (sprintf "Async activation %d: the environment of deferred callable %d is not its first published formal." site (NodeId.value carrier.Implementation)))
     do! ensure (carrier.Environment.IsSome = (Operands.environment activated).IsSome)
             (sprintf "Async activation %d: operand %d does not carry the environment its published convention requires." site (NodeId.value operand))
+    let! declared, resultArguments =
+        match destination, declared with
+        | None, _ -> preturn (declared, [])
+        | Some destination, ((_, _, formal), [expected]) :: rest when formal = formation.ResultStorage -> parser {
+            let! address, actual = pRecallNode destination
+            do! ensure (actual = expected) (sprintf "Async activation %d result destination differs from its declared formal carrier." site)
+            return rest, [{ SSA = address; Type = actual }]
+          }
+        | _ -> fail (Message (sprintf "Async activation %d result destination has no corresponding published formal." site))
     match declared |> List.tryFind (fun (_, components) -> not components.IsEmpty) with
     | Some ((name, _, formal), _) ->
         return! fail (Message (sprintf "Async activation %d: Codata.AsyncActivations publishes no argument occurrence for formal %d (%s) of deferred callable %d, and Emission.Ordinary.Parameters does not publish that formal as omitted." site (NodeId.value formal) name (NodeId.value carrier.Implementation)))
@@ -107,7 +117,7 @@ let pAsyncActivation (ctx: WitnessContext) (row: AsyncActivation) : PSGParser<ML
             | _ -> fail (Message (sprintf "Async activation %d: deferred callable %d does not publish exactly one physical result component." site (NodeId.value carrier.Implementation)))
         let! result = getNodeSSA row.Site
         let! call =
-            pFuncCallIndirectResults [{ SSA = result; Type = resultType }] (Operands.code activated).SSA (Option.toList (Operands.environment activated))
+            pFuncCallIndirectResults [{ SSA = result; Type = resultType }] (Operands.code activated).SSA (Option.toList (Operands.environment activated) @ resultArguments)
         let! adaptations, value, valueType = pAdapt row.Site row.Site result resultType
         return call :: adaptations, TRValue { SSA = value; Type = valueType }
 }

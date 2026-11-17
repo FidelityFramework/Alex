@@ -1871,18 +1871,26 @@ module BoundaryAbi =
 
     let tryParametersInRevision (revision: Fidelity.PSG.Revision) (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
         let boundary = revision.Emission.Boundary
-        let rec collect acc = function
+        let rec collect ordinal acc = function
             | [] -> Ok (List.rev acc)
+            | (formal, Fidelity.PSG.BoundaryScalar.Entry invocation) :: rest ->
+                match boundary.CallbackInvocations.TryFind invocation with
+                | Some row when row.Identity = invocation && row.Import = declaration.Identity &&
+                                row.Formal = formal && row.Parameter = ordinal ->
+                    match tryCallbackSignatureTypeAt revision invocation with
+                    | Ok ty -> collect (ordinal + 1) (ty :: acc) rest
+                    | Error reason -> Error reason
+                | _ -> Error "A callback receiver parameter differs from its exact invocation, import, formal or ordinal."
             | (formal, Fidelity.PSG.BoundaryScalar.ResourceHandle(decl, false)) :: rest
                 when decl = formal ->
                 match sharedBufferFormalStructTypeAt revision declaration formal false with
-                | Ok structTy -> collect (structTy :: acc) rest
+                | Ok structTy -> collect (ordinal + 1) (structTy :: acc) rest
                 | Error _ -> Error "A resource carrier requires its exact direct-call conversion and cleanup accounts."
             | (_, scalar) :: rest ->
                 match tryScalarTypeIn boundary Set.empty scalar with
-                | Ok ty -> collect (ty :: acc) rest
+                | Ok ty -> collect (ordinal + 1) (ty :: acc) rest
                 | Error reason -> Error reason
-        collect [] declaration.Parameters
+        collect 0 [] declaration.Parameters
 
     let tryResultsInRevision (revision: Fidelity.PSG.Revision) (declaration: Fidelity.PSG.BoundaryImport) : Result<MLIRType list, string> =
         let boundary = revision.Emission.Boundary

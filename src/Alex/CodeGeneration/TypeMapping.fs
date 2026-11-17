@@ -29,8 +29,15 @@ let isResourceRepresentation = function
     | _ -> false
 
 let isResourceOccurrence (graph: Revision) nodeId =
+    // Physical handles also represent borrowed callback formals. Only a
+    // published resource declaration requires acquisition/cleanup lineage.
+    let handles = graph.Emission.Boundary.ResourceDeclarations.Values |> Seq.map _.HandleType |> Set.ofSeq
+    let rec owned = function
+        | ValueRepresentation.Scalar(SettledSlot.CHandle(identity, _, _)) -> handles.Contains identity
+        | ValueRepresentation.Union(cases, _) -> cases |> List.exists (snd >> List.exists owned)
+        | _ -> false
     graph.Emission.Numeric.OccurrenceRepresentations.TryFind nodeId
-    |> Option.exists (function Ok representation -> isResourceRepresentation representation | Error _ -> false)
+    |> Option.exists (function Ok representation -> owned representation | Error _ -> false)
 
 let scalarCarrierType (carrier: ScalarCarrier) : Result<MLIRType, string> =
     match settledScalarType carrier.Slot with

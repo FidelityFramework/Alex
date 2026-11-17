@@ -799,12 +799,14 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                               }
                         return [{ SSA = resultSSA; Type = resultType }]
                       }
+                let hasOpaqueHandle = BoundaryAbi.importCarriesNonSharedResourceHandle state.Graph declaration
                 let isPureOptionalEntry =
-                    not slots.IsEmpty && not writable && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall
+                    not slots.IsEmpty && not writable && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall && not hasOpaqueHandle
                 let isPureWritable =
-                    writable && slots.IsEmpty && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall
+                    writable && slots.IsEmpty && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall && not hasOpaqueHandle
                 let isBoundaryBufferCall =
                     hasReadOnly || not absenceSlots.IsEmpty || hasBorrowedResult || (writable && not slots.IsEmpty) || isSharedCall
+                    || hasOpaqueHandle
                 let! operation =
                     if isPureOptionalEntry then parser {
                         do! ensure (call.Entry.IsNone && call.Resource.IsNone)

@@ -166,29 +166,38 @@ let floatWidthToString (width: FloatWidth) : string =
     | F32 -> "f32"
     | F64 -> "f64"
 
+type private SerializationContext = {
+    Pointer: Result<int, string>
+    OpaqueTypes: Map<MLIRType, string>
+}
+
+let private portable pointer = { Pointer = pointer; OpaqueTypes = Map.empty }
+
 /// Convert MLIRType to MLIR text format string
-let rec private typeToStringStep (pointer: Result<int, string>) (ty: MLIRType) : SerializationStep<string> =
+let rec private typeToStringStep (context: SerializationContext) (ty: MLIRType) : SerializationStep<string> =
     match ty with
     | TOpaqueHandle _ | TResourceOption _ ->
-        RequiresTarget "Opaque resource carriers require the selected backend and their exact source accounts."
+        match context.OpaqueTypes.TryFind ty with
+        | Some spelling -> Serialized spelling
+        | None -> RequiresTarget "Opaque resource carriers require the selected backend and their exact source accounts."
     | TInt width -> intWidthToString width |> stepFromResult
     | TFloat width -> Serialized (floatWidthToString width)
     | TFunc (paramTypes, resultTypes) ->
-        stepPair (stepMapList (typeToStringStep pointer) paramTypes) (resultTypesToStringStep pointer resultTypes)
+        stepPair (stepMapList (typeToStringStep context) paramTypes) (resultTypesToStringStep context resultTypes)
         |> stepMap (fun (paramStrs, resStr) -> sprintf "(%s) -> %s" (String.concat ", " paramStrs) resStr)
     | TMemRef elemTy ->
-        typeToStringStep pointer elemTy |> stepMap (sprintf "memref<?x%s>")
+        typeToStringStep context elemTy |> stepMap (sprintf "memref<?x%s>")
     | TMemRefStatic (size, elemTy) ->
-        typeToStringStep pointer elemTy |> stepMap (sprintf "memref<%dx%s>" size)
+        typeToStringStep context elemTy |> stepMap (sprintf "memref<%dx%s>" size)
     | TMemRefScalar elemTy ->
-        typeToStringStep pointer elemTy |> stepMap (sprintf "memref<%s>")
+        typeToStringStep context elemTy |> stepMap (sprintf "memref<%s>")
     | TVector (count, elemTy) ->
-        typeToStringStep pointer elemTy |> stepMap (sprintf "vector<%dx%s>" count)
+        typeToStringStep context elemTy |> stepMap (sprintf "vector<%dx%s>" count)
     | TIndex -> Serialized "index"
     | TVoid -> Serialized "()"  // Empty MLIR result list at a foreign function boundary
     | TStruct (_, Some bytes) ->
         // TStruct serializes as !hw.struct for CIRCT (FPGA) or memref for CPU.
-        // This default path is CPU; hwTypeToString pointer handles the FPGA case.
+        // This default path is CPU; hwTypeToString context handles the FPGA case.
         // The byte size is the settled layout's, read from the graph (the one size model).
         Serialized (sprintf "memref<%dxi8>" bytes.Size)
     | TStruct (fields, None) ->
@@ -204,32 +213,32 @@ let rec private typeToStringStep (pointer: Result<int, string>) (ty: MLIRType) :
 
 /// Function results are a list. A sole function-typed result still needs the
 /// enclosing result-list parentheses so its own arrow is unambiguous.
-and private resultTypesToStringStep (pointer: Result<int, string>) (results: MLIRType list) : SerializationStep<string> =
+and private resultTypesToStringStep (context: SerializationContext) (results: MLIRType list) : SerializationStep<string> =
     if List.contains TVoid results then
         Refused "Function result lists use [] for no result; TVoid is not a value type"
     else
         match results with
-        | [result] when (match result with TFunc _ -> false | _ -> true) -> typeToStringStep pointer result
-        | _ -> stepMapList (typeToStringStep pointer) results |> stepMap (fun strs -> strs |> String.concat ", " |> sprintf "(%s)")
+        | [result] when (match result with TFunc _ -> false | _ -> true) -> typeToStringStep context result
+        | _ -> stepMapList (typeToStringStep context) results |> stepMap (fun strs -> strs |> String.concat ", " |> sprintf "(%s)")
 
-/// FPGA-aware type serialization: TStruct → !hw.struct<...>, all others → typeToString pointer
+/// FPGA-aware type serialization: TStruct → !hw.struct<...>, all others → typeToString context
 /// Used by comb.* and other CIRCT ops that carry struct types on FPGA.
-let rec private hwTypeToStringStep (pointer: Result<int, string>) (ty: MLIRType) : SerializationStep<string> =
+let rec private hwTypeToStringStep (context: SerializationContext) (ty: MLIRType) : SerializationStep<string> =
     match ty with
     | TStruct (fields, _) ->
         fields
-        |> stepMapList (fun (n, t) -> hwTypeToStringStep pointer t |> stepMap (sprintf "%s: %s" n))
+        |> stepMapList (fun (n, t) -> hwTypeToStringStep context t |> stepMap (sprintf "%s: %s" n))
         |> stepMap (fun fs -> sprintf "!hw.struct<%s>" (String.concat ", " fs))
-    | _ -> typeToStringStep pointer ty
+    | _ -> typeToStringStep context ty
 
 let typeToString (pointer: Result<int, string>) (ty: MLIRType) : Result<string, string> =
-    typeToStringStep pointer ty |> stepToResult
+    typeToStringStep (portable pointer) ty |> stepToResult
 
 let resultTypesToString (pointer: Result<int, string>) (results: MLIRType list) : Result<string, string> =
-    resultTypesToStringStep pointer results |> stepToResult
+    resultTypesToStringStep (portable pointer) results |> stepToResult
 
 let hwTypeToString (pointer: Result<int, string>) (ty: MLIRType) : Result<string, string> =
-    hwTypeToStringStep pointer ty |> stepToResult
+    hwTypeToStringStep (portable pointer) ty |> stepToResult
 
 let private nodeIdValue (Fidelity.PSG.NodeId id) = id
 
@@ -511,12 +520,12 @@ let ssaToString (ssa: SSA) : string =
     | Arg n -> sprintf "%%arg%d" n
 
 /// Convert Val (SSA + type) to typed SSA value string
-let private valToStringStep (pointer: Result<int, string>) (v: Val) : SerializationStep<string> =
-    typeToStringStep pointer v.Type
+let private valToStringStep (context: SerializationContext) (v: Val) : SerializationStep<string> =
+    typeToStringStep context v.Type
     |> stepMap (sprintf "%s : %s" (ssaToString v.SSA))
 
 let valToString (pointer: Result<int, string>) (v: Val) : Result<string, string> =
-    valToStringStep pointer v |> stepToResult
+    valToStringStep (portable pointer) v |> stepToResult
 
 let private resultAssignment (results: Val list) =
     match results with
@@ -562,11 +571,11 @@ let fcmpPredToString (pred: FCmpPred) : string =
     | AlwaysTrue -> "true"
 
 /// Serialize ArithOp to MLIR text
-let private arithOpToStringStep (pointer: Result<int, string>) (op: ArithOp) : SerializationStep<string> =
+let private arithOpToStringStep (context: SerializationContext) (op: ArithOp) : SerializationStep<string> =
     let oneType ty fmt =
-        typeToStringStep pointer ty |> stepMap fmt
+        typeToStringStep context ty |> stepMap fmt
     let twoTypes srcTy destTy fmt =
-        stepPair (typeToStringStep pointer srcTy) (typeToStringStep pointer destTy) |> stepMap fmt
+        stepPair (typeToStringStep context srcTy) (typeToStringStep context destTy) |> stepMap fmt
     match op with
     | ConstI (result, value, ty) ->
         oneType ty (sprintf "%s = arith.constant %s : %s" (ssaToString result) (string value))
@@ -633,13 +642,13 @@ let private arithOpToStringStep (pointer: Result<int, string>) (op: ArithOp) : S
         oneType ty (sprintf "%s = arith.shrsi %s, %s : %s" (ssaToString result) (ssaToString lhs) (ssaToString rhs))
 
 let arithOpToString (pointer: Result<int, string>) (op: ArithOp) : Result<string, string> =
-    arithOpToStringStep pointer op |> stepToResult
+    arithOpToStringStep (portable pointer) op |> stepToResult
 
 /// Serialize CombOp to CIRCT MLIR text (comb dialect)
 /// Uses hwTypeToString: comb.* ops only appear on FPGA where TStruct → !hw.struct
-let private combOpToStringStep (pointer: Result<int, string>) (op: CombOp) : SerializationStep<string> =
+let private combOpToStringStep (context: SerializationContext) (op: CombOp) : SerializationStep<string> =
     let oneType ty fmt =
-        hwTypeToStringStep pointer ty |> stepMap fmt
+        hwTypeToStringStep context ty |> stepMap fmt
     match op with
     | CombAdd (result, lhs, rhs, ty) ->
         oneType ty (sprintf "%s = comb.add %s, %s : %s" (ssaToString result) (ssaToString lhs) (ssaToString rhs))
@@ -673,11 +682,11 @@ let private combOpToStringStep (pointer: Result<int, string>) (op: CombOp) : Ser
         oneType ty (sprintf "%s = comb.mux %s, %s, %s : %s" (ssaToString result) (ssaToString cond) (ssaToString trueVal) (ssaToString falseVal))
 
 let combOpToString (pointer: Result<int, string>) (op: CombOp) : Result<string, string> =
-    combOpToStringStep pointer op |> stepToResult
+    combOpToStringStep (portable pointer) op |> stepToResult
 
 /// Serialize HWOp to CIRCT MLIR text (hw dialect)
 /// Hardware module containers use the neutral frame grammar below.
-let private hwOpToStringStep (pointer: Result<int, string>) (op: HWOp) : SerializationStep<string> =
+let private hwOpToStringStep (context: SerializationContext) (op: HWOp) : SerializationStep<string> =
     match op with
     | HWModule _ -> Refused "Hardware module serialization requires its neutral container frame."
     | HWOutput vals ->
@@ -685,29 +694,29 @@ let private hwOpToStringStep (pointer: Result<int, string>) (op: HWOp) : Seriali
         | [] -> Serialized "hw.output"
         | _ ->
             let valsStr = vals |> List.map (fun (ssa, _) -> ssaToString ssa) |> String.concat ", "
-            stepMapList (fun (_, ty) -> hwTypeToStringStep pointer ty) vals
+            stepMapList (fun (_, ty) -> hwTypeToStringStep context ty) vals
             |> stepMap (fun types ->
                 let typesStr = String.concat ", " types
                 sprintf "hw.output %s : %s" valsStr typesStr)
     | HWStructCreate (result, fieldVals, structTy) ->
         let valsStr = fieldVals |> List.map (fun (ssa, _) -> ssaToString ssa) |> String.concat ", "
-        hwTypeToStringStep pointer structTy
+        hwTypeToStringStep context structTy
         |> stepMap (sprintf "%s = hw.struct_create (%s) : %s" (ssaToString result) valsStr)
     | HWStructExtract (result, input, fieldName, structTy) ->
-        hwTypeToStringStep pointer structTy
+        hwTypeToStringStep context structTy
         |> stepMap (sprintf "%s = hw.struct_extract %s[\"%s\"] : %s" (ssaToString result) (ssaToString input) fieldName)
     | HWStructInject (result, input, fieldName, newValue, structTy) ->
-        hwTypeToStringStep pointer structTy
+        hwTypeToStringStep context structTy
         |> stepMap (sprintf "%s = hw.struct_inject %s[\"%s\"], %s : %s" (ssaToString result) (ssaToString input) fieldName (ssaToString newValue))
     | HWInstance (result, instName, moduleName, inputs, outputs) ->
         // hw.instance "instName" @moduleName(portName: %ssa : type, ...) -> (outName: type, ...)
         let inputsStep =
             stepMapList (fun (pn, ssa, ty) ->
-                hwTypeToStringStep pointer ty
+                hwTypeToStringStep context ty
                 |> stepMap (sprintf "%s: %s: %s" pn (ssaToString ssa))) inputs
         let outputsStep =
             stepMapList (fun (pn, ty) ->
-                hwTypeToStringStep pointer ty
+                hwTypeToStringStep context ty
                 |> stepMap (sprintf "%s: %s" pn)) outputs
         stepPair inputsStep outputsStep
         |> stepMap (fun (inList, outList) ->
@@ -721,7 +730,7 @@ let private hwOpToStringStep (pointer: Result<int, string>) (op: HWOp) : Seriali
                 stepMapList (fun (_, ft) -> zeroLiteral ft) fields
                 |> stepMap (fun inner -> sprintf "[%s]" (String.concat ", " inner))
             | _ ->
-                hwTypeToStringStep pointer ty
+                hwTypeToStringStep context ty
                 |> stepMap (sprintf "0 : %s")
         let innerStep =
             match structTy with
@@ -729,19 +738,19 @@ let private hwOpToStringStep (pointer: Result<int, string>) (op: HWOp) : Seriali
                 stepMapList (fun (_, ft) -> zeroLiteral ft) fields
                 |> stepMap (String.concat ", ")
             | _ -> zeroLiteral structTy
-        stepPair innerStep (hwTypeToStringStep pointer structTy)
+        stepPair innerStep (hwTypeToStringStep context structTy)
         |> stepMap (fun (innerStr, tyStr) ->
             sprintf "%s = hw.aggregate_constant [%s] : %s"
                 (ssaToString result) innerStr tyStr)
 
 let hwOpToString (pointer: Result<int, string>) (op: HWOp) : Result<string, string> =
-    hwOpToStringStep pointer op |> stepToResult
+    hwOpToStringStep (portable pointer) op |> stepToResult
 
 /// Serialize SeqOp to CIRCT MLIR text (seq dialect)
-let private seqOpToStringStep (pointer: Result<int, string>) (op: SeqOp) : SerializationStep<string> =
+let private seqOpToStringStep (context: SerializationContext) (op: SeqOp) : SerializationStep<string> =
     match op with
     | SeqCompreg (result, input, clk, resetOpt, ty) ->
-        typeToStringStep pointer ty
+        typeToStringStep context ty
         |> stepMap (fun tyStr ->
             match resetOpt with
             | Some (resetSignal, resetValue) ->
@@ -753,7 +762,7 @@ let private seqOpToStringStep (pointer: Result<int, string>) (op: SeqOp) : Seria
                     (ssaToString result) (ssaToString input) (ssaToString clk) tyStr)
 
 let seqOpToString (pointer: Result<int, string>) (op: SeqOp) : Result<string, string> =
-    seqOpToStringStep pointer op |> stepToResult
+    seqOpToStringStep (portable pointer) op |> stepToResult
 
 /// Serialize an SMT dialect type to MLIR text
 let smtTypeToString (ty: SMTType) : string =
@@ -763,7 +772,7 @@ let smtTypeToString (ty: SMTType) : string =
     | SMTBV w -> sprintf "!smt.bv<%d>" w
 
 /// Serialize SMTOp to MLIR text (verification modules)
-let private smtOpToStringStep (pointer: Result<int, string>) (inner: MLIROp -> SerializationStep<string>) (op: SMTOp) : SerializationStep<string> =
+let private smtOpToStringStep (context: SerializationContext) (inner: MLIROp -> SerializationStep<string>) (op: SMTOp) : SerializationStep<string> =
     match op with
     | SMTSolver body ->
         stepMapList inner body
@@ -813,20 +822,20 @@ let private smtOpToStringStep (pointer: Result<int, string>) (inner: MLIROp -> S
         Serialized "smt.check sat {} unknown {} unsat {}"
 
 let smtOpToString (pointer: Result<int, string>) (inner: MLIROp -> Result<string, string>) (op: SMTOp) : Result<string, string> =
-    smtOpToStringStep pointer (inner >> stepFromResult) op |> stepToResult
+    smtOpToStringStep (portable pointer) (inner >> stepFromResult) op |> stepToResult
 
 /// Serialize MemRefOp to MLIR text
-let private memrefOpToStringStep (pointer: Result<int, string>) (op: MemRefOp) : SerializationStep<string> =
+let private memrefOpToStringStep (context: SerializationContext) (op: MemRefOp) : SerializationStep<string> =
     match op with
     | MemRefOp.LoadAligned (result, memref, indices, _, memrefType, alignment) ->
         let indicesStr = indices |> List.map ssaToString |> String.concat ", "
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (
             sprintf "%s = memref.load %s[%s] {alignment = %d : i64} : %s"
                 (ssaToString result) (ssaToString memref) indicesStr alignment)
     | MemRefOp.StoreAligned (value, memref, indices, _, memrefType, alignment) ->
         let indicesStr = indices |> List.map ssaToString |> String.concat ", "
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (
             sprintf "memref.store %s, %s[%s] {alignment = %d : i64} : %s"
                 (ssaToString value) (ssaToString memref) indicesStr alignment)
@@ -834,7 +843,7 @@ let private memrefOpToStringStep (pointer: Result<int, string>) (op: MemRefOp) :
         // Build indices string
         let indicesStr = if List.isEmpty indices then "" else sprintf "[%s]" (indices |> List.map ssaToString |> String.concat ", ")
         // Use the passed memrefType directly (no heuristic reconstruction)
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (
             sprintf "%s = memref.load %s%s : %s"
                 (ssaToString result) (ssaToString memref) indicesStr)
@@ -842,12 +851,12 @@ let private memrefOpToStringStep (pointer: Result<int, string>) (op: MemRefOp) :
         // Build indices string
         let indicesStr = if List.isEmpty indices then "" else sprintf "[%s]" (indices |> List.map ssaToString |> String.concat ", ")
         // Use the passed memrefType directly (no heuristic reconstruction)
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (
             sprintf "memref.store %s, %s%s : %s"
                 (ssaToString value) (ssaToString memref) indicesStr)
     | MemRefOp.Alloca (result, memrefType, alignmentOpt) ->
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (fun tyStr ->
             match alignmentOpt with
             | Some alignment ->
@@ -856,7 +865,7 @@ let private memrefOpToStringStep (pointer: Result<int, string>) (op: MemRefOp) :
             | None ->
                 sprintf "%s = memref.alloca() : %s" (ssaToString result) tyStr)
     | MemRefOp.AllocaDynamic (result, count, elementType, alignment) ->
-        typeToStringStep pointer (TMemRef elementType)
+        typeToStringStep context (TMemRef elementType)
         |> stepMap (
             sprintf "%s = memref.alloca(%s) {alignment = %d : i64} : %s"
                 (ssaToString result) (ssaToString count) alignment)
@@ -864,17 +873,17 @@ let private memrefOpToStringStep (pointer: Result<int, string>) (op: MemRefOp) :
         // Heap allocation with runtime size: memref.alloc(%size) : memref<?xelemType>
         let memrefType = TMemRef elemType
         let alignment = alignmentOpt |> Option.map (sprintf " {alignment = %d : i64}") |> Option.defaultValue ""
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (
             sprintf "%s = memref.alloc(%s)%s : %s"
                 (ssaToString result) (ssaToString sizeSSA) alignment)
     | MemRefOp.Dealloc (memref, memrefType) ->
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (sprintf "memref.dealloc %s : %s" (ssaToString memref))
     | MemRefOp.AllocStatic (result, memrefType, alignmentOpt) ->
         // Heap allocation with compile-time size: memref.alloc() : memref<NxT>
         // Like Alloca but heap-allocated — survives function return
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (fun tyStr ->
             match alignmentOpt with
             | Some alignment ->
@@ -883,13 +892,13 @@ let private memrefOpToStringStep (pointer: Result<int, string>) (op: MemRefOp) :
             | None ->
                 sprintf "%s = memref.alloc() : %s" (ssaToString result) tyStr)
     | MemRefOp.Copy (source, destination, sourceType, destinationType) ->
-        stepPair (typeToStringStep pointer sourceType) (typeToStringStep pointer destinationType)
+        stepPair (typeToStringStep context sourceType) (typeToStringStep context destinationType)
         |> stepMap (fun (srcStr, dstStr) ->
             sprintf "memref.copy %s, %s : %s to %s"
                 (ssaToString source) (ssaToString destination) srcStr dstStr)
     | MemRefOp.SubView (result, source, offsets, resultType) ->
         let offsetsStr = offsets |> List.map ssaToString |> String.concat ", "
-        typeToStringStep pointer resultType
+        typeToStringStep context resultType
         |> stepMap (
             sprintf "%s = memref.subview %s[%s] : %s"
                 (ssaToString result) (ssaToString source) offsetsStr)
@@ -907,9 +916,9 @@ let private memrefOpToStringStep (pointer: Result<int, string>) (op: MemRefOp) :
             | TMemRef t | TMemRefStatic (_, t) | TMemRefScalar t -> Serialized t
             | t -> Refused (sprintf "memref.subview: Alex emission did not supply a memref source for SSA %s: the source is typed %s" (ssaToString result) (describeType t))
         elemTypeStep
-        |> stepBind (typeToStringStep pointer)
+        |> stepBind (typeToStringStep context)
         |> stepBind (fun elemStr ->
-            typeToStringStep pointer sourceType
+            typeToStringStep context sourceType
             |> stepMap (fun srcTypeStr ->
                 let sizeStr =
                     match sizes with
@@ -924,60 +933,60 @@ let private memrefOpToStringStep (pointer: Result<int, string>) (op: MemRefOp) :
                     (ssaToString result) (ssaToString source) offsetsStr sizesStr stridesStr
                     srcTypeStr stridedTypeStr))
     | MemRefOp.ExtractBasePtr (result, memref, ty) ->
-        // Extract pointer as platform word (index type) - PORTABLE!
+        // Extract context as platform word (index type) - PORTABLE!
         // Returns index (platform word size), caller must cast to target type if needed
-        typeToStringStep pointer ty
+        typeToStringStep context ty
         |> stepMap (
             sprintf "%s = memref.extract_aligned_pointer_as_index %s : %s -> index"
                 (ssaToString result) (ssaToString memref))
     | MemRefOp.ExtractStridedMetadata(baseBuffer, offset, size, stride, source, sourceType, elementType) ->
-        stepPair (typeToStringStep pointer sourceType) (typeToStringStep pointer (TMemRefScalar elementType))
+        stepPair (typeToStringStep context sourceType) (typeToStringStep context (TMemRefScalar elementType))
         |> stepMap (fun (srcStr, elemStr) ->
             sprintf "%s, %s, %s, %s = memref.extract_strided_metadata %s : %s -> %s, index, index, index"
                 (ssaToString baseBuffer) (ssaToString offset) (ssaToString size) (ssaToString stride)
                 (ssaToString source) srcStr elemStr)
     | MemRefOp.GetGlobal (result, globalName, memrefType) ->
         // memref.get_global @symbol_name : memref<...>
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (
             sprintf "%s = memref.get_global @%s : %s"
                 (ssaToString result) globalName)
     | MemRefOp.Dim (result, memref, index, memrefType) ->
         // memref.dim %memref, %index : memref<...>
-        typeToStringStep pointer memrefType
+        typeToStringStep context memrefType
         |> stepMap (
             sprintf "%s = memref.dim %s, %s : %s"
                 (ssaToString result) (ssaToString memref) (ssaToString index))
     | MemRefOp.Cast (result, source, srcType, destType) ->
         // memref.cast %source : srcType to destType
-        stepPair (typeToStringStep pointer srcType) (typeToStringStep pointer destType)
+        stepPair (typeToStringStep context srcType) (typeToStringStep context destType)
         |> stepMap (fun (srcStr, dstStr) ->
             sprintf "%s = memref.cast %s : %s to %s"
                 (ssaToString result) (ssaToString source) srcStr dstStr)
     | MemRefOp.ReinterpretCast (result, source, byteOffset, size, srcType, destType) ->
         // One operation, one line. A view of another element type, or at a byte
         // offset, is MemRefOp.View with its offset value, composed by the Pattern.
-        stepPair (typeToStringStep pointer srcType) (typeToStringStep pointer destType)
+        stepPair (typeToStringStep context srcType) (typeToStringStep context destType)
         |> stepMap (fun (srcStr, dstStr) ->
             sprintf "%s = memref.reinterpret_cast %s to offset: [%d], sizes: [%d], strides: [1] : %s to %s"
                 (ssaToString result) (ssaToString source) byteOffset size srcStr dstStr)
     | MemRefOp.ReinterpretCastDynamic (result, source, offset, sizeSSA, srcType, destType) ->
-        // memref.reinterpret_cast with dynamic size: reconstruct memref from pointer + known length
+        // memref.reinterpret_cast with dynamic size: reconstruct memref from context + known length
         // Used for string/array capture extraction where size is loaded from closure struct
-        stepPair (typeToStringStep pointer srcType) (typeToStringStep pointer destType)
+        stepPair (typeToStringStep context srcType) (typeToStringStep context destType)
         |> stepMap (fun (srcStr, dstStr) ->
             sprintf "%s = memref.reinterpret_cast %s to offset: [%d], sizes: [%s], strides: [1] : %s to %s"
                 (ssaToString result) (ssaToString source) offset (ssaToString sizeSSA) srcStr dstStr)
     | MemRefOp.View (result, source, offsetSSA, srcType, destType) ->
         // memref.view: typed view of byte buffer (different element type allowed)
         // Portable across all targets: CPU (→ GEP), FPGA (→ typed memory port), NPU (→ typed channel)
-        stepPair (typeToStringStep pointer srcType) (typeToStringStep pointer destType)
+        stepPair (typeToStringStep context srcType) (typeToStringStep context destType)
         |> stepMap (fun (srcStr, dstStr) ->
             sprintf "%s = memref.view %s[%s][] : %s to %s"
                 (ssaToString result) (ssaToString source) (ssaToString offsetSSA) srcStr dstStr)
 
 let memrefOpToString (pointer: Result<int, string>) (op: MemRefOp) : Result<string, string> =
-    memrefOpToStringStep pointer op |> stepToResult
+    memrefOpToStringStep (portable pointer) op |> stepToResult
 
 /// Shared portable container grammar. Child holes contain operations, never
 /// backend text or a callback that could introduce target instructions.
@@ -990,18 +999,18 @@ let private withArgumentNames arguments text =
     arguments |> List.indexed |> List.rev
     |> List.fold (fun body (index, name) -> Alex.Text.replace (sprintf "%%arg%d" index) (sprintf "%%%s" name) body) text
 
-let private containerFrameStep pointer = function
+let private containerFrameStep context = function
     | MLIROp.HWOp(HWModule(name, inputs, outputs, body)) ->
-        let inputStep = inputs |> stepMapList (fun (n, ty) -> hwTypeToStringStep pointer ty |> stepMap (sprintf "in %%%s: %s" n))
-        let outputStep = outputs |> stepMapList (fun (n, ty) -> hwTypeToStringStep pointer ty |> stepMap (sprintf "out %s: %s" n))
+        let inputStep = inputs |> stepMapList (fun (n, ty) -> hwTypeToStringStep context ty |> stepMap (sprintf "in %%%s: %s" n))
+        let outputStep = outputs |> stepMapList (fun (n, ty) -> hwTypeToStringStep context ty |> stepMap (sprintf "out %s: %s" n))
         stepPair inputStep outputStep
         |> stepMap (fun (inputPorts, outputPorts) ->
             Some [Text(sprintf "hw.module @%s(%s) {\n    " name (String.concat ", " (inputPorts @ outputPorts)))
                   NamedChildren("", "\n    ", List.map fst inputs, body); Text "\n}"])
     | MLIROp.FuncOp(FuncDef(name, args, resultTypes, body, _))
     | MLIROp.NoUnwindFunction(FuncDef(name, args, resultTypes, body, _)) as operation ->
-        let argsStep = args |> stepMapList (fun (ssa, ty) -> typeToStringStep pointer ty |> stepMap (sprintf "%s: %s" (ssaToString ssa)))
-        let resStep = resultTypesToStringStep pointer resultTypes
+        let argsStep = args |> stepMapList (fun (ssa, ty) -> typeToStringStep context ty |> stepMap (sprintf "%s: %s" (ssaToString ssa)))
+        let resStep = resultTypesToStringStep context resultTypes
         let attributes = match operation with NoUnwindFunction _ -> " attributes {passthrough = [\"nounwind\"]}" | _ -> ""
         stepPair argsStep resStep
         |> stepMap (fun (argStrs, resStr) ->
@@ -1014,7 +1023,7 @@ let private containerFrameStep pointer = function
         let resultStep =
             match result with
             | Some(ssa, ty) ->
-                typeToStringStep pointer ty
+                typeToStringStep context ty
                 |> stepMap (fun tyStr -> sprintf "%s = " (ssaToString ssa), sprintf " -> (%s)" tyStr)
             | None -> Serialized ("", "")
         resultStep
@@ -1033,7 +1042,7 @@ let private containerFrameStep pointer = function
             | _ ->
                 let names = results |> List.map (fst >> ssaToString) |> String.concat ", "
                 results
-                |> stepMapList (snd >> typeToStringStep pointer)
+                |> stepMapList (snd >> typeToStringStep context)
                 |> stepMap (fun types -> names + " = ", " -> " + String.concat ", " types)
         resultsStep
         |> stepMap (fun (prefix, resultTypes) ->
@@ -1044,7 +1053,12 @@ let private containerFrameStep pointer = function
     | _ -> Serialized None
 
 let containerFrame pointer op : Result<ContainerPart list option, string> =
-    containerFrameStep pointer op |> stepToResult
+    containerFrameStep (portable pointer) op |> stepToResult
+
+/// Target composition supplies only opaque type spellings after validating its
+/// source accounts. Portable entrypoints retain their refusal for these types.
+let containerFrameWithOpaqueTypes pointer opaqueTypes op : Result<ContainerPart list option, string> =
+    containerFrameStep { Pointer = pointer; OpaqueTypes = opaqueTypes } op |> stepToResult
 
 let moduleFrame moduleName operations =
     match moduleName with
@@ -1052,8 +1066,8 @@ let moduleFrame moduleName operations =
     | None -> [Text "module {\n"; Children("  ", "\n", operations); Text "\n}"]
 
 /// Serialize top-level MLIROp to portable MLIR text.
-let rec private opToStringStep (pointer: Result<int, string>) (op: MLIROp) : SerializationStep<string> =
-    match containerFrameStep pointer op with
+let rec private opToStringStep (context: SerializationContext) (op: MLIROp) : SerializationStep<string> =
+    match containerFrameStep context op with
     | RequiresTarget msg -> RequiresTarget msg
     | Refused err -> Refused err
     | Serialized (Some parts) ->
@@ -1062,21 +1076,21 @@ let rec private opToStringStep (pointer: Result<int, string>) (op: MLIROp) : Ser
             | Text text -> Serialized text
             | Children(prefix, separator, operations) ->
                 operations
-                |> stepMapList (fun child -> opToStringStep pointer child |> stepMap (fun s -> prefix + s))
+                |> stepMapList (fun child -> opToStringStep context child |> stepMap (fun s -> prefix + s))
                 |> stepMap (String.concat separator)
             | NamedChildren(prefix, separator, arguments, operations) ->
                 operations
-                |> stepMapList (fun child -> opToStringStep pointer child |> stepMap (fun s -> prefix + s))
+                |> stepMapList (fun child -> opToStringStep context child |> stepMap (fun s -> prefix + s))
                 |> stepMap (String.concat separator >> withArgumentNames arguments))
         |> stepMap (String.concat "")
-    | Serialized None -> leafToStringStep pointer op
+    | Serialized None -> leafToStringStep context op
 
-and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : SerializationStep<string> =
+and private leafToStringStep (context: SerializationContext) (op: MLIROp) : SerializationStep<string> =
     match op with
     | MLIROp.MmioLoad _ | MLIROp.MmioStore _ ->
         RequiresTarget "Portable MMIO intent requires realization by the selected backend."
-    | MLIROp.ArithOp aop -> arithOpToStringStep pointer aop
-    | MLIROp.MemRefOp mop -> memrefOpToStringStep pointer mop
+    | MLIROp.ArithOp aop -> arithOpToStringStep context aop
+    | MLIROp.MemRefOp mop -> memrefOpToStringStep context mop
     | MLIROp.NoUnwindFunction _ -> Refused "NoUnwindFunction requires a function definition"
     | MLIROp.FuncOp fop ->
         match fop with
@@ -1085,7 +1099,7 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
             if not byvalParams.IsEmpty then
                 Refused (sprintf "Foreign declaration '%s' requires a source-settled aggregate ABI realization; portable func declarations cannot realize byval metadata" name)
             else
-                stepPair (stepMapList (typeToStringStep pointer) paramTypes) (resultTypesToStringStep pointer resultTypes)
+                stepPair (stepMapList (typeToStringStep context) paramTypes) (resultTypesToStringStep context resultTypes)
                 |> stepMap (fun (paramStrs, resStr) ->
                     sprintf "func.func private @%s(%s) -> %s" (symbolName name) (String.concat ", " paramStrs) resStr)
         | BoundaryFuncDecl (declaration, parameters, results) ->
@@ -1113,28 +1127,28 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
             if requiresTargetMarshalling then
                 RequiresTarget "Boundary buffer and borrowed-view declarations require the selected backend and their exact source accounts."
             else
-                stepPair (stepMapList (typeToStringStep pointer) parameters) (resultTypesToStringStep pointer results)
+                stepPair (stepMapList (typeToStringStep context) parameters) (resultTypesToStringStep context results)
                 |> stepMap (fun (paramStrs, resStr) ->
                     sprintf "func.func private @%s(%s) -> %s" (symbolName declaration.Symbol) (String.concat ", " paramStrs) resStr)
         | IntrinsicWriteDecl declaration ->
             match IntrinsicWriteAbi.parameters declaration, IntrinsicWriteAbi.results declaration with
             | Ok paramTys, Ok resTys ->
-                stepPair (stepMapList (typeToStringStep pointer) paramTys) (resultTypesToStringStep pointer resTys)
+                stepPair (stepMapList (typeToStringStep context) paramTys) (resultTypesToStringStep context resTys)
                 |> stepMap (fun (paramStrs, resStr) ->
                     sprintf "func.func private @%s(%s) -> %s" (symbolName declaration.Symbol) (String.concat ", " paramStrs) resStr)
             | Error err, _ | _, Error err -> Refused err
         | FuncCall (results, funcName, args) ->
             let argSSAs = args |> List.map (fun v -> ssaToString v.SSA) |> String.concat ", "
-            stepPair (stepMapList (fun v -> typeToStringStep pointer v.Type) args) (resultTypesToStringStep pointer (List.map _.Type results))
+            stepPair (stepMapList (fun v -> typeToStringStep context v.Type) args) (resultTypesToStringStep context (List.map _.Type results))
             |> stepMap (fun (argTypeStrs, resStr) ->
                 sprintf "%sfunc.call @%s(%s) : (%s) -> %s" (resultAssignment results) (symbolName funcName) argSSAs (String.concat ", " argTypeStrs) resStr)
         | FuncCallIndirect (results, callee, args) ->
             let argSSAs = args |> List.map (fun v -> ssaToString v.SSA) |> String.concat ", "
-            stepPair (stepMapList (fun v -> typeToStringStep pointer v.Type) args) (resultTypesToStringStep pointer (List.map _.Type results))
+            stepPair (stepMapList (fun v -> typeToStringStep context v.Type) args) (resultTypesToStringStep context (List.map _.Type results))
             |> stepMap (fun (argTypeStrs, resStr) ->
                 sprintf "%sfunc.call_indirect %s(%s) : (%s) -> %s" (resultAssignment results) (ssaToString callee) argSSAs (String.concat ", " argTypeStrs) resStr)
         | FuncConstant (result, funcName, funcTy) ->
-            typeToStringStep pointer funcTy
+            typeToStringStep context funcTy
             |> stepMap (sprintf "%s = func.constant @%s : %s" (ssaToString result) (symbolName funcName))
         | Return values ->
             match values with
@@ -1145,7 +1159,7 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
                 else
                     let operands = values |> List.map (fun value -> ssaToString value.SSA) |> String.concat ", "
                     values
-                    |> stepMapList (fun value -> typeToStringStep pointer value.Type)
+                    |> stepMapList (fun value -> typeToStringStep context value.Type)
                     |> stepMap (fun types -> sprintf "func.return %s : %s" operands (String.concat ", " types))
     | MLIROp.GlobalString (name, content, storageLength, obligations) ->
         // Emit memref.global (portable MLIR) with null sentinel byte for C interop.
@@ -1181,7 +1195,7 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
             Refused (sprintf "PSG settlement (program storage) did not settle a storage entry for the writable global @%s: an unowned global has no alignment to write" name)
         | Some entry ->
             let alignment = sprintf " {alignment = %d : i64}" entry.Alignment
-            typeToStringStep pointer memrefType
+            typeToStringStep context memrefType
             |> stepMap (fun tyStr -> sprintf "memref.global \"private\" @%s : %s = uninitialized%s" name tyStr alignment)
     | MLIROp.NativeEntrySlotDecl(_globalName, storage, entry, functionType) ->
         match storage.Shape, functionType with
@@ -1190,7 +1204,7 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
             | Error err -> Refused err
             | Ok (storeName, loadName) ->
                 let slotType = TMemRefStatic(storage.Bytes, TInt(IntWidth 8))
-                stepPair (typeToStringStep pointer slotType) (typeToStringStep pointer functionType)
+                stepPair (typeToStringStep context slotType) (typeToStringStep context functionType)
                 |> stepMap (fun (slotText, functionText) ->
                     sprintf
                         "func.func private @%s(%s, %s)\nfunc.func private @%s(%s) -> (%s)"
@@ -1202,7 +1216,7 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
             match NativeEntrySlotSymbols.names identity with
             | Error err -> Refused err
             | Ok (storeName, _) ->
-                stepPair (typeToStringStep pointer destination.Type) (typeToStringStep pointer value.Type)
+                stepPair (typeToStringStep context destination.Type) (typeToStringStep context value.Type)
                 |> stepMap (fun (destTy, valTy) ->
                     sprintf
                         "func.call @%s(%s, %s) : (%s, %s) -> ()"
@@ -1214,7 +1228,7 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
             match NativeEntrySlotSymbols.names identity with
             | Error err -> Refused err
             | Ok (_, loadName) ->
-                stepPair (typeToStringStep pointer source.Type) (typeToStringStep pointer result.Type)
+                stepPair (typeToStringStep context source.Type) (typeToStringStep context result.Type)
                 |> stepMap (fun (srcTy, resTy) ->
                     sprintf
                         "%s = func.call @%s(%s) : (%s) -> (%s)"
@@ -1244,7 +1258,7 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
                     let text = sprintf "%.17g" value
                     Serialized (if text |> String.exists (fun c -> c = '.' || c = 'E' || c = 'e') then text else text + ".0")
                 | other -> Refused (sprintf "Unsupported published array initializer: %s" (describeNativeLiteral other))
-            stepPair (typeToStringStep pointer memrefType) (stepMapList formatInit inits)
+            stepPair (typeToStringStep context memrefType) (stepMapList formatInit inits)
             |> stepMap (fun (tyStr, values) ->
                 sprintf "memref.global \"private\" constant @%s : %s = dense<[%s]> {alignment = %d : i64}"
                     name tyStr (String.concat ", " values) authority.Alignment)
@@ -1283,10 +1297,10 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
             let boolVal = if value then 1 else 0
             Serialized (sprintf "%s = arith.constant %d : i1" (ssaToString result) boolVal)
         | IndexOp.IndexCastS (result, operand, srcTy, destTy) ->
-            stepPair (typeToStringStep pointer srcTy) (typeToStringStep pointer destTy)
+            stepPair (typeToStringStep context srcTy) (typeToStringStep context destTy)
             |> stepMap (fun (srcStr, dstStr) -> sprintf "%s = index.casts %s : %s to %s" (ssaToString result) (ssaToString operand) srcStr dstStr)
         | IndexOp.IndexCastU (result, operand, srcTy, destTy) ->
-            stepPair (typeToStringStep pointer srcTy) (typeToStringStep pointer destTy)
+            stepPair (typeToStringStep context srcTy) (typeToStringStep context destTy)
             |> stepMap (fun (srcStr, dstStr) -> sprintf "%s = index.castu %s : %s to %s" (ssaToString result) (ssaToString operand) srcStr dstStr)
         | IndexOp.IndexCmp (result, pred, lhs, rhs) ->
             let predStr =
@@ -1317,15 +1331,15 @@ and private leafToStringStep (pointer: Result<int, string>) (op: MLIROp) : Seria
             | _ ->
                 let values = vals |> List.map (fst >> ssaToString) |> String.concat ", "
                 vals
-                |> stepMapList (snd >> typeToStringStep pointer)
+                |> stepMapList (snd >> typeToStringStep context)
                 |> stepMap (fun types -> sprintf "scf.yield %s : %s" values (String.concat ", " types))
         | SCFOp.Condition (cond, args) ->
             let argsStr = args |> List.map ssaToString |> String.concat ", "
             Serialized (sprintf "scf.condition(%s) %s" (ssaToString cond) argsStr)
-    | MLIROp.CombOp cop -> combOpToStringStep pointer cop
-    | MLIROp.HWOp hop -> hwOpToStringStep pointer hop
-    | MLIROp.SeqOp sop -> seqOpToStringStep pointer sop
-    | MLIROp.SMTOp sop -> smtOpToStringStep pointer (opToStringStep pointer) sop
+    | MLIROp.CombOp cop -> combOpToStringStep context cop
+    | MLIROp.HWOp hop -> hwOpToStringStep context hop
+    | MLIROp.SeqOp sop -> seqOpToStringStep context sop
+    | MLIROp.SMTOp sop -> smtOpToStringStep context (opToStringStep context) sop
     | MLIROp.SpatialModule declaration ->
         let name,site,kind =
             match declaration with
@@ -1390,39 +1404,42 @@ and private describeMLIROp = function
 /// Serialize a list of operations with proper indentation
 /// Serialize one op; a width failure inside it is annotated naming the op, so that the
 /// stop says which value had no width rather than only that one did.
-let private opToStringNamedStep (pointer: Result<int, string>) (op: MLIROp) : SerializationStep<string> =
-    match opToStringStep pointer op |> stepBind (portableText >> stepFromResult) with
+let private opToStringNamedStep (context: SerializationContext) (op: MLIROp) : SerializationStep<string> =
+    match opToStringStep context op |> stepBind (portableText >> stepFromResult) with
     | Refused message when Alex.Text.startsWith "Width inference failure" message ->
         Refused (message + "\nWhile serialising: " + describeMLIROp op)
     | other -> other
 
 let opToString (pointer: Result<int, string>) (op: MLIROp) : Result<string, string> =
-    opToStringStep pointer op |> stepToResult
+    opToStringStep (portable pointer) op |> stepToResult
+
+let opToStringWithOpaqueTypes pointer opaqueTypes op : Result<string, string> =
+    opToStringStep { Pointer = pointer; OpaqueTypes = opaqueTypes } op |> stepToResult
 
 let opsToString (pointer: Result<int, string>) (ops: MLIROp list) (indent: string) : Result<string, string> =
     ops
-    |> stepMapList (opToStringNamedStep pointer)
+    |> stepMapList (opToStringNamedStep (portable pointer))
     |> stepMap (fun lines -> lines |> List.map (fun line -> indent + line) |> String.concat "\n")
     |> stepToResult
 
 /// Serialize a complete MLIR module
-let private moduleToStringOptionStep (pointer: Result<int, string>) (moduleName: string option) (ops: MLIROp list) : SerializationStep<string> =
+let private moduleToStringOptionStep (context: SerializationContext) (moduleName: string option) (ops: MLIROp list) : SerializationStep<string> =
     moduleFrame moduleName ops
     |> stepMapList (function
         | Text text -> Serialized text
         | Children(prefix, separator, operations) ->
             operations
-            |> stepMapList (fun child -> opToStringNamedStep pointer child |> stepMap (fun s -> prefix + s))
+            |> stepMapList (fun child -> opToStringNamedStep context child |> stepMap (fun s -> prefix + s))
             |> stepMap (String.concat separator)
         | NamedChildren(prefix, separator, arguments, operations) ->
             operations
-            |> stepMapList (fun child -> opToStringNamedStep pointer child |> stepMap (fun s -> prefix + s))
+            |> stepMapList (fun child -> opToStringNamedStep context child |> stepMap (fun s -> prefix + s))
             |> stepMap (String.concat separator >> withArgumentNames arguments))
     |> stepMap (String.concat "")
     |> stepBind (portableText >> stepFromResult)
 
 let moduleToString pointer moduleName operations : Result<string, string> =
-    moduleToStringOptionStep pointer (Some moduleName) operations |> stepToResult
+    moduleToStringOptionStep (portable pointer) (Some moduleName) operations |> stepToResult
 
 /// Validate every portable operation before reporting target deferral. A target
 /// operation cannot hide a later serialization or source-width refusal.
@@ -1439,16 +1456,16 @@ let moduleText (pointer: Result<int, string>) (moduleName: string option) (ops: 
     let bodyCheck =
         OperationStructure.flatten ops
         |> stepMapList (fun operation ->
-            match containerFrameStep pointer operation with
+            match containerFrameStep (portable pointer) operation with
             | Serialized (Some parts) -> validateFrame parts
-            | Serialized None -> opToStringNamedStep pointer operation |> stepMap ignore
+            | Serialized None -> opToStringNamedStep (portable pointer) operation |> stepMap ignore
             | RequiresTarget msg -> RequiresTarget msg
             | Refused msg -> Refused msg)
     match stepPair headerCheck bodyCheck with
     | Refused err -> Error err
     | RequiresTarget _ -> Ok NeedsTargetRealization
     | Serialized _ ->
-        match moduleToStringOptionStep pointer moduleName ops with
+        match moduleToStringOptionStep (portable pointer) moduleName ops with
         | Serialized text -> Ok (Available text)
         | RequiresTarget _ -> Ok NeedsTargetRealization
         | Refused err -> Error err
