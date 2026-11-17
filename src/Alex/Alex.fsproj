@@ -72,9 +72,12 @@
     <Compile Include="Patterns/MmioPatterns.fs" />
     <Compile Include="Patterns/BorrowedViewPatterns.fs" />
     <Compile Include="Patterns/MappedViewPatterns.fs" />
+    <Compile Include="Patterns/AsyncPatterns.fs" />
     <Compile Include="Witnesses/LiteralWitness.fs" />
     <Compile Include="Witnesses/RequirementWitness.fs" />
     <Compile Include="Witnesses/EagerWitness.fs" />
+    <Compile Include="Witnesses/AsyncWitness.fs" />
+    <Compile Include="Witnesses/RegionWitness.fs" />
     <Compile Include="Witnesses/TypeAnnotationWitness.fs" />
     <Compile Include="Witnesses/IntrinsicWitness.fs" />
     <Compile Include="Witnesses/FunctionPointerWitness.fs" />

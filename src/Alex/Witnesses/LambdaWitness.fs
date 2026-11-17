@@ -318,14 +318,18 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
             | Result.Ok actualValueNode ->
             let bodyResult = MLIRAccumulator.recallNode bodyId ctx.Accumulator
             let bodyCallable =
-                match MLIRAccumulator.recallCallable actualValueNode ctx.Accumulator with
-                | Some _ ->
+                // A published async formation is a value occurrence with its own carrier, not
+                // a transparent block: its witnessed operands are the body result. Its final
+                // child is a different carrier formation and is not reprojected onto it.
+                match MLIRAccumulator.recallCallable bodyId ctx.Accumulator, MLIRAccumulator.recallCallable actualValueNode ctx.Accumulator with
+                | Some formed, _ when ctx.Graph.Codata.AsyncFormations.ContainsKey bodyId -> Some formed
+                | _, Some _ ->
                     match CallableOperands.reproject ctx actualValueNode bodyId with
                     | Result.Ok value -> Some value
                     | Result.Error reason ->
                         MLIRAccumulator.addError (Diagnostic.error (Some bodyId) (Some "Lambda") (Some "Callable result") reason) ctx.Accumulator
                         None
-                | None -> None
+                | _, None -> None
             let bodySequence =
                 match MLIRAccumulator.recallSequence actualValueNode ctx.Accumulator with
                 | Some _ ->

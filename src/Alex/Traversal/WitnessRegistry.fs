@@ -95,9 +95,15 @@ let createRegistry (targetPlatform: TargetPlatform) =
         |> NanopassRegistry.register ArithIntrinsicWitness.nanopass
         |> NanopassRegistry.register ApplicationWitness.nanopass
 
+        // ─── Async formation and activation rows (registered after Structural and
+        //     Application: register prepends, so the published row is read first) ───
+        |> conditionalRegister isCPULike Alex.Witnesses.AsyncWitness.nanopass
+
         // ─── Target-gated (CPU/MCU only — FPGA has no mutable state, heap, or syscalls) ───
         |> conditionalRegister isCPULike MutableAssignmentWitness.nanopass
         |> conditionalRegister isCPULike MemoryIntrinsicWitness.nanopass
+        // Region rows are read before the Arena and Array intrinsic dispatch (register prepends).
+        |> conditionalRegister isCPULike Alex.Witnesses.RegionWitness.nanopass
         |> conditionalRegister isCPULike Alex.Witnesses.FunctionPointerWitness.nanopass
         |> conditionalRegister isCPULike StringIntrinsicWitness.nanopass
         |> conditionalRegister isCPULike PlatformWitness.nanopass
