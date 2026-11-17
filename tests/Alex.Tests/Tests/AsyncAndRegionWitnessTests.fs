@@ -258,6 +258,7 @@ let ``A-01: an activation of an operand that carries another implementation is r
         "Async activation 161: operand 160 carries implementation 194, and the published formation 129 names deferred callable 191.",
         refusal output)
     Assert.Empty output.InlineOps
+    Assert.Empty ctx.Accumulator.AllOps
     Assert.True((MLIRAccumulator.recallNode (NodeId 161) ctx.Accumulator).IsNone)
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -339,3 +340,4 @@ let ``A-04 (22_RegionEscape): the CPU registry refuses region creation and alloc
         Assert.Empty output.InlineOps
         Assert.Empty output.TopLevelOps
         Assert.Empty ctx.Accumulator.AllOps
+        Assert.True((MLIRAccumulator.recallNode (NodeId occurrence) ctx.Accumulator).IsNone)

@@ -195,7 +195,7 @@ let meetOp (meet: Meet) (result: SSA) (value: SSA) : Result<MLIROp, string> =
 /// a value operand is derived and recalled at).
 let rec private lastValueNode (graph: Revision) (id: NodeId) : Result<NodeId, string> =
     match Revision.tryNode id graph with
-    | Some { Kind = SemanticKind.Sequential ids } ->
+    | Some { Kind = SemanticKind.Sequential ids } when not (graph.Codata.AsyncFormations.ContainsKey id) ->
         match List.tryLast ids with
         | Some last -> lastValueNode graph last
         | None -> Result.Ok id
@@ -975,7 +975,7 @@ let rec findLastValueNode nodeId graph : Result<NodeId, string> =
     match Revision.tryNode nodeId graph with
     | Some node ->
         match node.Kind with
-        | SemanticKind.Sequential childIds ->
+        | SemanticKind.Sequential childIds when not (graph.Codata.AsyncFormations.ContainsKey nodeId) ->
             // Sequential is structural - recursively find last value child
             match List.tryLast childIds with
             | Some lastChild -> findLastValueNode lastChild graph
