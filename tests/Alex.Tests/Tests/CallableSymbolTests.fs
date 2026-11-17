@@ -416,7 +416,7 @@ let private importedFixture () =
             Library = "c"
             Symbol = "fixture_extern"
             CallingConvention = "cdecl"
-            DeclarationPath = [ NodeId 30 ]
+            FixedSentinels = []; DeclarationPath = [ NodeId 30 ]
             Parameters = []
             Result = None
             Participants = Set.empty
@@ -1029,7 +1029,7 @@ let private conditionalOptionalBoundaryFixture reversed =
   let imported : BoundaryImport =
     { Identity = importId; Binding = importBinding; Scope = moduleScope.Id
       Library = "c"; Symbol = "consume_callback"; CallingConvention = "CDecl"
-      DeclarationPath = [importBinding]
+      FixedSentinels = []; DeclarationPath = [importBinding]
       Parameters = [formalParam, BoundaryScalar.Entry invocationId]
       Result = None
       Participants = Set.ofList [importId; importBinding; formalParam; invocationId; invocationScope; invocationRecord; moduleScope.Id]

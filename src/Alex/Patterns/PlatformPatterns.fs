@@ -529,7 +529,7 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                     "Writable byte calls require their exact direct signature and complete ordered actuals."
                             return! pWritableResult call declaration
                         }
-                    elif hasReadOnly || hasBorrowedResult || hasBufferAbsence || hasBorrowedResource || isSharedCall then
+                    elif hasReadOnly || hasBorrowedResult || hasBufferAbsence || hasBorrowedResource || isSharedCall || not declaration.FixedSentinels.IsEmpty then
                         ensure
                             (call.Entry.IsNone && call.Result = declaration.Result
                              && declaration.Parameters = (call.Arguments |> List.map (fun actual -> actual.Formal, actual.Abi)))
@@ -547,7 +547,7 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                              | Result.Ok expected -> ty = expected
                              | Result.Error _ -> false)
                             || (BoundaryAbi.borrowedCHandleRepAt state.Graph imp decl nullable
-                                |> Option.bind (Alex.CodeGeneration.TypeMapping.tryRepresentationType >> Result.toOption)
+                                |> Option.bind (Alex.CodeGeneration.TypeMapping.ordinaryRepresentationType >> Result.toOption)
                                 |> Option.exists (fun expected -> ty = expected)))
                     else
                         match boundary.ResourceDeclarations.TryFind decl with
@@ -730,8 +730,17 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                                     match operand.Abi with
                                     | BoundaryScalar.ResourceHandle(decl, nullable) -> parser {
                                         let! actualType = pValueTypeAt operand.Actual
+                                        let sameBorrowedRepresentation =
+                                            if boundary.ResourceDeclarations.ContainsKey decl
+                                               || BoundaryAbi.isSharedBufferFormalAt state.Graph declaration operand.Formal nullable then true
+                                            else
+                                                match BoundaryAbi.borrowedCHandleRepAt state.Graph declaration operand.Formal nullable,
+                                                      state.Graph.Emission.Numeric.OccurrenceRepresentations.TryFind operand.Actual with
+                                                | Some formal, Some(Ok actual) -> formal = actual
+                                                | _ -> false
                                         return! ensure ((decl = operand.Formal || boundary.ResourceDeclarations.ContainsKey decl)
                                                         && value.Type = actualType
+                                                        && sameBorrowedRepresentation
                                                         && matchesBorrowedHandleType declaration operand.Formal decl nullable value.Type)
                                                        "Borrowed resource argument disagrees with its source handle carrier."
                                       }
@@ -801,12 +810,12 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                       }
                 let hasOpaqueHandle = BoundaryAbi.importCarriesNonSharedResourceHandle state.Graph declaration
                 let isPureOptionalEntry =
-                    not slots.IsEmpty && not writable && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall && not hasOpaqueHandle
+                    not slots.IsEmpty && not writable && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall && not hasOpaqueHandle && declaration.FixedSentinels.IsEmpty
                 let isPureWritable =
-                    writable && slots.IsEmpty && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall && not hasOpaqueHandle
+                    writable && slots.IsEmpty && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall && not hasOpaqueHandle && declaration.FixedSentinels.IsEmpty
                 let isBoundaryBufferCall =
                     hasReadOnly || not absenceSlots.IsEmpty || hasBorrowedResult || (writable && not slots.IsEmpty) || isSharedCall
-                    || hasOpaqueHandle
+                    || hasOpaqueHandle || not declaration.FixedSentinels.IsEmpty
                 let! operation =
                     if isPureOptionalEntry then parser {
                         do! ensure (call.Entry.IsNone && call.Resource.IsNone)

@@ -29,15 +29,12 @@ let isResourceRepresentation = function
     | _ -> false
 
 let isResourceOccurrence (graph: Revision) nodeId =
-    // Physical handles also represent borrowed callback formals. Only a
-    // published resource declaration requires acquisition/cleanup lineage.
-    let handles = graph.Emission.Boundary.ResourceDeclarations.Values |> Seq.map _.HandleType |> Set.ofSeq
-    let rec owned = function
-        | ValueRepresentation.Scalar(SettledSlot.CHandle(identity, _, _)) -> handles.Contains identity
-        | ValueRepresentation.Union(cases, _) -> cases |> List.exists (snd >> List.exists owned)
-        | _ -> false
-    graph.Emission.Numeric.OccurrenceRepresentations.TryFind nodeId
-    |> Option.exists (function Ok representation -> owned representation | Error _ -> false)
+    // Ownership belongs to the exact published acquisition/access, never to
+    // every value that happens to share the same opaque handle type.
+    let boundary = graph.Emission.Boundary
+    boundary.ResourceAccesses.ContainsKey nodeId
+    || (boundary.Calls.TryFind nodeId |> Option.exists (fun call ->
+        match call.Resource with Some(BoundaryResourceUse.AcquireNullable _) -> true | _ -> false))
 
 let scalarCarrierType (carrier: ScalarCarrier) : Result<MLIRType, string> =
     match settledScalarType carrier.Slot with
@@ -85,6 +82,13 @@ let rec tryRepresentationType = function
 
 let representationType rep =
     tryRepresentationType rep
+
+/// An ordinary union retains its published byte storage. Opaque payloads do
+/// not themselves confer the acquisition lineage of a resource Option.
+let ordinaryRepresentationType = function
+    | ValueRepresentation.Union(_, Some(_, bytes, alignment)) as rep when bytes > 0 && alignment > 0 ->
+        tryRepresentationType rep |> Result.map (fun _ -> TMemRefStatic(bytes, TInt(IntWidth 8)))
+    | rep -> tryRepresentationType rep
 
 let private read what = function
     | Some(Ok form) -> representationType form
@@ -151,7 +155,9 @@ let tryValueTypeAt (graph: Revision) (nodeId: NodeId) : Result<MLIRType, string>
     | Ok(Some functionType) -> Ok functionType
     | Ok None ->
         match (numericProjection graph).OccurrenceRepresentations.TryFind nodeId with
-        | Some(Ok form) -> tryRepresentationType form
+        | Some(Ok form) ->
+            if isResourceOccurrence graph nodeId then tryRepresentationType form
+            else ordinaryRepresentationType form
         | Some(Error reason) ->
             Error(sprintf "TypeMapping: value occurrence %d has no source-published representation: %s" (NodeId.value nodeId) reason)
         | None -> Error(sprintf "TypeMapping: source publication omitted value occurrence %d" (NodeId.value nodeId))
@@ -169,7 +175,10 @@ let pointerTypeAt (graph: Revision) (nodeId: NodeId) =
     | other -> read (sprintf "value occurrence %d" (NodeId.value nodeId)) other
 
 let typeOfIdentity (graph: Revision) (identity: TypeIdentity) =
-    (numericProjection graph).TypeRepresentations.TryFind identity |> read "type identity"
+    match (numericProjection graph).TypeRepresentations.TryFind identity with
+    | Some(Ok form) -> ordinaryRepresentationType form
+    | Some(Error reason) -> Error(sprintf "TypeMapping: type identity has no source-published representation: %s" reason)
+    | None -> Error "TypeMapping: source publication omitted type identity"
 
 let sourceTypeAt (graph: Revision) (nodeId: NodeId) : Result<TypeIdentity, string> =
     match (numericProjection graph).SourceTypes.TryFind nodeId with

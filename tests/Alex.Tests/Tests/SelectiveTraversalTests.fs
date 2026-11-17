@@ -90,7 +90,7 @@ let private boundaryScopeFixture () =
     let declaration : BoundaryImport =
         { Identity = identity; Binding = NodeId 1002; Scope = scope
           Library = "selective-component"; Symbol = "imported"; CallingConvention = "C"
-          DeclarationPath = []; Parameters = []; Result = None
+          FixedSentinels = []; DeclarationPath = []; Parameters = []; Result = None
           Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
     let readings =
         { graph.SourceReadings with

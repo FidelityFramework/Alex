@@ -29,7 +29,7 @@ let private boundaryComponent () =
     let declaration : BoundaryImport =
         { Identity = declarationId; Binding = binding; Scope = owner
           Library = "component-test"; Symbol = "imported"; CallingConvention = "C"
-          DeclarationPath = []; Parameters = []; Result = None
+          FixedSentinels = []; DeclarationPath = []; Parameters = []; Result = None
           Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
     let graph = Revision.empty "source-entry-component"
     let boundary =

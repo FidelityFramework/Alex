@@ -85,7 +85,7 @@ module OwnedResourceRelease =
               Library = "fixture"
               Symbol = "open"
               CallingConvention = "CDecl"
-              DeclarationPath = [ acqBinding ]
+              FixedSentinels = []; DeclarationPath = [ acqBinding ]
               Parameters = []
               Result = Some(BoundaryScalar.ResourceHandle(declarationId, true))
               Participants = support
@@ -99,7 +99,7 @@ module OwnedResourceRelease =
               Library = "fixture"
               Symbol = "close"
               CallingConvention = "CDecl"
-              DeclarationPath = [ relBinding ]
+              FixedSentinels = []; DeclarationPath = [ relBinding ]
               Parameters = [ relFormal, BoundaryScalar.ResourceHandle(declarationId, false) ]
               Result = releaseResult
               Participants = support
@@ -197,6 +197,30 @@ module OwnedResourceRelease =
         Assert.Empty operands.AllOps
         Assert.True((MLIRAccumulator.recallNode site operands).IsNone)
         result
+
+    [<Fact>]
+    let ``ordinary option of the same handle type does not inherit resource ownership`` () =
+        let graph = fixture None None None false
+        let borrowed = id 40
+        let representation =
+            ValueRepresentation.Union(["None", []; "Some", [ValueRepresentation.Scalar handleSlot]], Some(8, 16, 8))
+        let numeric =
+            { graph.Emission.Numeric with
+                OccurrenceRepresentations = graph.Emission.Numeric.OccurrenceRepresentations.Add(borrowed, Ok representation)
+                TypeRepresentations = graph.Emission.Numeric.TypeRepresentations.Add(resourceOptionType, Ok representation) }
+        let graph = { graph with Emission = { graph.Emission with Numeric = numeric } }
+        Assert.False(Alex.CodeGeneration.TypeMapping.isResourceOccurrence graph borrowed)
+        Assert.Equal(Ok(TMemRefStatic(16, TInt(IntWidth 8))), Alex.CodeGeneration.TypeMapping.valueTypeAt graph borrowed)
+        Assert.Equal(Ok(TMemRefStatic(16, TInt(IntWidth 8))), Alex.CodeGeneration.TypeMapping.typeOfIdentity graph resourceOptionType)
+        Assert.True(Alex.CodeGeneration.TypeMapping.isResourceOccurrence graph (id 20))
+        Assert.Equal(Ok(TResourceOption resourceOptionRep), Alex.CodeGeneration.TypeMapping.valueTypeAt graph (id 20))
+
+    [<Fact>]
+    let ``ordinary nullable handle refuses an absent published layout`` () =
+        let missing = ValueRepresentation.Union(["None", []; "Some", [ValueRepresentation.Scalar handleSlot]], None)
+        match Alex.CodeGeneration.TypeMapping.ordinaryRepresentationType missing with
+        | Result.Error reason -> Assert.Contains("complete source-settled", reason)
+        | Ok _ -> failwith "Nullable handle acquired storage without layout."
 
     [<Fact>]
     let ``void ReleaseOwned produces void ResourceCall with None result`` () =
@@ -439,7 +463,7 @@ module Schema53BoundaryWitnessing =
         let importRow : BoundaryImport =
             { Identity = descId; Binding = declBinding; Scope = declBinding
               Library = "fixture"; Symbol = "fixture_write_bytes"; CallingConvention = "CDecl"
-              DeclarationPath = [ declBinding ]
+              FixedSentinels = []; DeclarationPath = [ declBinding ]
               Parameters = [ bufFormal, BoundaryScalar.ReadOnlyBytes roId; countFormal, BoundaryScalar.Integer(32, true) ]
               Result = Some(BoundaryScalar.Integer(32, true))
               Participants = support; SourceTypes = Map.empty; DeclarationFacts = descFacts }
@@ -617,7 +641,7 @@ module Schema53BoundaryWitnessing =
         let importRow : BoundaryImport =
             { Identity = descId; Binding = declBinding; Scope = declBinding
               Library = "fixture"; Symbol = "fixture_puts"; CallingConvention = "CDecl"
-              DeclarationPath = [ declBinding ]; Parameters = [ bufFormal, BoundaryScalar.ReadOnlyBytes roId ]
+              FixedSentinels = []; DeclarationPath = [ declBinding ]; Parameters = [ bufFormal, BoundaryScalar.ReadOnlyBytes roId ]
               Result = None; Participants = support; SourceTypes = Map.empty; DeclarationFacts = descFacts }
         let callRow : BoundaryCall =
             { Site = siteId; Import = descId; Callee = calleeId; Entry = None; Resource = None
@@ -749,7 +773,7 @@ module Schema53BoundaryWitnessing =
                 BoundaryBufferAbsenceChoice.Conditional(optActual, tagProjId, wT, wF)
         let importRow : BoundaryImport =
             { Identity = descId; Binding = declBinding; Scope = declBinding; Library = "fixture"; Symbol = "fixture_open_vfs"; CallingConvention = "CDecl"
-              DeclarationPath = [ declBinding ]; Parameters = [ bufFormal, BoundaryScalar.ReadOnlyBytes roId ]; Result = None
+              FixedSentinels = []; DeclarationPath = [ declBinding ]; Parameters = [ bufFormal, BoundaryScalar.ReadOnlyBytes roId ]; Result = None
               Participants = support; SourceTypes = Map.empty; DeclarationFacts = descFacts }
         let callRow : BoundaryCall =
             { Site = siteId; Import = descId; Callee = calleeId; Entry = None; Resource = None
@@ -896,7 +920,7 @@ module Schema53BoundaryWitnessing =
         let importRow : BoundaryImport =
             { Identity = descId; Binding = declBinding; Scope = declBinding
               Library = "fixture"; Symbol = "fixture_column_text"; CallingConvention = "CDecl"
-              DeclarationPath = [ declBinding ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
+              FixedSentinels = []; DeclarationPath = [ declBinding ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
               Result = Some(BoundaryScalar.BorrowedBytes bvId)
               Participants = support
               SourceTypes = Map.ofList [ ownerFormal, ptrHandleType ]
@@ -904,7 +928,7 @@ module Schema53BoundaryWitnessing =
         let compImport : BoundaryImport =
             { Identity = compImportId; Binding = id 367; Scope = id 367
               Library = "fixture"; Symbol = "fixture_column_bytes"; CallingConvention = "CDecl"
-              DeclarationPath = [ id 367 ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
+              FixedSentinels = []; DeclarationPath = [ id 367 ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
               Result = Some(BoundaryScalar.Integer(32, true)); Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
         let callRow : BoundaryCall =
             { Site = siteId; Import = descId; Callee = calleeId; Entry = None; Resource = None
@@ -1125,7 +1149,7 @@ module Schema53BoundaryWitnessing =
         let cbImport : BoundaryImport =
             { Identity = importId; Binding = id 462; Scope = id 462
               Library = "fixture"; Symbol = "fixture_create_fn"; CallingConvention = "CDecl"
-              DeclarationPath = [ id 462 ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
+              FixedSentinels = []; DeclarationPath = [ id 462 ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
               Result = None; Participants = Set.ofList [ importId; cbFormal; invId ]
               SourceTypes = Map.ofList [ cbFormal, fnPtrCHandleType ]
               DeclarationFacts = Map.ofList [ cbFormal, { emptyFact "binding" with Text = [ "xFunc" ]; SourceType = fnPtrCHandleType } ] }
@@ -1332,7 +1356,7 @@ module Schema53BoundaryWitnessing =
             { Construction = errActual; CaseOrdinal = 0; Payload = None; Absence = absQuoteId; Transport = [ errActual ]; Obligation = absClaimId }
         let importRow : BoundaryImport =
             { Identity = descId; Binding = declBinding; Scope = declBinding; Library = "fixture"; Symbol = "fixture_exec"; CallingConvention = "CDecl"
-              DeclarationPath = [ declBinding ]
+              FixedSentinels = []; DeclarationPath = [ declBinding ]
               Parameters =
                 [ dbFormal, BoundaryScalar.ResourceHandle(dbFormal, false)
                   sqlFormal, BoundaryScalar.ReadOnlyBytes roId
@@ -1731,7 +1755,7 @@ module Schema53BoundaryWitnessing =
         let cbImport : BoundaryImport =
             { Identity = importId; Binding = scopeId; Scope = scopeId
               Library = "fixture"; Symbol = "fixture_register_cb"; CallingConvention = "CDecl"
-              DeclarationPath = [ scopeId ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
+              FixedSentinels = []; DeclarationPath = [ scopeId ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
               Result = None; Participants = Set.ofList [ scopeId; importId; invId; cbFormal ]
               SourceTypes = Map.ofList [ cbFormal, fnPtrCHandleType ]
               DeclarationFacts = Map.ofList [ cbFormal, { emptyFact "binding" with SourceType = fnPtrCHandleType } ] }
@@ -1821,7 +1845,7 @@ module Schema53BoundaryWitnessing =
         let baseImport : BoundaryImport =
             { Identity = importId; Binding = id 752; Scope = id 752
               Library = "fixture"; Symbol = "fixture_opt_cb"; CallingConvention = "CDecl"
-              DeclarationPath = [ id 752 ]; Parameters = [ cbFormal, BoundaryScalar.Entry (id 753) ]
+              FixedSentinels = []; DeclarationPath = [ id 752 ]; Parameters = [ cbFormal, BoundaryScalar.Entry (id 753) ]
               Result = None; Participants = Set.singleton cbFormal
               SourceTypes = Map.ofList [ cbFormal, optFnType ]
               DeclarationFacts = Map.ofList [ cbFormal, { emptyFact "binding" with SourceType = optFnType } ] }
@@ -1894,7 +1918,7 @@ module Schema53BoundaryWitnessing =
         let cbImport : BoundaryImport =
             { Identity = importId; Binding = id 811; Scope = id 811
               Library = "fixture"; Symbol = "fixture_create_fn"; CallingConvention = "CDecl"
-              DeclarationPath = [ id 811 ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
+              FixedSentinels = []; DeclarationPath = [ id 811 ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
               Result = None; Participants = Set.ofList [ importId; cbFormal; invId ]
               SourceTypes = Map.ofList [ cbFormal, fnPtrCHandleType ]
               DeclarationFacts = Map.ofList [ cbFormal, { emptyFact "binding" with Text = [ "xFunc" ]; SourceType = fnPtrCHandleType } ] }
@@ -2077,7 +2101,7 @@ module Schema53BoundaryWitnessing =
         let importRow : BoundaryImport =
             { Identity = descId; Binding = declBinding; Scope = declBinding
               Library = "fixture"; Symbol = "fixture_puts"; CallingConvention = "CDecl"
-              DeclarationPath = [ declBinding ]; Parameters = [ bufFormal, BoundaryScalar.ReadOnlyBytes roId ]
+              FixedSentinels = []; DeclarationPath = [ declBinding ]; Parameters = [ bufFormal, BoundaryScalar.ReadOnlyBytes roId ]
               Result = None; Participants = support; SourceTypes = Map.empty; DeclarationFacts = descFacts }
         let callRow : BoundaryCall =
             { Site = siteId; Import = descId; Callee = calleeId; Entry = None; Resource = None
@@ -2167,14 +2191,14 @@ module Schema53BoundaryWitnessing =
         let importRow : BoundaryImport =
             { Identity = descId; Binding = declBinding; Scope = declBinding
               Library = "fixture"; Symbol = "fixture_column_text"; CallingConvention = "CDecl"
-              DeclarationPath = [ declBinding ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
+              FixedSentinels = []; DeclarationPath = [ declBinding ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
               Result = Some(BoundaryScalar.BorrowedBytes bvId); Participants = support
               SourceTypes = Map.ofList [ ownerFormal, ptrHandleType ]
               DeclarationFacts = descFacts.Add(ownerFormal, { descFacts[ownerFormal] with SourceType = ptrHandleType }) }
         let compImport : BoundaryImport =
             { Identity = compImportId; Binding = id 1367; Scope = id 1367
               Library = "fixture"; Symbol = "fixture_column_bytes"; CallingConvention = "CDecl"
-              DeclarationPath = [ id 1367 ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
+              FixedSentinels = []; DeclarationPath = [ id 1367 ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
               Result = Some(BoundaryScalar.Integer(32, true)); Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
         let callRow : BoundaryCall =
             { Site = siteId; Import = descId; Callee = calleeId; Entry = None; Resource = None
@@ -2266,7 +2290,7 @@ module Schema53BoundaryWitnessing =
               Extent = BoundaryCallbackExtent.DuringCall; Participants = Set.singleton invId }
         let cbImport : BoundaryImport =
             { Identity = importId; Binding = id 1462; Scope = id 1462; Library = "fixture"; Symbol = "fixture_exec"; CallingConvention = "CDecl"
-              DeclarationPath = [ id 1462 ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]; Result = None
+              FixedSentinels = []; DeclarationPath = [ id 1462 ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]; Result = None
               Participants = Set.ofList [ importId; cbFormal; invId ]
               SourceTypes = Map.ofList [ cbFormal, fnPtrCHandleType ]
               DeclarationFacts = Map.ofList [ cbFormal, { emptyFact "binding" with Text = [ "xFunc" ]; SourceType = fnPtrCHandleType } ] }
@@ -2368,7 +2392,7 @@ module Schema53BoundaryWitnessing =
         let acqImport : BoundaryImport =
             { Identity = acqDescId; Binding = acqBinding; Scope = acqBinding
               Library = "fixture"; Symbol = "fixture_open"; CallingConvention = "CDecl"
-              DeclarationPath = [ acqBinding ]; Parameters = [ acqFormal, BoundaryScalar.Integer(32, true) ]
+              FixedSentinels = []; DeclarationPath = [ acqBinding ]; Parameters = [ acqFormal, BoundaryScalar.Integer(32, true) ]
               Result = Some(BoundaryScalar.ResourceHandle(resId, true)); Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
         let acqCall : BoundaryCall =
             { Site = acqSiteId; Import = acqDescId; Callee = acqCalleeId; Entry = None
@@ -2423,7 +2447,7 @@ module Schema53BoundaryWitnessing =
         let dirImport : BoundaryImport =
             { Identity = dirDescId; Binding = dirBinding; Scope = dirBinding
               Library = "fixture"; Symbol = "fixture_add1"; CallingConvention = "CDecl"
-              DeclarationPath = [ dirBinding ]; Parameters = [ dirFormal, BoundaryScalar.Integer(32, true) ]
+              FixedSentinels = []; DeclarationPath = [ dirBinding ]; Parameters = [ dirFormal, BoundaryScalar.Integer(32, true) ]
               Result = Some(BoundaryScalar.Integer(32, true)); Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
         let dirCall : BoundaryCall =
             { Site = dirSiteId; Import = dirDescId; Callee = dirCalleeId; Entry = None; Resource = None
@@ -2495,7 +2519,7 @@ module Schema53BoundaryWitnessing =
         let cbImport : BoundaryImport =
             { Identity = importId; Binding = scopeId; Scope = scopeId
               Library = "fixture"; Symbol = "fixture_register_row_cb"; CallingConvention = "CDecl"
-              DeclarationPath = [ scopeId ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
+              FixedSentinels = []; DeclarationPath = [ scopeId ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
               Result = Some(BoundaryScalar.Integer(32, true))
               Participants = Set.ofList [ scopeId; importId; invId; cbFormal ]
               SourceTypes = Map.empty; DeclarationFacts = Map.empty }
@@ -2576,7 +2600,7 @@ module Schema53BoundaryWitnessing =
         let resCbImport : BoundaryImport =
             { Identity = importId; Binding = scopeId; Scope = scopeId
               Library = "fixture"; Symbol = "fixture_exec_with_cb"; CallingConvention = "CDecl"
-              DeclarationPath = [ scopeId ]
+              FixedSentinels = []; DeclarationPath = [ scopeId ]
               Parameters = [ hFormal, BoundaryScalar.ResourceHandle(hFormal, false); cbFormal, BoundaryScalar.Entry invId ]
               Result = Some(BoundaryScalar.Integer(32, true))
               Participants = Set.ofList [ scopeId; importId; invId; hFormal; cbFormal ]
@@ -2680,14 +2704,14 @@ module Schema53BoundaryWitnessing =
         let importRow : BoundaryImport =
             { Identity = descId; Binding = declBinding; Scope = declBinding
               Library = "fixture"; Symbol = "fixture_column_text"; CallingConvention = "CDecl"
-              DeclarationPath = [ declBinding ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
+              FixedSentinels = []; DeclarationPath = [ declBinding ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
               Result = Some(BoundaryScalar.BorrowedBytes bvId); Participants = support
               SourceTypes = Map.ofList [ ownerFormal, ptrHandleType ]
               DeclarationFacts = descFacts.Add(ownerFormal, { descFacts[ownerFormal] with SourceType = ptrHandleType }) }
         let compImport : BoundaryImport =
             { Identity = compImportId; Binding = id 1770; Scope = id 1770
               Library = "fixture"; Symbol = "fixture_column_bytes"; CallingConvention = "CDecl"
-              DeclarationPath = [ id 1770 ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
+              FixedSentinels = []; DeclarationPath = [ id 1770 ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
               Result = Some(BoundaryScalar.Integer(32, true)); Participants = Set.empty; SourceTypes = Map.empty; DeclarationFacts = Map.empty }
         let callRow : BoundaryCall =
             { Site = siteId; Import = descId; Callee = calleeId; Entry = None; Resource = None
@@ -2779,7 +2803,7 @@ module Schema53BoundaryWitnessing =
         let cbImport : BoundaryImport =
             { Identity = importId; Binding = scopeId; Scope = scopeId
               Library = "fixture"; Symbol = "fixture_exec_cb"; CallingConvention = "CDecl"
-              DeclarationPath = [ scopeId ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
+              FixedSentinels = []; DeclarationPath = [ scopeId ]; Parameters = [ cbFormal, BoundaryScalar.Entry invId ]
               Result = Some(BoundaryScalar.Integer(32, true))
               Participants = Set.ofList [ scopeId; importId; invId; cbFormal ]
               SourceTypes = Map.ofList [ cbFormal, fnPtrType ]
@@ -2884,7 +2908,7 @@ module Schema53BoundaryWitnessing =
         let importRow : BoundaryImport =
             { Identity = descId; Binding = declBinding; Scope = declBinding
               Library = "fixture"; Symbol = "fixture_column_text_opt"; CallingConvention = "CDecl"
-              DeclarationPath = [ declBinding ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
+              FixedSentinels = []; DeclarationPath = [ declBinding ]; Parameters = [ ownerFormal, BoundaryScalar.ResourceHandle(ownerFormal, false) ]
               Result = Some(BoundaryScalar.BorrowedBytes bvId); Participants = support
               SourceTypes = Map.ofList [ ownerFormal, ptrHandleType ]
               DeclarationFacts = descFacts.Add(ownerFormal, { descFacts[ownerFormal] with SourceType = ptrHandleType }) }
@@ -3531,7 +3555,7 @@ module Schema53BoundaryWitnessing =
         let mmapImport : BoundaryImport =
             { Identity = mmapDescId; Binding = mmapDeclId; Scope = modId
               Library = "ring"; Symbol = "mmap_ring"; CallingConvention = "CDecl"
-              DeclarationPath = [ modId; mmapDeclId ]
+              FixedSentinels = []; DeclarationPath = [ modId; mmapDeclId ]
               Parameters = [ mmapFdFormal, BoundaryScalar.Integer(32, true) ]
               Result = Some(BoundaryScalar.Integer(64, false))
               Participants = Set.ofList [ modId; mmapDeclId; mmapDescId; mmapFdFormal ]
@@ -3543,7 +3567,7 @@ module Schema53BoundaryWitnessing =
         let mkSlotImport (descId: NodeId) (declId: NodeId) (slotFormal: NodeId) (clefName: string) (sym: string) : BoundaryImport =
             { Identity = descId; Binding = declId; Scope = modId
               Library = "ring"; Symbol = sym; CallingConvention = "CDecl"
-              DeclarationPath = [ modId; declId ]
+              FixedSentinels = []; DeclarationPath = [ modId; declId ]
               Parameters = [ slotFormal, BoundaryScalar.ResourceHandle(slotFormal, false) ]
               Result = None
               Participants = Set.ofList [ modId; declId; descId; slotFormal ]
@@ -4515,7 +4539,7 @@ module Schema53BoundaryWitnessing =
         let mmap2Import : BoundaryImport =
             { Identity = mmap2DescId; Binding = mmap2DeclId; Scope = modId
               Library = "ring"; Symbol = "mmap_ring_aux"; CallingConvention = "CDecl"
-              DeclarationPath = [ modId; mmap2DeclId ]
+              FixedSentinels = []; DeclarationPath = [ modId; mmap2DeclId ]
               Parameters = [ mmap2FdFormal, BoundaryScalar.Integer(32, true) ]
               Result = Some(BoundaryScalar.Integer(64, false))
               Participants = Set.ofList [ modId; mmap2DeclId; mmap2DescId; mmap2FdFormal ]

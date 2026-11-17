@@ -558,6 +558,25 @@ and SMTOp =
     | SMTCheck                                      // smt.check sat {} unknown {} unsat {}
 
 module BoundaryAbi =
+    /// Restore the complete native slot order from the source-published fixed
+    /// slots and ordered formals. Fixed slots never become Clef arguments.
+    let nativeSlots (imported: Fidelity.PSG.BoundaryImport) =
+        let total = imported.Parameters.Length + imported.FixedSentinels.Length
+        let fixedSlots = imported.FixedSentinels |> List.map (fun (ordinal, name, value, nativeType) -> ordinal, (name, value, nativeType)) |> Map.ofList
+        if fixedSlots.Count <> imported.FixedSentinels.Length ||
+           (imported.FixedSentinels |> List.exists (fun (ordinal, name, _, _) -> ordinal < 0 || ordinal >= total || name = "")) then
+            Error "Fixed native sentinel slots have an invalid or duplicate source ABI ordinal."
+        else
+            let rec slots ordinal source remaining =
+                if ordinal = total then
+                    if List.isEmpty remaining then Ok [] else Error "Native slot inventory omitted source formals."
+                else
+                    match fixedSlots.TryFind ordinal, remaining with
+                    | Some fixedSlot, _ -> slots (ordinal + 1) source remaining |> Result.map (fun rest -> Choice2Of2 fixedSlot :: rest)
+                    | None, parameter :: remaining -> slots (ordinal + 1) (source + 1) remaining |> Result.map (fun rest -> Choice1Of2(source, parameter) :: rest)
+                    | None, [] -> Error "Native slot inventory has an unfilled ordinary parameter."
+            slots 0 0 imported.Parameters
+
     let private optionalEntryPresentArmAt (revision: Fidelity.PSG.Revision)
                                           (call: Fidelity.PSG.BoundaryCall) ordinal
                                           (operand: Fidelity.PSG.BoundaryOperand)
@@ -852,7 +871,9 @@ module BoundaryAbi =
                                 | BAREWire.Descriptors.BufferRetention.DuringCall, Fidelity.PSG.BufferRetentionMode.DuringCall ->
                                     row.Retirements.IsEmpty && model.RetirementOrders.IsEmpty
                                 | BAREWire.Descriptors.BufferRetention.RetainedUntil(owner, releases), Fidelity.PSG.BufferRetentionMode.RetainedUntilOwner(modelOwner, releaseCount) ->
-                                    owner = modelOwner && releaseCount = Array.length releases
+                                    // The descriptor lists alternative retirement operations;
+                                    // the model counts the actual source retirement occurrences.
+                                    owner = modelOwner && not (Array.isEmpty releases)
                                     && releaseCount > 0 && row.Retirements.Length = releaseCount
                                     && model.RetirementOrders.Length = releaseCount
                                 | _ -> false
