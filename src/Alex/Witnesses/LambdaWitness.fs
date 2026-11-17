@@ -322,7 +322,11 @@ let private witnessLambdaWith (getCombinator: unit -> (WitnessContext -> Semanti
                 // a transparent block: its witnessed operands are the body result. Its final
                 // child is a different carrier formation and is not reprojected onto it.
                 if ctx.Graph.Codata.AsyncFormations.ContainsKey bodyId then
-                    MLIRAccumulator.recallCallable bodyId ctx.Accumulator
+                    match MLIRAccumulator.recallCallable bodyId ctx.Accumulator with
+                    | Some formed -> Some formed
+                    // The formation was not witnessed. The return occurrence below reports
+                    // the missing body value; the final child is not reprojected in its place.
+                    | None -> None
                 else
                 match MLIRAccumulator.recallCallable actualValueNode ctx.Accumulator with
                 | Some _ ->

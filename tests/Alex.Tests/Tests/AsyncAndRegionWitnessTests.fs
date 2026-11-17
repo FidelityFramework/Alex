@@ -8,6 +8,7 @@ open Alex.Traversal.NanopassArchitecture
 open Alex.Tests.Build
 module Operands = Alex.Traversal.CallableOperands
 module Zipper = Alex.Traversal.PSGZipper
+module Samples = Alex.Tests.Fixtures.AsyncSamples
 
 // The rows below were printed from the compiler service (clef 6f1d1e2, contract
 // schema 56) and copied here. The async rows are those of `asyncWithCapture` and
@@ -46,6 +47,137 @@ let private refusal (output: WitnessOutput) =
     match output.Result with
     | TRError diagnostic -> diagnostic.Message
     | _ -> failwith "Expected a refusal"
+
+/// Exercise admission, the complete registry, traversal and portable serialization.
+let private generate (graph: Revision) =
+    let violations = Integrity.check graph
+    Assert.True(violations.IsEmpty, Integrity.describe violations)
+    match Alex.Generation.generate { Revision = graph; Target = Alex.Target.CPU; LinkedLibraries = Set.empty } with
+    | Result.Ok witnessed -> witnessed
+    | Result.Error failure -> failwith failure.Reason
+
+let private emissionsAt (witnessed: Alex.Generation.Witnessed) id =
+    let emissions = witnessed.Emissions |> List.filter (fun emission -> emission.Occurrence.Focus.Id = id)
+    Assert.NotEmpty emissions
+    emissions
+
+let private assertActivations (graph: Revision) (witnessed: Alex.Generation.Witnessed) =
+    Assert.NotEmpty graph.Codata.AsyncActivations
+    for row in graph.Codata.AsyncActivations.Values do
+        let formation = graph.Codata.AsyncFormations[row.Formation]
+        let operand =
+            match graph.Nodes[row.Site].Kind with
+            | SemanticKind.Application(_, [ operand ]) -> operand
+            | _ -> failwith "An activation must publish its one computation operand"
+        let carrier = graph.Emission.Callable.Carriers[operand]
+        Assert.Equal(formation.Callable, carrier.Implementation)
+        // The source publishes the unused, pure first let! in `composed` as
+        // deferred-only. Its omission is an explicit ordinary-demand fact.
+        let emissions =
+            if graph.Emission.Ordinary.DeferredOnly.Contains row.Site then
+                Assert.DoesNotContain(witnessed.Emissions, fun emission -> emission.Occurrence.Focus.Id = row.Site)
+                []
+            else emissionsAt witnessed row.Site
+        for emission in emissions do
+            let calls = emission.InlineOps |> List.choose (function
+                | MLIROp.FuncOp(FuncOp.FuncCallIndirect(results, callee, arguments)) -> Some(results, callee, arguments)
+                | _ -> None)
+            let results, callee, arguments = Assert.Single calls
+            Assert.Single results |> ignore
+            let activated =
+                emissionsAt witnessed operand
+                |> List.choose (fun emitted -> match emitted.Result with TRCallable value -> Some value | _ -> None)
+                |> Assert.Single
+            Assert.Equal((Operands.code activated).SSA, callee)
+            Assert.Equal<Val list>(Option.toList (Operands.environment activated), arguments)
+            match emission.Result with
+            | TRValue _ -> ()
+            | _ -> failwith "An activation did not return its witnessed value"
+
+[<Fact>]
+let ``A-01 (17_BasicAsync): generation preserves captureless and capturing formations until activation`` () =
+    let graph = Samples.BasicAsync.revision
+    let witnessed = generate graph
+    Assert.Equal(2, graph.Codata.AsyncFormations.Count)
+    Assert.Equal(2, graph.Codata.AsyncActivations.Count)
+    Assert.Equal<bool list>([ false; true ], graph.Codata.AsyncFormations.Values |> Seq.map (fun row -> not row.CapturedBindings.IsEmpty) |> Seq.sort |> Seq.toList)
+    for row in graph.Codata.AsyncFormations.Values do
+        for emission in emissionsAt witnessed row.Formation do
+            Assert.Empty emission.InlineOps
+            Assert.Empty emission.TopLevelOps
+            match emission.Result with
+            | TRCallable value ->
+                let carrier = Operands.exactCarrier value |> require "Missing formation carrier"
+                Assert.Equal(row.Formation, carrier.Formation)
+                Assert.Equal(row.Callable, carrier.Implementation)
+                Assert.Equal(not row.CapturedBindings.IsEmpty, (Operands.environment value).IsSome)
+            | _ -> failwith "Formation must produce deferred callable operands"
+    assertActivations graph witnessed
+
+[<Fact>]
+let ``A-01: a lambda cannot recover an unwitnessed async formation from its deferred child`` () =
+    let graph = Samples.BasicAsync.revision
+    let formation = graph.Codata.AsyncFormations.Values |> Seq.find (fun row -> not row.CapturedBindings.IsEmpty)
+    let factory = graph.Nodes[formation.Formation].Parent |> require "Missing formation factory"
+    let ctx = context graph (NodeId.value factory)
+    let registered = combineWitnesses (Alex.Traversal.WitnessRegistry.createRegistry Alex.Target.CPU).Nanopasses
+    // Discriminating component control: the deferred child is witnessed, but
+    // no callable operands are supplied for the formation itself.
+    let withoutFormation context (node: SemanticNode) =
+        if node.Id = formation.Formation then WitnessOutput.empty
+        else registered context node
+    let witness = Alex.Witnesses.LambdaWitness.createNanopass (fun () -> withoutFormation)
+    let output = witness.Witness ctx graph.Nodes[factory]
+    Assert.Equal("Lambda result lacks a witnessed value at its published body occurrence.", refusal output)
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+    Assert.True((MLIRAccumulator.recallCallable factory ctx.Accumulator).IsNone)
+
+[<Fact>]
+let ``A-02 (18_AsyncAwait): generation witnesses frames state and capture writes resumption and awaited activations`` () =
+    let graph = Samples.AsyncAwait.revision
+    let witnessed = generate graph
+    Assert.Equal(5, graph.Codata.AsyncSuspensions.Count)
+    Assert.Equal(8, graph.Codata.AsyncActivations.Count)
+    Assert.Equal<NodeId list>([ NodeId 147 ], graph.Codata.AsyncActivations.Keys |> Seq.filter graph.Emission.Ordinary.DeferredOnly.Contains |> Seq.toList)
+    let operations predicate = graph.Nodes.Values |> Seq.filter (fun node -> predicate node.Kind) |> Seq.toList
+    let allocations = operations (function SemanticKind.ContinuationAllocate _ -> true | _ -> false)
+    let writes = operations (function SemanticKind.FrameWrite _ -> true | _ -> false)
+    let dispatches = operations (function SemanticKind.ContinuationDispatch _ -> true | _ -> false)
+    Assert.NotEmpty allocations
+    Assert.NotEmpty writes
+    Assert.NotEmpty dispatches
+    for node in allocations do
+        for emission in emissionsAt witnessed node.Id do
+            Assert.Contains(emission.InlineOps, fun op -> match op with MLIROp.MemRefOp(MemRefOp.Alloca _) -> true | _ -> false)
+    for node in writes do
+        for emission in emissionsAt witnessed node.Id do
+            Assert.Contains(emission.InlineOps, fun op ->
+                match op with
+                | MLIROp.MemRefOp(MemRefOp.Store _ | MemRefOp.StoreAligned _) -> true
+                | _ -> false)
+    for frame in graph.Codata.ContinuationFrames.Values do
+        let writtenSlots =
+            writes |> List.choose (fun node ->
+                match node.Kind with
+                | SemanticKind.FrameWrite(operand, slot, _) when graph.Codata.SequenceOrigins.TryFind operand = Some frame.Owner -> Some slot
+                | _ -> None) |> Set.ofList
+        Assert.Contains(frame.State, writtenSlots)
+        for slot in frame.Slots |> List.filter _.IsCapture do Assert.Contains(slot.Source, writtenSlots)
+    for node in dispatches do
+        let expectedCases =
+            match node.Kind with
+            | SemanticKind.ContinuationDispatch(_, cases, _) -> cases |> List.map (fst >> int64)
+            | _ -> failwith "Missing dispatch"
+        for emission in emissionsAt witnessed node.Id do
+            let cases =
+                emission.InlineOps |> List.choose (function
+                    | MLIROp.SCFOp(SCFOp.IndexSwitch(_, cases, _, _)) -> Some(List.map fst cases)
+                    | _ -> None) |> Assert.Single
+            Assert.Equal<int64 list>(expectedCases, cases)
+    for cut in graph.Codata.AsyncSuspensions.Values do
+        Assert.True(graph.Codata.AsyncActivations.ContainsKey cut.Site)
+    assertActivations graph witnessed
 
 // ═══════════════════════════════════════════════════════════════════════════
 // A-01 (Alex#6): formation and activation, sample 17_BasicAsync
@@ -264,6 +396,67 @@ let ``A-01: an activation of an operand that carries another implementation is r
 // ═══════════════════════════════════════════════════════════════════════════
 // A-04 and A-06 (Alex#9, Alex#10): region occurrences, sample 22_RegionEscape
 // ═══════════════════════════════════════════════════════════════════════════
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``A-03 (19_AsyncParallel): an orchestration without a memory operation is refused with AX4001`` throughRegistry =
+    // The orchestration row alone publishes no residence or array element carrier.
+    // This component fixture states exactly the row read by the refusal.
+    let site = NodeId 159
+    let row : AsyncOrchestration =
+        { Site = site; Mode = AsyncOrchestrationMode.Parallel; Children = ids [ 395; 404; 413; 422; 431 ]
+          WorkDependencies = []; ResultOrdering = List.indexed (ids [ 395; 404; 413; 422; 431 ])
+          JoinCondition = NodeId 154; ResultStorage = NodeId 155; ResultCapacity = 5; ElementStride = 8
+          LifetimeScope = NodeId 156; SynchronizationObligations = []; Participants = sources [ 159; 154; 155; 156 ] }
+    let graph =
+        { revision [ node 159 (SemanticKind.Application(NodeId 157, [ NodeId 158 ])) (asyncOf (arrayOf intType)) [ 157; 158 ] None ] with
+            Codata = { Codata.empty with AsyncOrchestrations = Map.ofList [ site, row ] } }
+        |> declareTraversalReadings
+    let ctx = context graph 159
+    let witness =
+        if throughRegistry then combineWitnesses (Alex.Traversal.WitnessRegistry.createRegistry Alex.Target.CPU).Nanopasses
+        else Alex.Witnesses.AsyncWitness.nanopass.Witness
+    let output = witness ctx graph.Nodes[site]
+    Assert.Equal(
+        "Async orchestration 159: Codata.AsyncOrchestrations publishes a result capacity of 5 elements at a stride of 8 bytes for 5 child activations, and the revision publishes no storage operation for the result array (no Emission.Memory.Operations row at node 159). Alex does not choose a residence or an element carrier for orchestration result storage.",
+        refusal output)
+    match output.Result with
+    | TRError diagnostic ->
+        Assert.Equal(Some AX4001, diagnostic.Code)
+        Assert.Equal(Some site, diagnostic.NodeId)
+    | _ -> failwith "Missing coded orchestration refusal"
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+    Assert.Empty ctx.Accumulator.AllOps
+    Assert.True((MLIRAccumulator.recallNode site ctx.Accumulator).IsNone)
+    Assert.True((MLIRAccumulator.recallCallable site ctx.Accumulator).IsNone)
+
+[<Fact>]
+let ``A-03: a published memory operation remains owned by MemoryWitness`` () =
+    // A dispatch control, not a settled parallel protocol: only the presence of
+    // a memory row determines which witness owns this occurrence.
+    let site = NodeId 159
+    let orchestration : AsyncOrchestration =
+        { Site = site; Mode = AsyncOrchestrationMode.Parallel; Children = []; WorkDependencies = []; ResultOrdering = []
+          JoinCondition = NodeId 154; ResultStorage = NodeId 155; ResultCapacity = 0; ElementStride = 8
+          LifetimeScope = NodeId 156; SynchronizationObligations = []; Participants = [] }
+    let operation =
+        MemoryWitnessOperation.ArrayLiteral
+            { Site = site; Element = SettledSlot.Integer(8, None); ElementBytes = 1; Elements = []; Length = 0; Alignment = 1
+              Residence = MemoryResidence.Stack(site, site); Initializers = None; Participants = Set.singleton site }
+    let graph =
+        { revision [ node 159 (SemanticKind.Application(NodeId 157, [ NodeId 158 ])) (arrayOf intType) [ 157; 158 ] None ] with
+            Codata = { Codata.empty with AsyncOrchestrations = Map.ofList [ site, orchestration ] }
+            Emission = { Empty.emission with Memory = { Empty.emission.Memory with Operations = Map.ofList [ site, operation ] } } }
+        |> declareTraversalReadings
+    let ctx = context graph 159
+    let output = asyncWitness ctx 159
+    Assert.Equal(TRSkip, output.Result)
+    Assert.Empty output.InlineOps
+    Assert.Empty output.TopLevelOps
+    Assert.Empty ctx.Accumulator.AllOps
+    Assert.True((MLIRAccumulator.recallNode site ctx.Accumulator).IsNone)
 
 /// `processAndExtract`: region creation (123), allocation (137), copyOut (179) and the
 /// constructed scope-exit release (186). The revision holds no Emission.Memory row and
