@@ -15,7 +15,7 @@ let private witnessMemory (ctx: WitnessContext) (node: SemanticNode) : WitnessOu
         match tryMatchWithDiagnostics pPublishedMemoryOperation ctx.Graph node ctx.Zipper ctx.Coeffects ctx.Accumulator with
         | Result.Ok ((operations, declarations, result), _) ->
             { InlineOps = operations; TopLevelOps = declarations; Result = result }
-        | Result.Error reason -> WitnessOutput.error reason
+        | Result.Error reason -> WitnessOutput.error $"Memory operation {NodeId.value node.Id}: {reason}"
     elif memory.Required.Contains node.Id then
         WitnessOutput.error $"Memory operation {NodeId.value node.Id} lacks its source-published access and representation contract."
     else WitnessOutput.skip

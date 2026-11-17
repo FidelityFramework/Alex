@@ -648,6 +648,54 @@ let pPublishedMemoryOperation : PSGParser<MLIROp list * MLIROp list * TransferRe
     let memory = state.Graph.Emission.Memory
     match memory.Operations.TryFind state.Current.Id with
     | None -> return! fail (Message "Memory operation lacks its source-published contract.")
+    | Some (MemoryWitnessOperation.Region row) ->
+        do! ensure (row.Site=state.Current.Id) "Region memory names another occurrence."
+        let! element=pMemorySlot row.Element
+        let! ssas=getNodeSSAs row.Site
+        let result=List.last ssas
+        let staticType=TMemRefStatic(row.Length,element)
+        let dynamicType=TMemRef element
+        let byteType=TMemRef(TInt(IntWidth 8))
+        match row.Kind with
+        | MemoryRegionKind.Release | MemoryRegionKind.RetireCopy ->
+            let! operand=match row.Operand with Some id -> preturn id | None -> fail(Message "Region release lacks its source operand.")
+            let! region,ty=pRecallNode operand
+            let expected=if row.Kind=MemoryRegionKind.Release then byteType else dynamicType
+            do! ensure (ty=expected) "Region release differs from its settled storage carrier."
+            let! release=pDealloc region ty
+            return [release],[],TRVoid
+        | _ ->
+            let! storage =
+                match row.Kind with
+                | MemoryRegionKind.Create | MemoryRegionKind.CopyOut -> parser {
+                    do! ensure (row.Kind<>MemoryRegionKind.CopyOut || (state.Graph.Codata.RegionCopyEndpoints.TryFind row.Site |> Option.bind _.Returned |> Option.exists(fun life -> life.Space=row.Space && not life.Retirements.IsEmpty)))
+                            "Region copyOut lacks a source-published destination residence and retirement operation."
+                    let! allocation=pAllocStatic ssas.[0] row.Length element (Some row.Alignment)
+                    return [allocation]
+                  }
+                | MemoryRegionKind.Allocate | MemoryRegionKind.CopyTo -> parser {
+                    let! operand=match row.Operand with Some id -> preturn id | None -> fail(Message "Region view lacks its source region operand.")
+                    let! region,ty=pRecallNode operand
+                    do! ensure (ty=byteType) "Region view differs from its settled byte storage carrier."
+                    let! offset=pIndexConst ssas.[2] row.Offset
+                    let! view=pMemRefView ssas.[0] region ssas.[2] ty staticType
+                    return [offset;view]
+                  }
+                | MemoryRegionKind.Release | MemoryRegionKind.RetireCopy -> fail(Message "Region release cannot produce storage.")
+            let! copy =
+                match row.Source with
+                | None -> preturn []
+                | Some source -> parser {
+                    let! input,inputType=pRecallNode source
+                    do! ensure (inputType=dynamicType) "Region copy source differs from its settled element carrier."
+                    let narrowed=MemRefOp.ReinterpretCast(ssas.[3],input,0,row.Length,inputType,staticType)
+                    let copied=MemRefOp.Copy(ssas.[3],ssas.[0],staticType,staticType)
+                    return [MLIROp.MemRefOp narrowed;MLIROp.MemRefOp copied]
+                  }
+            let! cast=pMemRefCast result ssas.[0] staticType dynamicType
+            let! expected=pValueTypeAt row.Site
+            do! ensure (expected=dynamicType) "Region storage differs from its source result representation."
+            return storage @ copy @ [cast],[],TRValue {SSA=result;Type=dynamicType}
     | Some (MemoryWitnessOperation.LocalScalar cell) ->
         do! ensure (cell.Site=state.Current.Id && (match cell.Residence with MemoryResidence.Stack _ -> true | _ -> false))
                 "Local scalar lacks its exact source activation account."

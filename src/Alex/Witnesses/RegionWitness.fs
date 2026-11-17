@@ -1,8 +1,7 @@
 /// Region creation, allocation, release and copy occurrences named by
 /// Codata.RegionAllocations and Codata.RegionCopyEndpoints. The rows publish
-/// extent, capacity, alignment, lifetime and release incidence. They publish no
-/// storage operation: no residence for the region, no byte offset for a value
-/// allocated in it and no copy operation. An occurrence without a published
+/// extent, capacity, alignment, lifetime and release incidence. Baker publishes
+/// each physical storage/copy operation separately in Emission.Memory. An occurrence without a published
 /// memory operation is refused here by its row. It is not dispatched by
 /// intrinsic module to another storage Pattern, and no placement, offset or
 /// destination allocation is chosen. An occurrence that has a published

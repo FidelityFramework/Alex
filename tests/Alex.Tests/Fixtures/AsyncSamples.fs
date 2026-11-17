@@ -913,7 +913,7 @@ module BasicAsync =
 
     let revision: Revision =
         { Revision.empty "async-sample" with
-            Header = ({ Schema = 56; Producer = "async-sample-fixture" }: RevisionHeader)
+            Header = ({ Schema = Revision.Schema; Producer = "async-sample-fixture" }: RevisionHeader)
             Nodes =
                 Map.ofList
                     [
@@ -6431,7 +6431,7 @@ module AsyncAwait =
 
     let revision: Revision =
         { Revision.empty "async-sample" with
-            Header = ({ Schema = 56; Producer = "async-sample-fixture" }: RevisionHeader)
+            Header = ({ Schema = Revision.Schema; Producer = "async-sample-fixture" }: RevisionHeader)
             Nodes =
                 Map.ofList
                     [

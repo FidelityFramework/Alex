@@ -56,6 +56,72 @@ let private generate (graph: Revision) =
     | Result.Ok witnessed -> witnessed
     | Result.Error failure -> failwith failure.Reason
 
+/// Complete producer captures keep this gate independent of the compiler service.
+let private captured sample =
+    let path=System.IO.Path.Combine(__SOURCE_DIRECTORY__,"../Fixtures",sample+".psg.gz")
+    use input=System.IO.File.OpenRead path
+    use compressed=new System.IO.Compression.GZipStream(input,System.IO.Compression.CompressionMode.Decompress)
+    use output=new System.IO.MemoryStream()
+    compressed.CopyTo output
+    let limits : Binary.Limits =
+        {MaxBytes=256*1024*1024;MaxCollectionLength=2000000;MaxDepth=256
+         MaxStringBytes=4*1024*1024;MaxBigIntegerBytes=4096;MaxValues=100000000}
+    let take = function Result.Ok value -> value | Result.Error error -> failwithf "Invalid frozen PSG capture: %A" error
+    Binary.openSource limits (BAREWire.Memory.ByteSource.ofArray(output.ToArray())) |> take |> Binary.readRevision |> take
+
+[<Theory>]
+[<InlineData("19_AsyncParallel")>]
+[<InlineData("20_BasicRegion")>]
+[<InlineData("21_RegionPassing")>]
+[<InlineData("22_RegionEscape")>]
+let ``A-03 through A-06: complete published modules pass integrity and generation`` sample =
+    let graph=captured sample
+    let witnessed=generate graph
+    Assert.NotEmpty witnessed.Operations
+    if sample="19_AsyncParallel" then
+        Assert.NotEmpty graph.Codata.AsyncOrchestrations
+    else
+        Assert.NotEmpty graph.Codata.RegionAllocations
+        for operation in graph.Emission.Memory.Operations.Values do
+            match operation with
+            | MemoryWitnessOperation.Region row -> Assert.NotEmpty(witnessed.Emissions |> List.filter(fun emission -> emission.Occurrence.Focus.Id=row.Site))
+            | _ -> ()
+
+[<Theory>]
+[<InlineData("runtime flags")>]
+[<InlineData("copy uses")>]
+[<InlineData("copy caller")>]
+[<InlineData("retirement capacity")>]
+let ``A-06: altered region ownership and memory contracts fail integrity`` mutation =
+    let graph = captured "22_RegionEscape"
+    let copy = graph.Codata.RegionCopyEndpoints.Values |> Seq.find (fun row -> row.Returned.IsSome)
+    let life = copy.Returned.Value
+    let replaceMemory (row: MemoryRegionWitness) =
+        let memory =
+            { graph.Emission.Memory with
+                Operations = graph.Emission.Memory.Operations.Add(row.Site, MemoryWitnessOperation.Region row) }
+        { graph with Emission = { graph.Emission with Memory = memory } }
+    let replaceLife lifetime =
+        let copies = graph.Codata.RegionCopyEndpoints.Add(copy.Site, { copy with Returned = Some lifetime })
+        { graph with Codata = { graph.Codata with RegionCopyEndpoints = copies } }
+    let altered =
+        match mutation with
+        | "runtime flags" ->
+            let row =
+                graph.Emission.Memory.Operations.Values
+                |> Seq.pick (function MemoryWitnessOperation.Region row when row.Kind = MemoryRegionKind.Create -> Some row | _ -> None)
+            let runtime = row.Runtime.Value
+            replaceMemory { row with Runtime = Some { runtime with Contract = { runtime.Contract with Flags = runtime.Contract.Flags + 1L } } }
+        | "copy uses" -> replaceLife { life with Uses = Set.empty }
+        | "copy caller" -> replaceLife { life with Caller = life.Binding }
+        | "retirement capacity" ->
+            let row =
+                graph.Emission.Memory.Operations.Values
+                |> Seq.pick (function MemoryWitnessOperation.Region row when row.Kind = MemoryRegionKind.RetireCopy -> Some row | _ -> None)
+            replaceMemory { row with Capacity = row.Capacity + 1L }
+        | _ -> failwith "Unknown region mutation"
+    Assert.NotEmpty(Integrity.check altered)
+
 let private emissionsAt (witnessed: Alex.Generation.Witnessed) id =
     let emissions = witnessed.Emissions |> List.filter (fun emission -> emission.Occurrence.Focus.Id = id)
     Assert.NotEmpty emissions
@@ -419,7 +485,7 @@ let ``A-03 (19_AsyncParallel): an orchestration without a memory operation is re
         else Alex.Witnesses.AsyncWitness.nanopass.Witness
     let output = witness ctx graph.Nodes[site]
     Assert.Equal(
-        "Async orchestration 159: Codata.AsyncOrchestrations publishes a result capacity of 5 elements at a stride of 8 bytes for 5 child activations, and the revision publishes no storage operation for the result array (no Emission.Memory.Operations row at node 159). Alex does not choose a residence or an element carrier for orchestration result storage.",
+        "Async orchestration 159: Codata.AsyncOrchestrations publishes a result capacity of 5 elements at a stride of 8 bytes for 5 child activations, and the revision publishes no storage operation for the result array (no Emission.Memory.Operations row at node 155). Alex does not choose a residence or an element carrier for orchestration result storage.",
         refusal output)
     match output.Result with
     | TRError diagnostic ->
@@ -441,14 +507,27 @@ let ``A-03: a published memory operation remains owned by MemoryWitness`` () =
         { Site = site; Mode = AsyncOrchestrationMode.Parallel; Children = []; WorkDependencies = []; ResultOrdering = []
           JoinCondition = NodeId 154; ResultStorage = NodeId 155; ResultCapacity = 0; ElementStride = 8
           LifetimeScope = NodeId 156; SynchronizationObligations = []; Participants = [] }
+    let storage = NodeId 155
+    let count = { Actual=NodeId 158; Binding=NodeId 158; Reference=NodeId 158 }
+    let guard =
+        { Requirement=storage; Predicate=storage; Frontier=storage; Continuation=storage
+          Count=count.Reference; Offset=None; Buffer=None; Length=None; Zero=storage
+          NonnegativeCount=storage; NonnegativeOffset=None; End=None; Within=None }
     let operation =
-        MemoryWitnessOperation.ArrayLiteral
-            { Site = site; Element = SettledSlot.Integer(8, None); ElementBytes = 1; Elements = []; Length = 0; Alignment = 1
-              Residence = MemoryResidence.Stack(site, site); Initializers = None; Participants = Set.singleton site }
+        MemoryWitnessOperation.ArrayAllocation
+            { Site=storage; Count=count.Reference
+              CountCarrier={Site=count.Reference;Slot=SettledSlot.Integer(64,None);Range=ValueRange.Bounded(0I,0I)
+                            Representation=None;Declaration=None;SourceType=intType;Obligations=[];Participants=Set.empty}
+              IndexUnsigned=true
+              Element=SettledSlot.Integer(8,None); ElementBytes=1; Alignment=1; Residence=MemoryResidence.Stack(storage,storage)
+              MinimumCount=0I; MaximumCount=0I
+              Requirement={Site=storage;Condition=storage;Diagnostic="dispatch fixture";Frontier=storage;Continuation=storage;PatternTest=None;Participants=[]}
+              Construction={Site=storage;Owner=storage;Count=count;Default=None;Initialization=None;Guard=guard;Participants=Set.empty}
+              Participants=Set.singleton storage }
     let graph =
         { revision [ node 159 (SemanticKind.Application(NodeId 157, [ NodeId 158 ])) (arrayOf intType) [ 157; 158 ] None ] with
             Codata = { Codata.empty with AsyncOrchestrations = Map.ofList [ site, orchestration ] }
-            Emission = { Empty.emission with Memory = { Empty.emission.Memory with Operations = Map.ofList [ site, operation ] } } }
+            Emission = { Empty.emission with Memory = { Empty.emission.Memory with Operations = Map.ofList [ storage, operation ] } } }
         |> declareTraversalReadings
     let ctx = context graph 159
     let output = asyncWitness ctx 159
@@ -487,7 +566,7 @@ let private regionRevision : Revision =
           DestinationRegion = None; DestinationStorage = NodeId 179; DestinationByteExtent = 24L
           DestinationCapacity = 24L; DestinationAlignment = 8
           DestinationLifetimeScope = NodeId 194; DestinationLifetimeDepth = 1
-          EscapeDischargeObligation = NodeId 434; Participants = sources [ 179; 137; 123; 176; 124; 194 ] }
+          EscapeDischargeObligation = NodeId 434; Returned = None; Participants = sources [ 179; 137; 123; 176; 124; 194 ] }
     { revision nodes with
         Codata =
             { Codata.empty with
