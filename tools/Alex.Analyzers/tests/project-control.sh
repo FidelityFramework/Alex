@@ -13,6 +13,60 @@ patterns_source="$tool_dir/tests/InProject/Patterns/Cases.fs"
 witnesses_source="$tool_dir/tests/InProject/Witnesses/Cases.fs"
 values_source="$tool_dir/tests/InProject/Traversal/Values.fs"
 ensure_source="$tool_dir/tests/InProject/Ensure.fs"
+if [[ ${1:-} == --scoped-loader ]]; then
+  scoped=$(mktemp -d "$evidence/scoped-loader.XXXXXXXX")
+else
+  scoped="$evidence/scoped-loader"
+fi
+mkdir -p "$scoped/fixture/NativeTypedTree"
+scoped_project="$scoped/fixture/Scoped.fsproj"
+export ScopedProvenanceFixtureProject="$tool_dir/tests/ContractFixture/ContractFixture.fsproj"
+cat > "$scoped_project" <<'PROJECT'
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference><NuGetAudit>false</NuGetAudit></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(ScopedProvenanceFixtureProject)" />
+    <Reference Include="FSharp.Core" HintPath="$(MSBuildToolsPath)/FSharp/FSharp.Core.dll" />
+    <Compile Include="NativeTypedTree/First.fs" /><Compile Include="Host.fs" /><Compile Include="Last.fs" Link="Baker/Last.fs" />
+  </ItemGroup>
+</Project>
+PROJECT
+printf "module First\nlet value = 1\n" > "$scoped/fixture/NativeTypedTree/First.fs"
+printf "module Host\nlet package () = typeof<System.IO.File>.Assembly\n" > "$scoped/fixture/Host.fs"
+printf "module Last\nlet value = First.value + 1\n" > "$scoped/fixture/Last.fs"
+dotnet msbuild "$scoped_project" -noAutoResponse -restore -property:Configuration=Debug -property:Platform=AnyCPU -target:Build -property:ProvideCommandLineArgs=true -getItem:Compile,ReferencePathWithRefAssemblies,ProjectReference > "$scoped/loader.json"
+inputs=(dotnet fsi "$tool_dir/ProjectInputs.fsx")
+"${inputs[@]}" --capture-loader "$scoped_project" "$scoped/loader.json" "$scoped/loader.tsv"
+first="$scoped/fixture/NativeTypedTree/First.fs"; last="$scoped/fixture/Last.fs"
+dotnet msbuild "$scoped_project" -noAutoResponse -getItem:Compile > "$scoped/authored.json"
+"${inputs[@]}" --clef-sources "$scoped_project" "$scoped/authored.json" "$scoped/selected.txt"
+diff -u <(printf "%s\n" "$first" "$last" | sort) "$scoped/selected.txt"
+(cd "$tool_dir" && dotnet fsharp-analyzers --project "$scoped_project" --analyzers-path "$tool_dir/bin/Debug/net10.0" --include-analyzers "Alex dependency context" --include-files "$first" "$last" --fail-on-type-errors --verbosity d --report "$scoped/report.sarif") > "$scoped/analysis.log" 2>&1
+dotnet fsi "$tool_dir/VerifyProjectLog.fsx" "$scoped/selected.txt" "$scoped/analysis.log" clef-provenance "$scoped/visited.txt"
+ln -sfn "$first" "$scoped/selected-alias.fs"
+printf "%s\n" "$scoped/selected-alias.fs" "$last" > "$scoped/aliases.txt"
+verify=( "${inputs[@]}" --verify-scoped-loader )
+"${verify[@]}" "$scoped/report.sarif" "$scoped/loader.tsv" "$scoped/aliases.txt" "$scoped/visited.txt" > "$scoped/verified.log"
+grep -Fq 'AXD000 provenance only: 2 analyzed files' "$scoped/verified.log"
+refuses() {
+  local name=$1 reason=$2; shift 2
+  if "${verify[@]}" "$@" > "$scoped/$name.log" 2>&1; then printf 'Unexpected successful scoped check: %s\n' "$name" >&2; return 1; fi
+  grep -Fq "Dependency evidence incomplete: $reason" "$scoped/$name.log"
+}
+printf '%s\n' '{"runs":[{"results":[]}]}' > "$scoped/empty.sarif"
+refuses empty 'missing loader context records' "$scoped/empty.sarif" "$scoped/loader.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
+printf '%s\n' "$first" > "$scoped/omitted.txt"
+refuses omitted 'analyzed source coverage mismatch' "$scoped/report.sarif" "$scoped/loader.tsv" "$scoped/omitted.txt" "$scoped/visited.txt"
+awk -F'\t' '$1=="source" && !swapped { if (!held) {held=$0;next} print;print held;swapped=1;next }{print}' "$scoped/loader.tsv" > "$scoped/reordered.tsv"
+refuses reordered 'loader source order mismatch' "$scoped/report.sarif" "$scoped/reordered.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
+awk -F'\t' '$1=="reference" && !removed {removed=1;next}{print}' "$scoped/loader.tsv" > "$scoped/omitted-ref.tsv"
+refuses omitted-reference 'loader reference coverage mismatch' "$scoped/report.sarif" "$scoped/omitted-ref.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
+awk -F'\t' '$1!="project-reference"{print}' "$scoped/loader.tsv" > "$scoped/omitted-project.tsv"
+refuses omitted-project 'loader project reference coverage mismatch' "$scoped/report.sarif" "$scoped/omitted-project.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
+unset ScopedProvenanceFixtureProject
+awk -F'\t' 'BEGIN{OFS="\t"} $1=="reference" && !replaced {$3=prev;replaced=1} {print;prev=$3}' "$scoped/loader.tsv" > "$scoped/replaced.tsv"
+refuses replaced 'loader input changed after evaluation' "$scoped/report.sarif" "$scoped/replaced.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
+if [[ ${1:-} == --scoped-loader ]]; then exit 0; fi
 status=0
 (cd "$tool_dir" && dotnet fsharp-analyzers --project "$project" --analyzers-path "$tool_dir/bin/Debug/net10.0" --include-analyzers 'Alex published boundary' --fail-on-type-errors) > "$evidence/analysis.log" 2>&1 || status=$?
 [[ $status -ne 0 ]] || { printf 'In-project refusal case was not refused.\n' >&2; exit 1; }
@@ -239,3 +293,4 @@ rg -Fq "$ratchet_transfer(27,15): Error AXA008 : Alex must not add a settable pr
 [[ $(rg -F "$ratchet_transfer" "$evidence/ratchet.log" | wc -l) -eq 1 ]] || { printf 'Unexpected diagnostic on the 17 permitted properties, the get-only property or the matched pins in TransferTypes.fs.\n' >&2; exit 1; }
 sha256sum "$tool_dir/bin/Debug/net10.0/Alex.Analyzers.dll" "$tool_dir/ProjectInputs.fsx" "$tool_dir/check-project.sh" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$source" "$dialects_source" "$elements_source" "$elements_clean_source" "$patterns_source" "$witnesses_source" "$values_source" "$tool_dir/tests/DependencyControls.fsx" "$tool_dir/tests/project-control.sh" "$evidence/analysis.log" "$evidence/dependency.log" "$evidence/clef-refusal.log" "$evidence/ratchet.log" > "$evidence/truth.sha256"
 printf 'PASS in-project historical predicate, AXA003-AXA010 layer controls, ratchet controls and the MLIRAccumulator property control; acceptance cases clean\n'
+sha256sum "$scoped_project" "$first" "$last" "$scoped/fixture/Host.fs" "$scoped/authored.json" "$scoped/selected.txt" "$scoped/loader.json" "$scoped/loader.tsv" "$scoped/report.sarif" "$scoped/visited.txt" "$scoped/verified.log" "$scoped"/{empty,omitted,reordered,omitted-reference,omitted-project,replaced}.log >> "$evidence/truth.sha256"
