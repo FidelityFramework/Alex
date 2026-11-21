@@ -321,18 +321,23 @@ let private analyzeShared (context: CliContext) = async {
               }
       }
     walkTast walker tree
-    // AXC010: a typed binding declared directly in a module, explicitly mutable, whose type resolves (through
-    // abbreviations) to FSharp.Core Map or Set is shared cache state. Function-local mutables are not module
-    // declarations and stay outside this rule; binding names are never consulted.
+    // AXC010 follows direct mutable Map or Set bindings and FSharp.Core ref cells holding either type.
+    // The declaration walk excludes function locals and uses nominal types after resolving abbreviations.
     let rec rejectModuleCaches (declarations: FSharpImplementationFileDeclaration list) =
       for declaration in declarations do
         match declaration with
         | FSharpImplementationFileDeclaration.Entity(_, nested) -> rejectModuleCaches nested
         | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(value, _, _)
-            when value.IsMutable && not value.IsMember && (value.DeclaringEntity |> Option.exists (fun scope -> scope.IsFSharpModule)) ->
+            when not value.IsMember && (value.DeclaringEntity |> Option.exists (fun scope -> scope.IsFSharpModule)) ->
           let rec resolve (typ: FSharpType) = if typ.IsAbbreviation then resolve typ.AbbreviatedType else typ
-          let container = resolve value.FullType
-          if container.HasTypeDefinition then
+          let declared = resolve value.FullType
+          let isRefCell =
+            if not declared.HasTypeDefinition then false else
+            let cell = declared.TypeDefinition
+            cell.Assembly.SimpleName = "FSharp.Core" && cell.AccessPath = "Microsoft.FSharp.Core" &&
+            cell.CompiledName = "FSharpRef`1" && declared.GenericArguments.Count = 1
+          let container = if isRefCell then resolve declared.GenericArguments[0] else declared
+          if (value.IsMutable || isRefCell) && container.HasTypeDefinition then
             let definition = container.TypeDefinition
             if definition.Assembly.SimpleName = "FSharp.Core" && definition.AccessPath = "Microsoft.FSharp.Collections" &&
                (definition.CompiledName = "FSharpMap`2" || definition.CompiledName = "FSharpSet`1") then

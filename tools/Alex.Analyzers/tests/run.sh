@@ -109,6 +109,12 @@ printf 'module Inner =\n  type Entries = Set<int>\n  let mutable nodes: Entries 
 printf 'module Inner =\n  type Set<\x27T> = { Value: \x27T }\n  let mutable nodes: Set<int> = { Value = 0 }\n  let remember node = nodes <- { Value = node }\n' > "$scratch/cache-module-set-lookalike.fsx"
 printf 'let collect (keys: string list) =\n  let mutable seen: Map<string, int> = Map.empty\n  for key in keys do seen <- Map.add key 1 seen\n  seen\n' > "$scratch/cache-local-mutable-map.fsx"
 printf 'let table: Map<string, int> = Map.ofList [ ("a", 1); ("b", 2) ]\nlet lookup (key: string) = Map.tryFind key table\n' > "$scratch/cache-module-table.fsx"
+printf 'let rows = ref Map.empty<string, int>\nlet remember key value = rows.Value <- Map.add key value rows.Value\n' > "$scratch/cache-module-ref-map.fsx"
+printf 'module Inner =\n    type Entries = Set<int> ref\n    let rows: Entries = ref Set.empty\n    let remember value = rows.Value <- Set.add value rows.Value\n' > "$scratch/cache-module-ref-set-alias.fsx"
+printf 'type Rows = Map<string, int>\nlet rows: Rows ref = ref Map.empty\n' > "$scratch/cache-module-ref-payload-alias.fsx"
+printf 'let collect keys =\n    let rows = ref Map.empty<string, int>\n    for key in keys do rows.Value <- Map.add key 1 rows.Value\n    rows.Value\n' > "$scratch/cache-local-ref-map.fsx"
+printf 'module Lookalike =\n    type FSharpRef<\x27T> = { mutable Value: \x27T }\n    let rows: FSharpRef<Map<string, int>> = { Value = Map.empty }\n' > "$scratch/cache-module-ref-lookalike.fsx"
+printf 'let rows = ref 0\n' > "$scratch/cache-module-ref-scalar.fsx"
 printf 'let run () = task { return 1 }\n' > "$scratch/task.fsx"
 printf 'let builder = task\nlet run () = builder { return 1 }\n' > "$scratch/task-alias.fsx"
 printf 'let task = 1\nlet run () = task + 1\n' > "$scratch/task-lookalike.fsx"
@@ -234,8 +240,8 @@ run_case() {
         AXC006) reason='Clef production code must not use reference identity (PhysicalEquality or ReferenceEquals).' ;;
         AXC007) reason='Clef production code must not use %A reflection formatting.' ;;
         AXC008) reason='Clef production code must not throw or catch CLR exceptions.' ;;
-        AXC010-module-map) expected=AXC010; reason="Clef production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpMap\`2 (binding 'cache')." ;;
-        AXC010-module-set) expected=AXC010; reason="Clef production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpSet\`1 (binding 'nodes')." ;;
+        AXC010-module-map) expected=AXC010; reason="Clef production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpMap\`2 (binding '$4')."; object_positions= ;;
+        AXC010-module-set) expected=AXC010; reason="Clef production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpSet\`1 (binding '$4')."; object_positions= ;;
         *) printf 'Unknown expected diagnostic %s\n' "$expected" >&2; return 1 ;;
       esac
       count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
@@ -335,11 +341,17 @@ run_case cache-cwt AXC010 '2,19' 'System.Runtime.CompilerServices.ConditionalWea
 run_case cache-concurrent-alias AXC010 '1,13 2,17' 'System.Collections.Concurrent.ConcurrentDictionary`2'
 run_case cache-threadlocal AXC010 '1,10' 'System.Threading.ThreadLocal`1'
 run_case cache-lookalike clean
-run_case cache-module-mutable-map AXC010-module-map '1,12'
-run_case cache-module-set-alias AXC010-module-set '3,14'
+run_case cache-module-mutable-map AXC010-module-map '1,12' cache
+run_case cache-module-set-alias AXC010-module-set '3,14' nodes
 run_case cache-module-set-lookalike clean
 run_case cache-local-mutable-map clean
 run_case cache-module-table clean
+run_case cache-module-ref-map AXC010-module-map '1,4' rows
+run_case cache-module-ref-set-alias AXC010-module-set '3,8' rows
+run_case cache-module-ref-payload-alias AXC010-module-map '2,4' rows
+run_case cache-local-ref-map clean
+run_case cache-module-ref-lookalike clean
+run_case cache-module-ref-scalar clean
 run_case integer-literals clean
 run_case integer-literal-open AXC002 '2,5'
 run_case integer-literal-constructor AXC002 '2,8'
@@ -590,7 +602,7 @@ run_case Traversal/axel-visit-all-ok clean
 run_case Patterns/axel-clean-getnodessa clean
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 241 ]] || { printf 'Expected 241 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 247 ]] || { printf 'Expected 247 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done
