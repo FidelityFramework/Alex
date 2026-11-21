@@ -321,6 +321,31 @@ let private analyzeShared (context: CliContext) = async {
               }
       }
     walkTast walker tree
+    // AXC010: a typed binding declared directly in a module, explicitly mutable, whose type resolves (through
+    // abbreviations) to FSharp.Core Map or Set is shared cache state. Function-local mutables are not module
+    // declarations and stay outside this rule; binding names are never consulted.
+    let rec rejectModuleCaches (declarations: FSharpImplementationFileDeclaration list) =
+      for declaration in declarations do
+        match declaration with
+        | FSharpImplementationFileDeclaration.Entity(_, nested) -> rejectModuleCaches nested
+        | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(value, _, _)
+            when value.IsMutable && not value.IsMember && (value.DeclaringEntity |> Option.exists (fun scope -> scope.IsFSharpModule)) ->
+          let rec resolve (typ: FSharpType) = if typ.IsAbbreviation then resolve typ.AbbreviatedType else typ
+          let container = resolve value.FullType
+          if container.HasTypeDefinition then
+            let definition = container.TypeDefinition
+            if definition.Assembly.SimpleName = "FSharp.Core" && definition.AccessPath = "Microsoft.FSharp.Collections" &&
+               (definition.CompiledName = "FSharpMap`2" || definition.CompiledName = "FSharpSet`1") then
+              diagnostics.Add {
+                Type = "Clef production boundary"
+                Message = sprintf "Clef production code must not hold module-level mutable Map or Set state: %s.%s (binding '%s')." definition.AccessPath definition.CompiledName value.DisplayName
+                Code = "AXC010"
+                Severity = Severity.Error
+                Range = value.DeclarationLocation
+                Fixes = []
+              }
+        | _ -> ()
+    rejectModuleCaches tree.Declarations
   return diagnostics |> Seq.distinctBy (fun diagnostic -> diagnostic.Code, diagnostic.Range.StartLine, diagnostic.Range.StartColumn) |> List.ofSeq
 }
 
