@@ -95,6 +95,11 @@ printf 'let value: string = null\n' > "$scratch/null.fsx"
 printf 'let check (s: string) = match s with null -> 0 | _ -> 1\n' > "$scratch/null-pattern.fsx"
 printf 'open System\nlet value = 1\n' > "$scratch/system-open.fsx"
 printf 'open type System.Math\nlet value = 1\n' > "$scratch/system-type-open.fsx"
+printf 'let isUnion () = Microsoft.FSharp.Reflection.FSharpType.IsUnion(typeof<int option>)\n' > "$scratch/reflection-fsharp-type.fsx"
+printf 'type Reader = Microsoft.FSharp.Reflection.FSharpValue\nlet keep (value: Reader) = value\n' > "$scratch/reflection-fsharp-alias.fsx"
+printf 'let keep (value: System.Reflection.PropertyInfo) = value\n' > "$scratch/reflection-property.fsx"
+printf 'let keep (value: System.Reflection.MethodInfo) = value\n' > "$scratch/reflection-method.fsx"
+printf 'module FSharpValue =\n  let identity value = Option.map id value\nlet value = FSharpValue.identity (Some 1)\n' > "$scratch/reflection-lookalike.fsx"
 printf 'let run () = task { return 1 }\n' > "$scratch/task.fsx"
 printf 'let builder = task\nlet run () = builder { return 1 }\n' > "$scratch/task-alias.fsx"
 printf 'let task = 1\nlet run () = task + 1\n' > "$scratch/task-lookalike.fsx"
@@ -150,6 +155,19 @@ run_case() {
   (cd "$tool_dir" && dotnet fsharp-analyzers --script "$scratch/$name.fsx" --analyzers-path "$analyzers" --include-analyzers "$analyzer" --fail-on-type-errors) > "$scratch/$name.log" 2>&1 || rc=$?
   case "$expected" in
     clean|known-miss|policy-pending) [[ $rc -eq 0 ]] && ! rg -q 'AX[AC][0-9]+' "$scratch/$name.log" ;;
+    AXC009)
+      local identity=$object_positions required=0
+      for position in $positions; do
+        rg -Fq "$scratch/$name.fsx($position): Error AXC009 : Clef production code must not use reflection APIs: $identity." "$scratch/$name.log" || { printf 'FAIL %s AXC009 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        required=$((required + 1))
+        if [[ $identity == System.Reflection.* ]]; then
+          rg -Fq "$scratch/$name.fsx($position): Error AXC002 : Clef production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
+          required=$((required + 1))
+        fi
+      done
+      count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      [[ $rc -ne 0 && $count -eq $required ]]
+      ;;
     type-error) [[ $rc -ne 0 ]] && rg -Fq 'did not type check and --fail-on-type-errors was passed' "$scratch/$name.log" ;;
     AXA003+AXA004)
       count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
@@ -287,6 +305,11 @@ run_case nominal-parameter clean
 run_case nominal-lookup policy-pending
 run_case nominal-lookup-direct policy-pending
 run_case pure clean
+run_case reflection-fsharp-type AXC009 '1,45 1,17' 'Microsoft.FSharp.Reflection.FSharpType (assembly FSharp.Core)'
+run_case reflection-fsharp-alias AXC009 '1,14 2,17' 'Microsoft.FSharp.Reflection.FSharpValue (assembly FSharp.Core)'
+run_case reflection-property AXC009 '1,17' 'System.Reflection.PropertyInfo (assembly System.Runtime)'
+run_case reflection-method AXC009 '1,17' 'System.Reflection.MethodInfo (assembly System.Runtime)'
+run_case reflection-lookalike clean
 run_case integer-literals clean
 run_case integer-literal-open AXC002 '2,5'
 run_case integer-literal-constructor AXC002 '2,8'
@@ -537,7 +560,7 @@ run_case Traversal/axel-visit-all-ok clean
 run_case Patterns/axel-clean-getnodessa clean
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 227 ]] || { printf 'Expected 227 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 232 ]] || { printf 'Expected 232 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done

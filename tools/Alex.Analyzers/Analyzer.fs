@@ -11,6 +11,7 @@ open FSharp.Compiler.Text
 type private AliasDependency =
   | ObjectDependency
   | BclDependency of FSharpEntity
+  | ReflectionDependency of FSharpEntity
 
 let private analyzeShared (context: CliContext) = async {
   let diagnostics = ResizeArray<Message>()
@@ -29,10 +30,10 @@ let private analyzeShared (context: CliContext) = async {
     let classifyEntity (entity: FSharpEntity) =
       let assembly = entity.Assembly.SimpleName
       if entity.IsFSharpAbbreviation then
-        Ok false
+        Ok []
       else
         match entity.TryFullName with
-        | None when assembly = "FSharp.Core" -> Ok false
+        | None when assembly = "FSharp.Core" -> Ok []
         | None -> Error (sprintf "Cannot establish the qualified identity of entity '%s' in assembly '%s'." entity.DisplayName assembly)
         | Some name ->
           let bclName =
@@ -41,12 +42,17 @@ let private analyzeShared (context: CliContext) = async {
           let bclAssembly =
             assembly = "mscorlib" || assembly = "netstandard" ||
             assembly.StartsWith("System.") || assembly.StartsWith("Microsoft.")
-          Ok (bclName && bclAssembly)
-    let rejectBcl range (entity: FSharpEntity) =
+          let inNamespace ns = name = ns || name.StartsWith(ns + ".", System.StringComparison.Ordinal)
+          let reflection =
+            (bclAssembly && inNamespace "System.Reflection") ||
+            (assembly = "FSharp.Core" && inNamespace "Microsoft.FSharp.Reflection")
+          Ok [ if bclName && bclAssembly then BclDependency entity
+               if reflection then ReflectionDependency entity ]
+    let rejectApi code reason range (entity: FSharpEntity) =
       diagnostics.Add {
         Type = "Clef production boundary"
-        Message = sprintf "Clef production code must not depend on .NET library APIs: %s (assembly %s)." (entity.TryFullName |> Option.defaultValue entity.DisplayName) entity.Assembly.SimpleName
-        Code = "AXC002"
+        Message = sprintf "%s: %s (assembly %s)." reason (entity.TryFullName |> Option.defaultValue entity.DisplayName) entity.Assembly.SimpleName
+        Code = code
         Severity = Severity.Error
         Range = range
         Fixes = []
@@ -83,9 +89,8 @@ let private analyzeShared (context: CliContext) = async {
               else
                 match children (), classifyEntity definition with
                 | Error reason, _ | _, Error reason -> Error reason
-                | Ok nested, Ok isBcl when isBcl && definition.TryFullName = Some "System.Object" -> Ok (ObjectDependency :: nested)
-                | Ok nested, Ok true -> Ok (BclDependency definition :: nested)
-                | Ok nested, Ok false -> Ok nested
+                | Ok nested, Ok [ BclDependency _ ] when definition.TryFullName = Some "System.Object" -> Ok (ObjectDependency :: nested)
+                | Ok nested, Ok dependencies -> Ok (dependencies @ nested)
             else Error (sprintf "type step %d has an unrecognized shape" depth)
           with error -> Error (sprintf "type step %d failed: %s" depth error.Message)
       try walk 0 alias.AbbreviatedType with error -> Error error.Message
@@ -93,12 +98,13 @@ let private analyzeShared (context: CliContext) = async {
       let result =
         if entity.IsFSharpAbbreviation && (entity.Assembly.SimpleName <> "FSharp.Core" || entity.DisplayName = "exn") then
           inspectAlias entity |> Result.mapError (fun reason -> sprintf "Cannot inspect alias '%s': %s" entity.DisplayName reason)
-        else classifyEntity entity |> Result.map (fun isBcl -> if isBcl then [ BclDependency entity ] else [])
+        else classifyEntity entity
       match result with
       | Ok dependencies ->
         for dependency in dependencies do
           match dependency with
-          | BclDependency target -> rejectBcl range target
+          | BclDependency target -> rejectApi "AXC002" "Clef production code must not depend on .NET library APIs" range target
+          | ReflectionDependency target -> rejectApi "AXC009" "Clef production code must not use reflection APIs" range target
           | ObjectDependency ->
             diagnostics.Add { Type = "Clef production boundary"; Message = sprintf "Clef production code must not declare obj types. %s resolves to System.Object." entity.DisplayName; Code = "AXC005"; Severity = Severity.Error; Range = range; Fixes = [] }
       | Error reason ->
