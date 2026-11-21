@@ -155,9 +155,28 @@ for alias in Foreign ObjectAlias ObjectNominal Chain Builders Handler Pair Both 
   printf '#r "%s"\nlet x (v: AliasFixture.%s) = v\n' "$alias_dll" "$type_name" > "$scratch/alias-$alias.fsx"
 done
 printf 'let invalid =\n' > "$scratch/invalid.fsx"
-printf 'let values: bigint list = [0I; 1I; -1I; 18446744073709551615I]\nlet compare x = x > 0I\n' > "$scratch/integer-literals.fsx"
+cat > "$scratch/integer-literals.fsx" <<'FS'
+let values: bigint list = [0I; 1I; -1I; 18446744073709551615I]
+let compare x = x > 0I
+let plain () = let mutable visible = 10I in visible
+let anonymous () = {| Value = (let mutable inAnonymous = 20I in inAnonymous) |}
+type Row = { Value: bigint }
+let record () = { Value = (let mutable inRecord = 30I in inRecord) }
+let copy () = { (let mutable inCopy = { Value = 40I } in inCopy) with Value = 50I }
+let matching () = async {
+    match! async { let mutable inMatched = 60I in return inMatched } with
+    | found -> let mutable inClause = 70I in return found + inClause
+}
+let shadowed () = let mutable n = 80I in (let mutable n = 81I in n)
+let nativeWidths = 3n, 4un
+FS
 printf 'let value = 0I\nopen System\n' > "$scratch/integer-literal-open.fsx"
-printf 'let value = 0I\nlet n = System.Numerics.BigInteger(1)\n' > "$scratch/integer-literal-constructor.fsx"
+cat > "$scratch/integer-literal-constructor.fsx" <<'FS'
+let value = 0I
+let n = System.Numerics.BigInteger(1)
+let signed (x: System.IntPtr) = x
+let unsigned (x: System.UIntPtr) = x
+FS
 printf 'let value = 0I\nlet n = System.Numerics.BigInteger.Parse("1")\n' > "$scratch/integer-literal-parse.fsx"
 printf 'module NumericLiteralI =\n  let FromZero () = System.Numerics.BigInteger.Zero\nlet value = 0I\n' > "$scratch/integer-literal-custom.fsx"
 
@@ -354,7 +373,7 @@ run_case cache-module-ref-lookalike clean
 run_case cache-module-ref-scalar clean
 run_case integer-literals clean
 run_case integer-literal-open AXC002 '2,5'
-run_case integer-literal-constructor AXC002 '2,8'
+run_case integer-literal-constructor AXC002 '2,8 3,15 4,17'
 run_case integer-literal-parse AXC002 '2,8 2,24'
 run_case integer-literal-custom AXC002 '2,20 2,36'
 run_case generic-pure clean

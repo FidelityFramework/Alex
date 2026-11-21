@@ -123,14 +123,11 @@ let private analyzeShared (context: CliContext) = async {
           Range = range
           Fixes = []
         }
-    let integerLiteralRanges = ResizeArray<range>()
-    let literalSyntax =
-      { new SyntaxCollectorBase() with
-          override _.WalkExpr(_, expression) =
-            match expression with
-            | SynExpr.Const(SynConst.UserNum(_, "I"), range) -> integerLiteralRanges.Add range
-            | _ -> () }
-    walkAst literalSyntax context.ParseFileResults.ParseTree
+    let integerLiteralRanges =
+      ([], context.ParseFileResults.ParseTree) ||> ParsedInput.fold (fun ranges _ node ->
+        match node with
+        | SyntaxNode.SynExpr(SynExpr.Const(SynConst.UserNum(_, "I"), range)) -> range :: ranges
+        | _ -> ranges)
     for symbolUse in context.GetAllSymbolUsesOfFile() do
       match symbolUse.Symbol with
       | :? FSharpMemberOrFunctionOrValue as value when value.CompiledName = "Box" && (value.DeclaringEntity |> Option.exists (fun entity -> entity.TryFullName = Some "Microsoft.FSharp.Core.Operators")) ->
@@ -190,7 +187,7 @@ let private analyzeShared (context: CliContext) = async {
           (match symbolUse.Symbol with :? FSharpEntity -> true | _ -> false)
           && (value.TryFullName = Some "System" || value.TryFullName = Some "System.Numerics"
               || value.TryFullName = Some "System.Numerics.BigInteger")
-          && integerLiteralRanges.Contains symbolUse.Range
+          && List.contains symbolUse.Range integerLiteralRanges
         if not isReferenceIdentity && not isExceptionOperator && not literalRepresentation && not (symbolUse.IsFromDefinition && value.IsFSharpAbbreviation) then
           checkEntity symbolUse.Range value)
     for declaration in context.CheckFileResults.OpenDeclarations do
