@@ -32,4 +32,7 @@ for name in required do
     failwithf "Analyzer entry point was not loaded: %s" name
 if lines |> Array.exists (fun line -> line.Contains("messages for this file are missing", StringComparison.Ordinal)) then
   failwith "An analyzer failed before producing its file diagnostics."
-printfn "Validated %d evaluated source files and %d analyzer entry points." expected.Count required.Length
+if arguments[2] = "clef-provenance" then
+  printfn "Recorded %d visited file paths for AXD000 identity verification." visited.Count
+else
+  printfn "Validated %d evaluated source files and %d analyzer entry points." expected.Count required.Length

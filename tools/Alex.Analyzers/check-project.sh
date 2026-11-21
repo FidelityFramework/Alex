@@ -68,12 +68,12 @@ if [[ "$mode" == alex ]]; then
   "$host" fsi "$tool_dir/ProjectInputs.fsx" --compare-preprocess "$scratch/preprocess-before.xml" "$scratch/preprocess-after.xml"
   sha256sum "$scratch/restore-graph.json" "$scratch/restore-graph-scrubbed.json" "$scratch/references.json" "$scratch/references-scrubbed.json" "$scratch/dependencies.txt" "$scratch/preprocess-before.xml" "$scratch/preprocess-scrubbed.xml" "$scratch/preprocess-after.xml" "$scratch/retained-environment.txt" > "$scratch/dependencies.sha256"
 fi
-"$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -getItem:Compile > "$scratch/items.json"
 if [[ "$mode" == clef-provenance ]]; then
-  "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -target:Build -property:ProvideCommandLineArgs=true -getItem:Compile,ReferencePathWithRefAssemblies,ProjectReference > "$scratch/loader.json"
-  "$host" fsi "$tool_dir/ProjectInputs.fsx" --capture-loader "$project" "$scratch/loader.json" "$scratch/loader.tsv"
-  "$host" fsi "$tool_dir/ProjectInputs.fsx" --clef-sources "$project" "$scratch/items.json" "$scratch/inputs.txt"
+  "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -target:Build -getItem:Compile,ReferencePathWithRefAssemblies,ProjectReference,ClefCoreVerifiedSource > "$scratch/loader.json"
+  "$host" fsi "$tool_dir/ProjectInputs.fsx" --capture-loader "$project" "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/inputs.txt"
+  sha256sum "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/inputs.txt" > "$scratch/captured.sha256"
 else
+  "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -getItem:Compile > "$scratch/items.json"
   "$host" fsi "$tool_dir/ProjectInputs.fsx" "$scratch/items.json" "$scratch/inputs.txt"
 fi
 mapfile -t sources < "$scratch/inputs.txt"
@@ -95,9 +95,10 @@ set -e
 [[ -f "$scratch/report.sarif" ]] || { printf 'Analyzer did not produce SARIF (exit %s).\n' "$status" >&2; exit 1; }
 if [[ $status -ne 0 ]]; then printf 'Analyzer exited %s; see %s.\n' "$status" "$scratch/analysis.log" >&2; fi
 if [[ "$mode" == clef-provenance ]]; then
+  sha256sum --check --status "$scratch/captured.sha256" || { printf 'Clef guard or compiler input capture changed during analysis.\n' >&2; exit 1; }
   "$host" fsi "$tool_dir/VerifyProjectLog.fsx" "$scratch/inputs.txt" "$scratch/analysis.log" "$mode" "$scratch/visited.txt"
   "$host" fsi "$tool_dir/ProjectInputs.fsx" --verify-scoped-loader "$scratch/report.sarif" "$scratch/loader.tsv" "$scratch/inputs.txt" "$scratch/visited.txt" | tee "$scratch/loader-context.txt"
-  sha256sum "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/items.json" "$scratch/inputs.txt" "$scratch/visited.txt" "$scratch/report.sarif" "$scratch/analysis.log" "$scratch/loader-context.txt" > "$scratch/provenance.sha256"
+  sha256sum "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/captured.sha256" "$scratch/inputs.txt" "$scratch/visited.txt" "$scratch/report.sarif" "$scratch/analysis.log" "$scratch/loader-context.txt" > "$scratch/provenance.sha256"
 else
   "$host" fsi "$tool_dir/VerifyProjectLog.fsx" "$scratch/inputs.txt" "$scratch/analysis.log" "$mode"
 fi

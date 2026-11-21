@@ -357,6 +357,13 @@ let validateDependencies project graphPath referencePath manifestPath =
   File.WriteAllLines(manifestPath, [ "project=" + project; "projects=" + string visited.Count; "references=" + string rows.Length; "packages=" + String.Join(";", allowedPackages); "configuration=" + configuration; "platform=" + platform; "sdk-version=" + sdkVersion; "targeting-pack-root=" + targetingPackRoot ] @ List.rev evidence)
   printfn "Dependency closure verified: %d projects, %d references." visited.Count rows.Length
 
+let compilerReferenceOptions (options: string list) =
+  if not (List.contains "--noframework" options && List.contains "--simpleresolution" options) then fail "loader option baseline changed"
+  options |> List.choose (fun option ->
+    if option.StartsWith("-r:", StringComparison.Ordinal) then Some (option.Substring(3))
+    elif option.StartsWith("-r", StringComparison.Ordinal) || option.StartsWith("--reference", StringComparison.Ordinal) || option.StartsWith("/r", StringComparison.Ordinal) then fail ("unrecognized reference grammar: " + option)
+    else None)
+
 // Compare only project-reference evidence here; the dependency-closure check remains
 // the authority for the rest of the dependency graph. FCS may already have mapped bytes earlier.
 let compareProjectContext reportPath referencesPath manifestPath inputsPath graphPath =
@@ -391,14 +398,7 @@ let compareProjectContext reportPath referencesPath manifestPath inputsPath grap
     match Map.tryFind key hashKeys with
     | Some resolved -> resolved
     | None -> canonical key
-  let options = field "options" root |> arrayItems |> List.map text
-  if not (List.contains "--noframework" options && List.contains "--simpleresolution" options) then fail "loader option baseline changed"
-  let optionPaths =
-    options
-    |> List.choose (fun option ->
-      if option.StartsWith("-r:", StringComparison.Ordinal) then Some (canonical (option.Substring 3))
-      elif option.StartsWith("-r", StringComparison.Ordinal) || option.StartsWith("--reference", StringComparison.Ordinal) || option.StartsWith("/r", StringComparison.Ordinal) then fail ("unrecognized reference grammar: " + option)
-      else None)
+  let optionPaths = field "options" root |> arrayItems |> List.map text |> compilerReferenceOptions |> List.map canonical
   if List.length optionPaths <> Set.count (Set.ofList optionPaths) then fail "duplicate loader reference"
   let assemblies =
     field "assemblies" root |> arrayItems |> List.map (fun assembly ->
@@ -470,7 +470,7 @@ let compareProjectContext reportPath referencesPath manifestPath inputsPath grap
 // The loader observes the whole project. A source-policy profile separately owns which files it analyzes.
 let loaderIdentities (paths: seq<string>) =
   let paths = paths |> Seq.distinct |> Seq.toArray
-  let start = ProcessStartInfo("stat", UseShellExecute = false, RedirectStandardOutput = true)
+  let start = ProcessStartInfo("/usr/bin/stat", UseShellExecute = false, RedirectStandardOutput = true)
   for arg in ["-L"; "--printf=%d:%i\\0%n\\0"; "--"] do start.ArgumentList.Add(arg)
   for path in paths do
     if not (Path.IsPathFullyQualified path && File.Exists path) then fail ("missing absolute loader input: " + path)
@@ -484,25 +484,37 @@ let loaderIdentities (paths: seq<string>) =
 let loaderItems name evidence =
   field "Items" evidence |> field name |> arrayItems |> List.map (field "FullPath" >> text)
 
-let captureLoader project evaluation output =
+let captureLoader project evaluation output scopedOutput =
   let evidence = readJson evaluation
   let sources = loaderItems "Compile" evidence
   let references = loaderItems "ReferencePathWithRefAssemblies" evidence
   let projects = loaderItems "ProjectReference" evidence
   if sources.IsEmpty || references.IsEmpty then fail "empty evaluated loader source or reference list"
+  let scoped = loaderItems "ClefCoreVerifiedSource" evidence
+  if scoped.IsEmpty then fail "empty Clef guard source scope"
+  let ids = loaderIdentities (Seq.append sources scoped)
+  let selected = scoped |> List.map (fun path -> ids[path]) |> Set.ofList
+  if selected.Count <> scoped.Length then fail "duplicate Clef guard source"
+  if not (Set.isSubset selected (sources |> List.map (fun path -> ids[path]) |> Set.ofList)) then fail "Clef guard source outside loader"
   let row kind (path: string) =
     if path.IndexOfAny([|'\t'; '\n'; '\r'|]) >= 0 then fail "unrepresentable loader path"
     String.concat "\t" [kind; path; fileDigest path]
-  File.WriteAllLines(output, [yield row "project" project; yield! List.map (row "source") sources; yield! List.map (row "reference") references; yield! List.map (row "project-reference") projects])
+  File.WriteAllLines(output, [
+    yield row "project" project
+    for path in sources do yield row (if selected.Contains ids[path] then "selected-source" else "source") path
+    yield! List.map (row "reference") references
+    yield! List.map (row "project-reference") projects ])
+  File.WriteAllLines(scopedOutput, scoped)
 
 let verifiedLoader reportPath manifestPath scopedPath visitedPath =
   let inputs = File.ReadAllLines(manifestPath) |> Array.map (fun line ->
     match line.Split('\t') with
-    | [| kind; path; digest |] when List.contains kind ["project"; "source"; "reference"; "project-reference"] -> kind, path, digest
+    | [| kind; path; digest |] when List.contains kind ["project"; "source"; "selected-source"; "reference"; "project-reference"] -> kind, path, digest
     | _ -> fail "invalid loader manifest")
   let paths kind = inputs |> Array.choose (fun (k,p,_) -> if k = kind then Some p else None)
   let project = paths "project" |> Array.exactlyOne
-  let sources, references, scoped = paths "source", paths "reference", File.ReadAllLines(scopedPath)
+  let sources = inputs |> Array.choose (fun (k,p,_) -> if k = "source" || k = "selected-source" then Some p else None)
+  let references, scoped = paths "reference", File.ReadAllLines(scopedPath)
   let visited = File.ReadAllLines(visitedPath)
   if sources.Length = 0 || references.Length = 0 || scoped.Length = 0 then fail "empty loader or selected-source manifest"
   use stream = File.OpenRead(reportPath)
@@ -526,10 +538,7 @@ let verifiedLoader reportPath manifestPath scopedPath visitedPath =
     if (property "context" r).GetRawText() <> contextText || (property "hashes" r).GetRawText() <> hashesText then fail "loader context or hashes differ across files"
     property "hashedBy" r |> str)
   let actualSources = property "sourceFiles" context |> strings
-  let actualReferences = property "options" context |> strings |> Array.choose (fun option ->
-    if option.StartsWith("-r:", StringComparison.Ordinal) then Some (option.Substring(3))
-    elif option.StartsWith("-r", StringComparison.Ordinal) || option.StartsWith("--reference", StringComparison.Ordinal) || option.StartsWith("/r", StringComparison.Ordinal) then fail ("unrecognized reference grammar: " + option)
-    else None)
+  let actualReferences = property "options" context |> strings |> Array.toList |> compilerReferenceOptions |> List.toArray
   let assemblies = property "assemblies" context |> arr |> Array.map (property "file" >> str)
   let reportedHashes = digests.EnumerateObject() |> Seq.map (fun p -> p.Name, str p.Value) |> Seq.toArray
   let actualProject = property "project" context |> str
@@ -540,6 +549,7 @@ let verifiedLoader reportPath manifestPath scopedPath visitedPath =
     let a,b = keys left,keys right
     if a.Length <> (Array.distinct a).Length || b.Length <> (Array.distinct b).Length || Set.ofArray a <> Set.ofArray b then fail label
   if ids[project] <> ids[actualProject] then fail "loader project identity mismatch"
+  sameSet "analyzer source list differs from Clef guard scope" (paths "selected-source") scoped
   sameSet "analyzed source coverage mismatch" scoped seen
   sameSet "analyzer log source coverage mismatch" scoped visited
   sameSet "loader source coverage mismatch" sources actualSources
@@ -547,41 +557,16 @@ let verifiedLoader reportPath manifestPath scopedPath visitedPath =
   if not (Set.isSubset (scoped |> Array.map (fun p -> ids[p]) |> Set.ofArray) (sources |> Array.map (fun p -> ids[p]) |> Set.ofArray)) then fail "analyzed source outside loader"
   sameSet "loader project reference coverage mismatch" projects actualProjects
   sameSet "loader reference coverage mismatch" references actualReferences
+  if Array.map (fun p -> ids[p]) references <> Array.map (fun p -> ids[p]) actualReferences then fail "compiler reference order mismatch"
   sameSet "loader assembly coverage mismatch" references assemblies
   let expectedHashes = inputs |> Array.choose (fun (kind,p,d) ->
     if fileDigest p <> d then fail ("loader input changed after evaluation: " + p)
-    if kind = "source" || kind = "reference" then Some (ids[p],d) else None) |> Map.ofArray
+    if kind = "source" || kind = "selected-source" || kind = "reference" then Some (ids[p],d) else None) |> Map.ofArray
   let observedHashes = reportedHashes |> Array.map (fun (p,d) -> ids[p],d)
   for identity,digest in observedHashes do
     if Map.tryFind identity expectedHashes <> Some digest then fail "loader input digest mismatch"
   if (observedHashes |> Array.map fst |> Set.ofArray) <> (expectedHashes |> Map.keys |> Set.ofSeq) then fail "loader input digest coverage mismatch"
-  printfn "AXD000 provenance only: %d analyzed files, %d ordered compiler sources, %d loader references, %d referenced projects." scoped.Length sources.Length references.Length projects.Length
-
-let writeCompilePaths project compileJson output =
-  let roots = set ["NativeTypedTree"; "PSGSaturation"; "Baker"; "Nanopass"]
-  let inZone (value: string) =
-    let path = value.Replace('\\', '/')
-    let offset = path.IndexOf('/')
-    offset > 0 && roots.Contains(path.Substring(0, offset))
-  let items = readJson compileJson |> field "Items" |> field "Compile" |> arrayItems
-  let files = items |> List.map (fun item ->
-    let path = field "FullPath" item |> text
-    if not (Path.IsPathFullyQualified path && File.Exists path) then fail "an evaluated Compile item has no existing absolute path"
-    let path = Path.GetFullPath path
-    let selected =
-      match project with
-      | None -> true
-      | Some projectPath ->
-        let directory = Path.GetDirectoryName(Path.GetFullPath projectPath)
-        let link = optionalText "Link" item
-        let logical = if String.IsNullOrEmpty link then field "Identity" item |> text else link
-        inZone (Path.GetRelativePath(directory, path)) || inZone logical
-    path, selected)
-  if files.IsEmpty then fail "the evaluated project has no Compile items"
-  if files.Length <> (files |> List.distinctBy fst |> List.length) then fail "the evaluated project repeats a Compile item"
-  let selected = files |> List.choose (fun (p,selected) -> if selected then Some p else None)
-  if selected.IsEmpty then fail "no evaluated Zone A source inputs"
-  File.WriteAllLines(output, List.sort selected)
+  printfn "AXD000 provenance only: %d analyzed files, %d ordered compiler sources, %d ordered compiler references, equal FCS assembly identity set, %d referenced projects." scoped.Length sources.Length references.Length projects.Length
 
 let arguments = fsi.CommandLineArgs |> Array.skip 1
 match arguments with
@@ -601,8 +586,18 @@ match arguments with
   let name, version = bundledFramework (XDocument.Load(path)) framework targetFramework
   printfn "%s/%s" name version
 | [| "--dependencies"; project; graph; references; manifest |] -> validateDependencies project graph references manifest
-| [| "--capture-loader"; project; evaluation; output |] -> captureLoader project evaluation output
+| [| "--capture-loader"; project; evaluation; output; selected |] -> captureLoader project evaluation output selected
 | [| "--verify-scoped-loader"; report; manifest; scoped; visited |] -> verifiedLoader report manifest scoped visited
-| [| "--clef-sources"; project; compileJson; output |] -> writeCompilePaths (Some project) compileJson output
-| [| compileJson; output |] -> writeCompilePaths None compileJson output
+| [| compileJson; output |] ->
+  let document = JsonDocument.Parse(File.ReadAllText compileJson)
+  let files =
+    document.RootElement.GetProperty("Items").GetProperty("Compile").EnumerateArray()
+    |> Seq.map (fun item ->
+      match item.GetProperty("FullPath").GetString() |> Option.ofObj with
+      | Some path when Path.IsPathFullyQualified(path) && File.Exists(path) -> Path.GetFullPath(path)
+      | _ -> failwith "An evaluated Compile item has no existing absolute path.")
+    |> Seq.toList
+  if files.IsEmpty then failwith "The evaluated project has no Compile items."
+  if files.Length <> (files |> List.distinct |> List.length) then failwith "The evaluated project repeats a Compile item."
+  File.WriteAllLines(output, files |> List.sort)
 | _ -> failwith "Expected evaluated Compile JSON and output path, or --dependencies project graph references manifest."
