@@ -100,6 +100,10 @@ printf 'type Reader = Microsoft.FSharp.Reflection.FSharpValue\nlet keep (value: 
 printf 'let keep (value: System.Reflection.PropertyInfo) = value\n' > "$scratch/reflection-property.fsx"
 printf 'let keep (value: System.Reflection.MethodInfo) = value\n' > "$scratch/reflection-method.fsx"
 printf 'module FSharpValue =\n  let identity value = Option.map id value\nlet value = FSharpValue.identity (Some 1)\n' > "$scratch/reflection-lookalike.fsx"
+printf 'module Entries =\n  let keep (value: System.Runtime.CompilerServices.ConditionalWeakTable<string, string>) = value\n' > "$scratch/cache-cwt.fsx"
+printf 'type Table = System.Collections.Concurrent.ConcurrentDictionary<string, string>\nlet keep (table: Table) = table\n' > "$scratch/cache-concurrent-alias.fsx"
+printf 'let slot: System.Threading.ThreadLocal<int> option = None\n' > "$scratch/cache-threadlocal.fsx"
+printf 'type ConditionalWeakTable = { Entries: Map<string, string> } with member t.GetValue (key: string) = Map.tryFind key t.Entries\nlet cache: ConditionalWeakTable = { Entries = Map.empty }\nlet find key = cache.GetValue key\nlet names: Set<string> = Set.empty\nlet order: string list = []\n' > "$scratch/cache-lookalike.fsx"
 printf 'let run () = task { return 1 }\n' > "$scratch/task.fsx"
 printf 'let builder = task\nlet run () = builder { return 1 }\n' > "$scratch/task-alias.fsx"
 printf 'let task = 1\nlet run () = task + 1\n' > "$scratch/task-lookalike.fsx"
@@ -164,6 +168,16 @@ run_case() {
           rg -Fq "$scratch/$name.fsx($position): Error AXC002 : Clef production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
           required=$((required + 1))
         fi
+      done
+      count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      [[ $rc -ne 0 && $count -eq $required ]]
+      ;;
+    AXC010)
+      local identity=$object_positions required=0
+      for position in $positions; do
+        rg -Fq "$scratch/$name.fsx($position): Error AXC010 : Clef production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state: $identity (assembly " "$scratch/$name.log" || { printf 'FAIL %s AXC010 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        rg -Fq "$scratch/$name.fsx($position): Error AXC002 : Clef production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
+        required=$((required + 2))
       done
       count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
       [[ $rc -ne 0 && $count -eq $required ]]
@@ -310,6 +324,10 @@ run_case reflection-fsharp-alias AXC009 '1,14 2,17' 'Microsoft.FSharp.Reflection
 run_case reflection-property AXC009 '1,17' 'System.Reflection.PropertyInfo (assembly System.Runtime)'
 run_case reflection-method AXC009 '1,17' 'System.Reflection.MethodInfo (assembly System.Runtime)'
 run_case reflection-lookalike clean
+run_case cache-cwt AXC010 '2,19' 'System.Runtime.CompilerServices.ConditionalWeakTable`2'
+run_case cache-concurrent-alias AXC010 '1,13 2,17' 'System.Collections.Concurrent.ConcurrentDictionary`2'
+run_case cache-threadlocal AXC010 '1,10' 'System.Threading.ThreadLocal`1'
+run_case cache-lookalike clean
 run_case integer-literals clean
 run_case integer-literal-open AXC002 '2,5'
 run_case integer-literal-constructor AXC002 '2,8'
@@ -560,7 +578,7 @@ run_case Traversal/axel-visit-all-ok clean
 run_case Patterns/axel-clean-getnodessa clean
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 232 ]] || { printf 'Expected 232 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 236 ]] || { printf 'Expected 236 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done

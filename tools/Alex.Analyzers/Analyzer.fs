@@ -12,6 +12,7 @@ type private AliasDependency =
   | ObjectDependency
   | BclDependency of FSharpEntity
   | ReflectionDependency of FSharpEntity
+  | AmbientStateDependency of FSharpEntity
 
 let private analyzeShared (context: CliContext) = async {
   let diagnostics = ResizeArray<Message>()
@@ -46,8 +47,13 @@ let private analyzeShared (context: CliContext) = async {
           let reflection =
             (bclAssembly && inNamespace "System.Reflection") ||
             (assembly = "FSharp.Core" && inNamespace "Microsoft.FSharp.Reflection")
+          // AXC010: resolved BCL cache and thread-shared state types, independent of binding form. Namespace
+          // entities are excluded so the reported identity is always the concrete type (nested types included).
+          let inType full = name = full || name.StartsWith(full + "`", System.StringComparison.Ordinal)
+          let ambientState = bclAssembly && (inType "System.Runtime.CompilerServices.ConditionalWeakTable" || inType "System.Threading.ThreadLocal" || name.StartsWith("System.Collections.Concurrent.", System.StringComparison.Ordinal))
           Ok [ if bclName && bclAssembly then BclDependency entity
-               if reflection then ReflectionDependency entity ]
+               if reflection then ReflectionDependency entity
+               if ambientState then AmbientStateDependency entity ]
     let rejectApi code reason range (entity: FSharpEntity) =
       diagnostics.Add {
         Type = "Clef production boundary"
@@ -105,6 +111,7 @@ let private analyzeShared (context: CliContext) = async {
           match dependency with
           | BclDependency target -> rejectApi "AXC002" "Clef production code must not depend on .NET library APIs" range target
           | ReflectionDependency target -> rejectApi "AXC009" "Clef production code must not use reflection APIs" range target
+          | AmbientStateDependency target -> rejectApi "AXC010" "Clef production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state" range target
           | ObjectDependency ->
             diagnostics.Add { Type = "Clef production boundary"; Message = sprintf "Clef production code must not declare obj types. %s resolves to System.Object." entity.DisplayName; Code = "AXC005"; Severity = Severity.Error; Range = range; Fixes = [] }
       | Error reason ->
