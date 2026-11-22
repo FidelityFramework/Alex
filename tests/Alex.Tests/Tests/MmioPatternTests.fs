@@ -30,7 +30,7 @@ module WritableBuffer =
         let imported : BoundaryImport =
             { Identity=id 13;Binding=id 11;Scope=id 11;Library="fixture";Symbol="fill";CallingConvention="CDecl"
               DeclarationPath=[id 11];Parameters=[id 14,BoundaryScalar.WritableBytes(id 10);id 15,BoundaryScalar.Integer(64,false)]
-              Result=None;Participants=support;SourceTypes=Map.empty;DeclarationFacts=Map.empty }
+              FixedSentinels=[];Result=None;Participants=support;SourceTypes=Map.empty;DeclarationFacts=Map.empty }
         let imported =
             if posix then {imported with Parameters=(id 19,BoundaryScalar.Integer(32,true))::imported.Parameters}
             else imported
