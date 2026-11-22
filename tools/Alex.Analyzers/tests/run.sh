@@ -155,6 +155,29 @@ for alias in Foreign ObjectAlias ObjectNominal Chain Builders Handler Pair Both 
   printf '#r "%s"\nlet x (v: AliasFixture.%s) = v\n' "$alias_dll" "$type_name" > "$scratch/alias-$alias.fsx"
 done
 printf 'let invalid =\n' > "$scratch/invalid.fsx"
+cat > "$scratch/nested-null.fsx" <<'FS'
+type Record = { Value: int }
+
+type Builder() =
+  member _.Bind(value, continuation) = continuation value
+  member _.Return(value) = value
+
+let computation = Builder()
+let initial = { Value = 1 }
+let field = {| Value = (null: string) |}
+let copy = { (let _ = (null: string) in initial) with Value = 2 }
+
+let matched =
+  computation {
+    match! (let _ = (null: string) in Some 3) with
+    | Some value -> return value
+    | None -> return 0
+  }
+
+FS
+sed 's/(null: string)/""/g' "$scratch/nested-null.fsx" > "$scratch/nested-clean.fsx"
+sed 's/| Some value -> return value/| Some value -> return (try value with _ -> 0)/' "$scratch/nested-clean.fsx" > "$scratch/nested-trywith.fsx"
+
 cat > "$scratch/integer-literals.fsx" <<'FS'
 let values: bigint list = [0I; 1I; -1I; 18446744073709551615I]
 let compare x = x > 0I
@@ -388,6 +411,9 @@ run_case reflection-format-interpolated AXC007 '1,22'
 run_case exception-failwith AXC008 '1,19'
 run_case exception-invalidarg AXC008 '1,25'
 run_case exception-trywith AXC008 '1,13'
+run_case nested-null AXC001 '9,24 10,23 14,21'
+run_case nested-trywith AXC008 '15,28'
+run_case nested-clean clean
 run_case null AXC001 '1,20'
 run_case null-pattern AXC001 '1,37'
 run_case system-open AXC002 '1,5'
@@ -621,7 +647,7 @@ run_case Traversal/axel-visit-all-ok clean
 run_case Patterns/axel-clean-getnodessa clean
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 247 ]] || { printf 'Expected 247 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 250 ]] || { printf 'Expected 250 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done

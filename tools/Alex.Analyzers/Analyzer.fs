@@ -123,11 +123,28 @@ let private analyzeShared (context: CliContext) = async {
           Range = range
           Fixes = []
         }
-    let integerLiteralRanges =
-      ([], context.ParseFileResults.ParseTree) ||> ParsedInput.fold (fun ranges _ node ->
-        match node with
-        | SyntaxNode.SynExpr(SynExpr.Const(SynConst.UserNum(_, "I"), range)) -> range :: ranges
-        | _ -> ranges)
+    let integerLiteralRanges, nestedSyntax =
+      (([], []), context.ParseFileResults.ParseTree) ||> ParsedInput.fold (fun (ranges, nested) ancestors node ->
+        let ranges =
+          match node with
+          | SyntaxNode.SynExpr(SynExpr.Const(SynConst.UserNum(_, "I"), range)) -> range :: ranges
+          | _ -> ranges
+        let range =
+          match node with
+          | SyntaxNode.SynExpr expression -> Some expression.Range
+          | SyntaxNode.SynPat pattern -> Some pattern.Range
+          | _ -> None
+        // The pinned SDK walker skips the children of anonymous records and match!,
+        // and the base expression of a record copy. Its other authored sites stay intact.
+        let inOmittedArm range =
+          ancestors |> List.exists (function
+            | SyntaxNode.SynExpr(SynExpr.AnonRecd _ | SynExpr.MatchBang _) -> true
+            | SyntaxNode.SynExpr(SynExpr.Record(copyInfo = Some(baseExpression, _))) ->
+              Range.rangeContainsRange baseExpression.Range range
+            | _ -> false)
+        match range with
+        | Some range when inOmittedArm range -> ranges, node :: nested
+        | _ -> ranges, nested)
     for symbolUse in context.GetAllSymbolUsesOfFile() do
       match symbolUse.Symbol with
       | :? FSharpMemberOrFunctionOrValue as value when value.CompiledName = "Box" && (value.DeclaringEntity |> Option.exists (fun entity -> entity.TryFullName = Some "Microsoft.FSharp.Core.Operators")) ->
@@ -246,43 +263,45 @@ let private analyzeShared (context: CliContext) = async {
       match expression with
       | SynExpr.Sequential(_, _, first, second, _, _) -> listValues first; listValues second
       | value -> authoredValues.Add(value.Range)
+    let observeSyntax = function
+      | SyntaxNode.SynExpr expression ->
+        match expression with
+        | SynExpr.Null range -> rejectNull range
+        | SynExpr.TryWith(range = range) ->
+          diagnostics.Add {
+            Type = "Clef production boundary"
+            Message = "Clef production code must not throw or catch CLR exceptions."
+            Code = "AXC008"
+            Severity = Severity.Error
+            Range = range
+            Fixes = []
+          }
+        | SynExpr.Const(SynConst.String(text, _, range), _) when hasReflectionFormat text ->
+          rejectReflectionFormat range
+        | SynExpr.InterpolatedString(contents, _, range) ->
+          let hasInterpReflection =
+            contents
+            |> List.pairwise
+            |> List.exists (function
+              | SynInterpolatedStringPart.String(text, _), SynInterpolatedStringPart.FillExpr _ -> hasReflectionFormat text
+              | _ -> false)
+          if hasInterpReflection then rejectReflectionFormat range
+        | SynExpr.Upcast(input, _, range) -> explicitUpcasts.Add(input.Range, range)
+        | SynExpr.App(_, _, _, argument, _) -> authoredValues.Add(argument.Range)
+        | SynExpr.ArrayOrList(_, values, _) -> values |> List.iter (fun value -> authoredValues.Add(value.Range))
+        | SynExpr.ArrayOrListComputed(_, values, _) -> listValues values
+        | SynExpr.Record(recordFields = fields) ->
+          for SynExprRecordField(_, _, value, _, _) in fields do
+            value |> Option.iter (fun expression -> authoredValues.Add(expression.Range))
+        | _ -> ()
+      | SyntaxNode.SynPat(SynPat.Null range) -> rejectNull range
+      | _ -> ()
     let syntax =
       { new SyntaxCollectorBase() with
-          override _.WalkExpr(_, expression) =
-            match expression with
-            | SynExpr.Null range -> rejectNull range
-            | SynExpr.TryWith(range = range) ->
-              diagnostics.Add {
-                Type = "Clef production boundary"
-                Message = "Clef production code must not throw or catch CLR exceptions."
-                Code = "AXC008"
-                Severity = Severity.Error
-                Range = range
-                Fixes = []
-              }
-            | SynExpr.Const(SynConst.String(text, _, range), _) when hasReflectionFormat text ->
-              rejectReflectionFormat range
-            | SynExpr.InterpolatedString(contents, _, range) ->
-              let hasInterpReflection =
-                contents
-                |> List.pairwise
-                |> List.exists (function
-                  | SynInterpolatedStringPart.String(text, _), SynInterpolatedStringPart.FillExpr _ -> hasReflectionFormat text
-                  | _ -> false)
-              if hasInterpReflection then rejectReflectionFormat range
-            | SynExpr.Upcast(input, _, range) -> explicitUpcasts.Add(input.Range, range)
-            | SynExpr.App(_, _, _, argument, _) -> authoredValues.Add(argument.Range)
-            | SynExpr.ArrayOrList(_, values, _) -> values |> List.iter (fun value -> authoredValues.Add(value.Range))
-            | SynExpr.ArrayOrListComputed(_, values, _) -> listValues values
-            | SynExpr.Record(recordFields = fields) ->
-              for SynExprRecordField(_, _, value, _, _) in fields do
-                value |> Option.iter (fun expression -> authoredValues.Add(expression.Range))
-            | _ -> ()
-          override _.WalkPat(_, pattern) =
-            match pattern with
-            | SynPat.Null range -> rejectNull range
-            | _ -> () }
+          override _.WalkExpr(_, expression) = observeSyntax (SyntaxNode.SynExpr expression)
+          override _.WalkPat(_, pattern) = observeSyntax (SyntaxNode.SynPat pattern) }
     walkAst syntax context.ParseFileResults.ParseTree
+    nestedSyntax |> List.rev |> List.iter observeSyntax
     let walker =
       { new TypedTreeCollectorBase() with
           override _.WalkCoerce targetType input =
