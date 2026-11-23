@@ -42,6 +42,8 @@ type WitnessEmission<'result> = {
     TopLevelOps: MLIROp list
 }
 
+// Alex #64 tracks removal of this process-wide counter under revision contract D3.
+// https://forge.spkez.dev/FidelityFramework/Alex/issues/64
 let private nextRunId = ref 0L
 
 let witnessRun (WholeCheckedGraph(id, _)) = id
