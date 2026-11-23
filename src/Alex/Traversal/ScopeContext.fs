@@ -30,6 +30,8 @@ type ScopeContext = {
 }
 
 module ScopeContext =
+    // Alex #64 tracks replacement of this process-wide allocator under revision contract D3.
+    // https://forge.spkez.dev/FidelityFramework/Alex/issues/64
     let private nextScopeId = ref 0L
 
     let root () : ScopeContext =
