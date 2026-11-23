@@ -31,7 +31,6 @@ open Alex.Traversal.ScopeContext
 /// The platform as emission reads it: the instruction set and the declared Register and Pointer
 /// widths (from the CCS context). Boundary contracts are read from source publication.
 type PlatformReads = {
-    LinkedLibraries: Set<string>
     TargetArch: Architecture
 }
 with

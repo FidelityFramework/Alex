@@ -82,8 +82,7 @@ let focus (revision: Revision) (held: SemanticNode) : Zipper.PSGZipper =
 /// What a host selects for one witnessing: both widths declared, and the CPU forms.
 let coeffects (pointerBits: int) : TransferCoeffects =
     { Platform =
-        { TargetArch = { Register = Ok pointerBits; Pointer = Ok pointerBits }
-          LinkedLibraries = Set.empty }
+        { TargetArch = { Register = Ok pointerBits; Pointer = Ok pointerBits } }
       TargetPlatform = Alex.Target.CPU }
 
 /// Run a Pattern at a position.

@@ -200,7 +200,7 @@ let ``an explicitly invalidated source projection cannot enter transfer or claim
     // a revision once, at its entry, and no witness runs for one it refuses.
     let graph = { original with Emission = Empty.emission }
     let request revision : Alex.Generation.Request =
-        { Revision = revision; Target = Alex.Target.CPU; LinkedLibraries = Set.empty }
+        { Revision = revision; Target = Alex.Target.CPU }
     match Alex.Generation.generate (request graph) with
     | Result.Error refusal ->
         Assert.Contains("The revision is not well formed.", refusal.Reason)

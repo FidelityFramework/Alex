@@ -52,7 +52,7 @@ let private refusal (output: WitnessOutput) =
 let private generate (graph: Revision) =
     let violations = Integrity.check graph
     Assert.True(violations.IsEmpty, Integrity.describe violations)
-    match Alex.Generation.generate { Revision = graph; Target = Alex.Target.CPU; LinkedLibraries = Set.empty } with
+    match Alex.Generation.generate { Revision = graph; Target = Alex.Target.CPU } with
     | Result.Ok witnessed -> witnessed
     | Result.Error failure -> failwith failure.Reason
 

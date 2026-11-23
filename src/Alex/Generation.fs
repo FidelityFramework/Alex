@@ -23,8 +23,6 @@ open Alex.Correspondence
 type Request = {
     Revision: Revision
     Target: TargetPlatform
-    /// Libraries the project declares, beside those the revision requires.
-    LinkedLibraries: Set<string>
 }
 
 /// One named text produced beside the witnessed module.
@@ -80,7 +78,7 @@ let private witnessWith
     let revision = request.Revision
     let arch : Architecture = { Register = revision.Platform.Register; Pointer = revision.Platform.Pointer }
     let coeffects : TransferCoeffects = {
-        Platform = { TargetArch = arch; LinkedLibraries = request.LinkedLibraries }
+        Platform = { TargetArch = arch }
         TargetPlatform = request.Target
     }
     let moduleName = if request.Target = TargetPlatform.NPU then None else Some "main"
@@ -131,7 +129,7 @@ let private witnessWith
                                 Operations = proofOps
                                 Text = proofText }
                       Constraints = constraints
-                      Links = Set.union revision.Emission.Boundary.Links request.LinkedLibraries }
+                      Links = revision.Emission.Boundary.Links }
                 Result.Ok (witnessed, state)
 
 /// Witness one revision. The revision is examined against the structural rules of its
