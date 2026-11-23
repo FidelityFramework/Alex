@@ -2,7 +2,9 @@ open System
 open System.IO
 
 let arguments = fsi.CommandLineArgs |> Array.skip 1
-if arguments.Length < 3 || (if arguments[2] = "clef-provenance" then arguments.Length <> 4 else arguments.Length <> 3) then
+let scopedClef =
+  arguments.Length >= 3 && (arguments[2] = "clef-provenance" || arguments[2] = "clef-ssa-ownership")
+if arguments.Length < 3 || (if scopedClef then arguments.Length <> 4 else arguments.Length <> 3) then
   failwith "Expected source list, CLI log and analyzer mode, plus a visited-file output for scoped provenance."
 let expected = File.ReadAllLines(arguments[0]) |> Set.ofArray
 let lines = File.ReadAllLines(arguments[1])
@@ -15,7 +17,7 @@ let visited =
   |> Set.ofArray
 // The scoped provenance verifier compares the selected and reported AXD000 files by
 // device and inode, including hosts where FCS uses another spelling of a mount.
-if arguments[2] = "clef-provenance" then
+if scopedClef then
   if expected.IsEmpty || visited.Count <> expected.Count then failwith "Analyzer source coverage count mismatch."
   File.WriteAllLines(arguments[3], visited)
 elif visited <> expected then
@@ -26,13 +28,14 @@ let required =
   | "alex-boundary" -> ["Alex published boundary"]
   | "clef" -> ["Clef production baseline"]
   | "clef-provenance" -> ["Alex dependency context"]
+  | "clef-ssa-ownership" -> ["Alex dependency context"; "Clef SSA ownership"]
   | _ -> failwith "Unknown analyzer mode."
 for name in required do
   if lines |> Array.exists (fun line -> line.Contains("Including " + name + " from ", StringComparison.Ordinal)) |> not then
     failwithf "Analyzer entry point was not loaded: %s" name
 if lines |> Array.exists (fun line -> line.Contains("messages for this file are missing", StringComparison.Ordinal)) then
   failwith "An analyzer failed before producing its file diagnostics."
-if arguments[2] = "clef-provenance" then
+if scopedClef then
   printfn "Recorded %d visited file paths for AXD000 identity verification." visited.Count
 else
   printfn "Validated %d evaluated source files and %d analyzer entry points." expected.Count required.Length
