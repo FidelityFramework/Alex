@@ -2297,41 +2297,6 @@ let alexBoundary : Analyzer<CliContext> = fun context -> async {
   return diagnostics |> Seq.distinctBy (fun diagnostic -> diagnostic.Code, diagnostic.Range.StartLine, diagnostic.Range.StartColumn, diagnostic.Message) |> List.ofSeq
 }
 
-[<CliAnalyzer("Clef SSA ownership")>]
-let clefSsaOwnership : Analyzer<CliContext> = fun context -> async {
-  let projectDirectory = System.IO.Path.GetDirectoryName(context.ProjectOptions.ProjectFileName)
-  let source = System.IO.Path.GetRelativePath(projectDirectory, context.FileName).Replace('\\', '/')
-  return [
-    for useSite in context.GetAllSymbolUsesOfFile() do
-      match useSite.Symbol with
-      | :? FSharpMemberOrFunctionOrValue as value when
-          not useSite.IsFromDefinition &&
-          (value.DeclaringEntity |> Option.exists (fun entity ->
-            entity.Assembly.SimpleName = "Clef.Compiler.Service" &&
-            entity.TryFullName = Some "Clef.Compiler.Nanopass.SSAAssignment")) ->
-        let refusal =
-          match value.LogicalName with
-          | "reconcileAndAssign" -> Some "Raw structural SSA reconciliation is reserved for direct kernel tests."
-          | "normalize" when source <> "NativeTypedTree/NativeService.fs" ->
-              Some "Cold SSA assignment is reserved for NativeService."
-          | "reconcileAndAssignWithCallableRelations" when source <> "PSGSaturation/SemanticGraph/Rebuild.fs" ->
-              Some "Selective SSA reconciliation is reserved for Rebuild."
-          | _ -> None
-        match refusal with
-        | Some message ->
-            yield {
-              Type = "Clef SSA ownership"
-              Message = message
-              Code = "CLF005"
-              Severity = Severity.Error
-              Range = useSite.Range
-              Fixes = []
-            }
-        | None -> ()
-      | _ -> ()
-  ]
-}
-
 [<CliAnalyzer("Alex dependency context")>]
 let dependencyContext : Analyzer<CliContext> = fun context -> async {
   let options = context.ProjectOptions

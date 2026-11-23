@@ -506,7 +506,7 @@ let captureLoader project evaluation output scopedOutput =
     yield! List.map (row "project-reference") projects ])
   File.WriteAllLines(scopedOutput, scoped)
 
-let verifiedLoader permittedDiagnostic reportPath manifestPath scopedPath visitedPath =
+let verifiedLoader reportPath manifestPath scopedPath visitedPath =
   let inputs = File.ReadAllLines(manifestPath) |> Array.map (fun line ->
     match line.Split('\t') with
     | [| kind; path; digest |] when List.contains kind ["project"; "source"; "selected-source"; "reference"; "project-reference"] -> kind, path, digest
@@ -523,15 +523,11 @@ let verifiedLoader permittedDiagnostic reportPath manifestPath scopedPath visite
   let str (e: JsonElement) = e.GetString()
   let arr (e: JsonElement) = e.EnumerateArray() |> Seq.toArray
   let strings e = arr e |> Array.map str
-  let rows =
-    report.RootElement |> property "runs" |> arr |> Array.collect (property "results" >> arr)
-    |> Array.filter (fun row ->
-      match property "ruleId" row |> str with
-      | "AXD000" -> true
-      | code when permittedDiagnostic = Some code -> false
-      | _ -> fail "unexpected diagnostic in scoped loader report")
+  let rows = report.RootElement |> property "runs" |> arr |> Array.collect (property "results" >> arr)
   if rows.Length = 0 then fail "missing loader context records"
-  let payload row = JsonDocument.Parse(property "message" row |> property "text" |> str)
+  let payload row =
+    if (property "ruleId" row |> str) <> "AXD000" then fail "unexpected diagnostic in provenance-only report"
+    JsonDocument.Parse(property "message" row |> property "text" |> str)
   use first = payload rows[0]
   let context = property "context" first.RootElement
   let digests = property "hashes" first.RootElement
@@ -591,8 +587,7 @@ match arguments with
   printfn "%s/%s" name version
 | [| "--dependencies"; project; graph; references; manifest |] -> validateDependencies project graph references manifest
 | [| "--capture-loader"; project; evaluation; output; selected |] -> captureLoader project evaluation output selected
-| [| "--verify-scoped-loader"; report; manifest; scoped; visited |] -> verifiedLoader None report manifest scoped visited
-| [| "--verify-ssa-loader"; report; manifest; scoped; visited |] -> verifiedLoader (Some "CLF005") report manifest scoped visited
+| [| "--verify-scoped-loader"; report; manifest; scoped; visited |] -> verifiedLoader report manifest scoped visited
 | [| compileJson; output |] ->
   let document = JsonDocument.Parse(File.ReadAllText compileJson)
   let files =

@@ -4,7 +4,7 @@ export MSBUILDDISABLENODEREUSE=1
 
 tool_dir=$(cd -P "$(dirname "$0")" && pwd)
 repo_dir=$(git -C "$tool_dir" rev-parse --show-toplevel)
-mode=${1:?expected alex, alex-boundary, clef, clef-provenance or clef-ssa-ownership}
+mode=${1:?expected alex, alex-boundary, clef or clef-provenance}
 if [[ "$mode" == alex || "$mode" == alex-boundary ]]; then
   project=${2:-${ALEX_ANALYZER_PROJECT:-$repo_dir/src/Alex/Alex.fsproj}}
 else
@@ -13,7 +13,6 @@ fi
 [[ "$project" = /* && -f "$project" ]] || { printf 'Project must be an existing absolute path.\n' >&2; exit 2; }
 supplied_project=$project
 project=$(realpath "$project")
-clef_scope=false
 case "$mode" in
   alex|alex-boundary)
     alex_project=$(realpath "${ALEX_ANALYZER_PROJECT:-$repo_dir/src/Alex/Alex.fsproj}")
@@ -21,13 +20,11 @@ case "$mode" in
     if [[ "$mode" == alex ]]; then analyzers=("Clef production baseline" "Alex published boundary" "Alex dependency context"); else analyzers=("Alex published boundary"); fi
     ;;
   clef) printf 'Clef mode is suspended pending an owner convention for permitted dependency sets (P-dep4).\n' >&2; exit 2 ;;
-  clef-provenance|clef-ssa-ownership)
+  clef-provenance)
     [[ "$project" -ef "$repo_dir/../clef/src/Compiler/Clef.Compiler.Service.fsproj" ]] || { printf 'Clef provenance requires the sibling compiler service project.\n' >&2; exit 2; }
-    clef_scope=true
     analyzers=("Alex dependency context")
-    if [[ "$mode" == clef-ssa-ownership ]]; then analyzers+=("Clef SSA ownership"); fi
     ;;
-  *) printf 'Expected alex, alex-boundary, clef, clef-provenance or clef-ssa-ownership mode.\n' >&2; exit 2 ;;
+  *) printf 'Expected alex, alex-boundary, clef or clef-provenance mode.\n' >&2; exit 2 ;;
 esac
 
 [[ -f "$tool_dir/bin/Debug/net10.0/Alex.Analyzers.dll" ]] || { printf 'Analyzer assembly is not built.\n' >&2; exit 1; }
@@ -71,7 +68,7 @@ if [[ "$mode" == alex ]]; then
   "$host" fsi "$tool_dir/ProjectInputs.fsx" --compare-preprocess "$scratch/preprocess-before.xml" "$scratch/preprocess-after.xml"
   sha256sum "$scratch/restore-graph.json" "$scratch/restore-graph-scrubbed.json" "$scratch/references.json" "$scratch/references-scrubbed.json" "$scratch/dependencies.txt" "$scratch/preprocess-before.xml" "$scratch/preprocess-scrubbed.xml" "$scratch/preprocess-after.xml" "$scratch/retained-environment.txt" > "$scratch/dependencies.sha256"
 fi
-if [[ "$clef_scope" == true ]]; then
+if [[ "$mode" == clef-provenance ]]; then
   "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -target:Build -getItem:Compile,ReferencePathWithRefAssemblies,ProjectReference,ClefCoreVerifiedSource > "$scratch/loader.json"
   "$host" fsi "$tool_dir/ProjectInputs.fsx" --capture-loader "$project" "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/inputs.txt"
   sha256sum "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/inputs.txt" > "$scratch/captured.sha256"
@@ -80,7 +77,7 @@ else
   "$host" fsi "$tool_dir/ProjectInputs.fsx" "$scratch/items.json" "$scratch/inputs.txt"
 fi
 mapfile -t sources < "$scratch/inputs.txt"
-if [[ "$clef_scope" == true && "$supplied_project" != "$project" ]]; then
+if [[ "$mode" == clef-provenance && "$supplied_project" != "$project" ]]; then
   # The CLI matches pathname spellings before the verifier checks the actual file identities.
   project_dir=$(dirname "$project")
   supplied_dir=$(dirname "$supplied_project")
@@ -97,12 +94,10 @@ status=${PIPESTATUS[0]}
 set -e
 [[ -f "$scratch/report.sarif" ]] || { printf 'Analyzer did not produce SARIF (exit %s).\n' "$status" >&2; exit 1; }
 if [[ $status -ne 0 ]]; then printf 'Analyzer exited %s; see %s.\n' "$status" "$scratch/analysis.log" >&2; fi
-if [[ "$clef_scope" == true ]]; then
+if [[ "$mode" == clef-provenance ]]; then
   sha256sum --check --status "$scratch/captured.sha256" || { printf 'Clef guard or compiler input capture changed during analysis.\n' >&2; exit 1; }
   "$host" fsi "$tool_dir/VerifyProjectLog.fsx" "$scratch/inputs.txt" "$scratch/analysis.log" "$mode" "$scratch/visited.txt"
-  verify=--verify-scoped-loader
-  if [[ "$mode" == clef-ssa-ownership ]]; then verify=--verify-ssa-loader; fi
-  "$host" fsi "$tool_dir/ProjectInputs.fsx" "$verify" "$scratch/report.sarif" "$scratch/loader.tsv" "$scratch/inputs.txt" "$scratch/visited.txt" | tee "$scratch/loader-context.txt"
+  "$host" fsi "$tool_dir/ProjectInputs.fsx" --verify-scoped-loader "$scratch/report.sarif" "$scratch/loader.tsv" "$scratch/inputs.txt" "$scratch/visited.txt" | tee "$scratch/loader-context.txt"
   sha256sum "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/captured.sha256" "$scratch/inputs.txt" "$scratch/visited.txt" "$scratch/report.sarif" "$scratch/analysis.log" "$scratch/loader-context.txt" > "$scratch/provenance.sha256"
 else
   "$host" fsi "$tool_dir/VerifyProjectLog.fsx" "$scratch/inputs.txt" "$scratch/analysis.log" "$mode"

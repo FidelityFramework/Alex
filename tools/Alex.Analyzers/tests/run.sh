@@ -645,89 +645,9 @@ run_case Witnesses/axel-smt-transfer AXA010-smt '3,37 3,88'
 run_case Witnesses/axel-visit-all AXA010-fn '4,28'
 run_case Traversal/axel-visit-all-ok clean
 run_case Patterns/axel-clean-getnodessa clean
-
-# Exercise the real typed entry on locally authored symbols. The fixture has no
-# compiler project, package or source dependency. Its assembly name is test metadata.
-ssa_evidence=()
-run_ssa_ownership() {
-  local name=$1 expected=$2
-  [[ -z ${ALEX_ANALYZER_ONLY:-} || "$ALEX_ANALYZER_ONLY" == "$name" ]] || return 0
-  local stage="$scratch/$name" project="$scratch/$name/Ownership.fsproj" status=0
-  local -a selected
-  mkdir -p "$stage/NativeTypedTree" "$stage/PSGSaturation/SemanticGraph"
-  cat > "$project" <<'PROJECT'
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <AssemblyName>Clef.Compiler.Service</AssemblyName>
-    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
-    <NuGetAudit>false</NuGetAudit>
-  </PropertyGroup>
-  <ItemGroup>
-    <Reference Include="FSharp.Core" HintPath="$(MSBuildToolsPath)/FSharp/FSharp.Core.dll" />
-    <Compile Include="Entries.fs;NativeTypedTree/NativeService.fs;PSGSaturation/SemanticGraph/Rebuild.fs;Elsewhere.fs" />
-    <ClefCoreVerifiedSource Include="@(Compile)" />
-  </ItemGroup>
-</Project>
-PROJECT
-  cat > "$stage/Entries.fs" <<'FS'
-namespace Clef
-module Compiler =
-    module Nanopass =
-        module SSAAssignment =
-            let normalize (x: int) = x
-            let reconcileAndAssign (x: int) = x
-            let reconcileAndAssignWithCallableRelations (x: int) = x
-        module Unrelated =
-            let normalize (x: int) = x
-            let reconcileAndAssign (x: int) = x
-            let reconcileAndAssignWithCallableRelations (x: int) = x
-FS
-  printf 'namespace Clef\nmodule ColdControl =\n    let useCold = Compiler.Nanopass.SSAAssignment.normalize\n' > "$stage/NativeTypedTree/NativeService.fs"
-  printf 'namespace Clef\nmodule SelectiveControl =\n    let useSelective = Compiler.Nanopass.SSAAssignment.reconcileAndAssignWithCallableRelations\n' > "$stage/PSGSaturation/SemanticGraph/Rebuild.fs"
-  cat > "$stage/Elsewhere.fs" <<'FS'
-namespace Clef
-module OtherControl =
-    let legal x = Compiler.Nanopass.Unrelated.normalize x + Compiler.Nanopass.Unrelated.reconcileAndAssign x + Compiler.Nanopass.Unrelated.reconcileAndAssignWithCallableRelations x
-FS
-  case "$name" in
-    clf005-raw)
-      printf '    let raw x = Compiler.Nanopass.SSAAssignment.reconcileAndAssign x\n' >> "$stage/Elsewhere.fs"
-      ;;
-    clf005-cross-owner)
-      cat >> "$stage/Elsewhere.fs" <<'FS'
-    module Entry = Compiler.Nanopass.SSAAssignment
-    let displacedCold = Entry.normalize
-    let displacedSelective = Entry.reconcileAndAssignWithCallableRelations
-FS
-      ;;
-  esac
-  dotnet msbuild "$project" -noAutoResponse -restore -property:Configuration=Debug -property:Platform=AnyCPU \
-    -target:Build -getItem:Compile,ReferencePathWithRefAssemblies,ProjectReference,ClefCoreVerifiedSource > "$stage/loader.json"
-  dotnet fsi "$tool_dir/ProjectInputs.fsx" --capture-loader "$project" "$stage/loader.json" "$stage/loader.tsv" "$stage/inputs.txt"
-  mapfile -t selected < "$stage/inputs.txt"
-  (cd "$tool_dir" && dotnet fsharp-analyzers --project "$project" --analyzers-path "$analyzers" \
-    --include-analyzers 'Alex dependency context' 'Clef SSA ownership' --include-files "${selected[@]}" \
-    --fail-on-type-errors --verbosity d --report "$stage/report.sarif") > "$stage/analysis.log" 2>&1 || status=$?
-  if [[ -n "$expected" ]]; then test "$status" -ne 0; else test "$status" -eq 0; fi
-  dotnet fsi "$tool_dir/VerifyProjectLog.fsx" "$stage/inputs.txt" "$stage/analysis.log" clef-ssa-ownership "$stage/visited.txt"
-  dotnet fsi "$tool_dir/ProjectInputs.fsx" --verify-ssa-loader "$stage/report.sarif" "$stage/loader.tsv" "$stage/inputs.txt" "$stage/visited.txt" > "$stage/verified.log"
-  jq -r '.runs[].results[] | select(.ruleId == "CLF005") | .message.text as $message |
-    .locations[0].physicalLocation | [(.artifactLocation.uri | split("/")[-1]), .region.startLine, $message] | @tsv' \
-    "$stage/report.sarif" | sort > "$stage/diagnostics.tsv"
-  diff -u <(printf '%s' "$expected") "$stage/diagnostics.tsv"
-  ssa_evidence+=("$project" "${selected[@]}" "$stage/"{loader.tsv,report.sarif,visited.txt,verified.log,diagnostics.tsv})
-  cases+=("$name")
-  executed=$((executed + 1))
-  printf 'PASS %s\n' "$name"
-}
-run_ssa_ownership clf005-valid ''
-run_ssa_ownership clf005-raw $'Elsewhere.fs\t4\tRaw structural SSA reconciliation is reserved for direct kernel tests.\n'
-run_ssa_ownership clf005-cross-owner $'Elsewhere.fs\t5\tCold SSA assignment is reserved for NativeService.\nElsewhere.fs\t6\tSelective SSA reconciliation is reserved for Rebuild.\n'
-
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 253 ]] || { printf 'Expected 253 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 250 ]] || { printf 'Expected 250 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done
@@ -740,7 +660,6 @@ if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
   printf '],"sdk":"%s","analyzer_cli":"0.41.0"}\n' "$(dotnet --version)" >> "$scratch/truth.json"
   sha256sum "$analyzers/Alex.Analyzers.dll" "$tool_dir/Analyzer.fs" "$tool_dir/tests/run.sh" "$tool_dir/.config/dotnet-tools.json" "$psg_dll" "$impostor_dll" "$alex_dll" "$stale_dll" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/ImpostorFixture/ImpostorFixture.fsproj" "$tool_dir/tests/AlexFixture/Ensure.fs" "$tool_dir/tests/AlexFixture/AlexFixture.fsproj" "$tool_dir/tests/AlexFixture/packages.lock.json" "$tool_dir/tests/StaleContract/Contract.fs" "$tool_dir/tests/StaleContract/StaleContract.fsproj" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$tool_dir/tests/InProject/Cases.fs" "$tool_dir/tests/InProject/Dialects/Cases.fs" "$tool_dir/tests/InProject/Elements/Cases.fs" "$tool_dir/tests/InProject/Elements/CleanCases.fs" "$tool_dir/tests/InProject/Patterns/Cases.fs" "$tool_dir/tests/InProject/Witnesses/Cases.fs" "$tool_dir/tests/InProject/Traversal/Values.fs" "$tool_dir/tests/project-control.sh" "$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256" "$tool_dir/analyze-alex.sh" "$tool_dir/check-project.sh" "$tool_dir/ProjectInputs.fsx" "$tool_dir/VerifyProjectLog.fsx" "$tool_dir/Alex.Analyzers.fsproj" "$tool_dir/Directory.Packages.props" "$tool_dir/packages.lock.json" "$tool_dir/NuGet.Config" "$scratch/truth.json" > "$scratch/truth.sha256"
   sha256sum "$alias_dll" "$tool_dir/tests/AliasFixture/Aliases.fs" "$tool_dir/tests/AliasFixture/AliasFixture.fsproj" "$tool_dir/tests/AliasFixture/packages.lock.json" "$tool_dir/tests/DependencyControls.fsx" >> "$scratch/truth.sha256"
-  sha256sum "${ssa_evidence[@]}" >> "$scratch/truth.sha256"
   cp "$scratch/truth.sha256" "${ALEX_ANALYZER_TRUTH_RECEIPT_OUT:-$repo_dir/artifacts/alex-analyzers-tests/latest-truth.sha256}"
   printf 'Truth receipt: %s\n' "$scratch/truth.sha256"
 fi
