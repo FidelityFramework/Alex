@@ -5,6 +5,21 @@ repo_dir=$(git -C "$tool_dir" rev-parse --show-toplevel)
 evidence="$repo_dir/artifacts/alex-analyzers-tests/inproject-control"
 mkdir -p "$evidence"
 project="$tool_dir/tests/InProject/InProject.fsproj"
+check="$tool_dir/check-project.sh"
+project_refusal='Alex rules require the Alex production project in this checkout.'
+refuses_subject() {
+  local report="$evidence/$1.log" reason=$2 status=0
+  shift 2
+  "$@" > "$report" 2>&1 || status=$?
+  [[ $status == 2 ]]
+  grep -Fxq "$reason" "$report"
+}
+for retired in clef clef-provenance; do
+  refuses_subject "$retired-mode" 'Expected alex or alex-boundary mode.' bash "$check" "$retired" "$project"
+done
+refuses_subject alternate-argument "$project_refusal" bash "$check" alex "$project"
+refuses_subject alternate-environment "$project_refusal" env ALEX_ANALYZER_PROJECT="$project" bash "$check" alex-boundary
+refuses_subject alternate-wrapper "$project_refusal" env ALEX_ANALYZER_PROJECT="$project" bash "$tool_dir/analyze-alex.sh"
 source="$tool_dir/tests/InProject/Cases.fs"
 dialects_source="$tool_dir/tests/InProject/Dialects/Cases.fs"
 elements_source="$tool_dir/tests/InProject/Elements/Cases.fs"
@@ -13,91 +28,6 @@ patterns_source="$tool_dir/tests/InProject/Patterns/Cases.fs"
 witnesses_source="$tool_dir/tests/InProject/Witnesses/Cases.fs"
 values_source="$tool_dir/tests/InProject/Traversal/Values.fs"
 ensure_source="$tool_dir/tests/InProject/Ensure.fs"
-if [[ ${1:-} == --scoped-loader ]]; then
-  scoped=$(mktemp -d "$evidence/scoped-loader.XXXXXXXX")
-else
-  scoped="$evidence/scoped-loader"
-fi
-mkdir -p "$scoped/fixture"
-scoped_project="$scoped/fixture/Scoped.fsproj"
-export ScopedProvenanceFixtureProject="$tool_dir/tests/ContractFixture/ContractFixture.fsproj"
-cat > "$scoped_project" <<'PROJECT'
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><TargetFramework>net10.0</TargetFramework><DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference><NuGetAudit>false</NuGetAudit></PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="$(ScopedProvenanceFixtureProject)" />
-    <Reference Include="FSharp.Core" HintPath="$(MSBuildToolsPath)/FSharp/FSharp.Core.dll" />
-    <Compile Include="First.fs" /><Compile Include="Host.fs" /><Compile Include="Last.fs" />
-    <ClefCoreVerifiedSource Include="First.fs;Last.fs" />
-  </ItemGroup>
-</Project>
-PROJECT
-printf "module First\nlet value = 1\n" > "$scoped/fixture/First.fs"
-printf "module Host\nlet package () = typeof<System.IO.File>.Assembly\n" > "$scoped/fixture/Host.fs"
-printf "module Last\nlet value = First.value + 1\n" > "$scoped/fixture/Last.fs"
-dotnet msbuild "$scoped_project" -noAutoResponse -restore -property:Configuration=Debug -property:Platform=AnyCPU -target:Build -getItem:Compile,ReferencePathWithRefAssemblies,ProjectReference,ClefCoreVerifiedSource > "$scoped/loader.json"
-inputs=(dotnet fsi "$tool_dir/ProjectInputs.fsx")
-"${inputs[@]}" --capture-loader "$scoped_project" "$scoped/loader.json" "$scoped/loader.tsv" "$scoped/selected.txt"
-first="$scoped/fixture/First.fs"; last="$scoped/fixture/Last.fs"
-diff -u <(printf "%s\n" "$first" "$last") "$scoped/selected.txt"
-(cd "$tool_dir" && dotnet fsharp-analyzers --project "$scoped_project" --analyzers-path "$tool_dir/bin/Debug/net10.0" --include-analyzers "Alex dependency context" --include-files "$first" "$last" --fail-on-type-errors --verbosity d --report "$scoped/report.sarif") > "$scoped/analysis.log" 2>&1
-dotnet fsi "$tool_dir/VerifyProjectLog.fsx" "$scoped/selected.txt" "$scoped/analysis.log" clef-provenance "$scoped/visited.txt"
-ln -sfn "$first" "$scoped/selected-alias.fs"
-printf "%s\n" "$scoped/selected-alias.fs" "$last" > "$scoped/aliases.txt"
-verify=( "${inputs[@]}" --verify-scoped-loader )
-"${verify[@]}" "$scoped/report.sarif" "$scoped/loader.tsv" "$scoped/aliases.txt" "$scoped/visited.txt" > "$scoped/verified.log"
-grep -Fq 'AXD000 provenance only: 2 analyzed files' "$scoped/verified.log"
-refuses() {
-  local name=$1 reason=$2; shift 2
-  if "${verify[@]}" "$@" > "$scoped/$name.log" 2>&1; then printf 'Unexpected successful scoped check: %s\n' "$name" >&2; return 1; fi
-  grep -Fq "Dependency evidence incomplete: $reason" "$scoped/$name.log"
-}
-printf '%s\n' '{"runs":[{"results":[]}]}' > "$scoped/empty.sarif"
-refuses empty 'missing loader context records' "$scoped/empty.sarif" "$scoped/loader.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
-printf '%s\n' "$first" > "$scoped/omitted.txt"
-refuses omitted 'analyzer source list differs from Clef guard scope' "$scoped/report.sarif" "$scoped/loader.tsv" "$scoped/omitted.txt" "$scoped/visited.txt"
-awk -F'\t' '$1=="source" && !swapped { if (!held) {held=$0;next} print;print held;swapped=1;next }{print}' "$scoped/loader.tsv" > "$scoped/reordered.tsv"
-refuses reordered 'loader source order mismatch' "$scoped/report.sarif" "$scoped/reordered.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
-awk -F'\t' '$1=="reference" && !removed {removed=1;next}{print}' "$scoped/loader.tsv" > "$scoped/omitted-ref.tsv"
-refuses omitted-reference 'loader reference coverage mismatch' "$scoped/report.sarif" "$scoped/omitted-ref.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
-awk -F'\t' '$1!="project-reference"{print}' "$scoped/loader.tsv" > "$scoped/omitted-project.tsv"
-refuses omitted-project 'loader project reference coverage mismatch' "$scoped/report.sarif" "$scoped/omitted-project.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
-unset ScopedProvenanceFixtureProject
-awk -F'\t' 'BEGIN{OFS="\t"} $1=="reference" && !replaced {$3=prev;replaced=1} {print;prev=$3}' "$scoped/loader.tsv" > "$scoped/replaced.tsv"
-refuses replaced 'loader input changed after evaluation' "$scoped/report.sarif" "$scoped/replaced.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
-# The fixture defines its selected files independently of any production boundary.
-bad_project="$scoped/fixture/Scoped.fsproj"
-if bash "$tool_dir/check-project.sh" clef-provenance "$bad_project" > "$scoped/non-sibling.log" 2>&1; then exit 1; else test "$?" = 2; fi
-grep -Fq 'Clef provenance requires the sibling compiler service project' "$scoped/non-sibling.log"
-capture_refuses() {
-  local name=$1 reason=$2 mutation=$3
-  jq "$mutation" "$scoped/loader.json" > "$scoped/$name.json"
-  if "${inputs[@]}" --capture-loader "$scoped_project" "$scoped/$name.json" "$scoped/$name.tsv" "$scoped/$name.txt" > "$scoped/$name.log" 2>&1; then return 1; fi
-  grep -Fq "Dependency evidence incomplete: $reason" "$scoped/$name.log"
-}
-capture_refuses empty-scope 'empty Clef guard source scope' '.Items.ClefCoreVerifiedSource=[]'
-capture_refuses duplicate-scope 'duplicate Clef guard source' '.Items.ClefCoreVerifiedSource += [.Items.ClefCoreVerifiedSource[0]]'
-capture_refuses outside-scope 'Clef guard source outside loader' '.Items.ClefCoreVerifiedSource[0]=.Items.ProjectReference[0]'
-jq '.Items.ClefCoreVerifiedSource |= .[0:1]' "$scoped/loader.json" > "$scoped/partial-scope.json"
-"${inputs[@]}" --capture-loader "$scoped_project" "$scoped/partial-scope.json" "$scoped/partial-scope.tsv" "$scoped/partial-scope.txt"
-refuses partial-scope 'analyzed source coverage mismatch' "$scoped/report.sarif" "$scoped/partial-scope.tsv" "$scoped/partial-scope.txt" "$scoped/visited.txt"
-awk -v host="$scoped/fixture/Host.fs" 'NR==1{$0=host}{print}' "$scoped/visited.txt" > "$scoped/wrong-visited.txt"
-refuses wrong-visited 'analyzer log source coverage mismatch' "$scoped/report.sarif" "$scoped/loader.tsv" "$scoped/aliases.txt" "$scoped/wrong-visited.txt"
-first_ref=$(awk -F'\t' '$1=="reference"{print $2;exit}' "$scoped/loader.tsv")
-other_hash=$(awk -F'\t' '$1=="source"{print $3;exit}' "$scoped/loader.tsv")
-for fault in forged-digest inconsistent-digest missing-assembly wrong-project; do
-  case "$fault" in
-    forged-digest) edit='(.runs[].results[].message.text) |= (fromjson | .hashes[$p]=$h | tojson)'; reason='loader input digest mismatch';;
-    inconsistent-digest) edit='(.runs[0].results[1].message.text) |= (fromjson | .hashes[$p]=$h | tojson)'; reason='loader context or hashes differ across files';;
-    missing-assembly) edit='(.runs[].results[].message.text) |= (fromjson | .context.assemblies |= .[1:] | tojson)'; reason='loader assembly coverage mismatch';;
-    wrong-project) edit='(.runs[].results[].message.text) |= (fromjson | .context.project=$other | tojson)'; reason='loader project identity mismatch';;
-  esac
-  jq --arg p "$first_ref" --arg h "$other_hash" --arg other "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$edit" "$scoped/report.sarif" > "$scoped/$fault.sarif"
-  refuses "$fault" "$reason" "$scoped/$fault.sarif" "$scoped/loader.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
-done
-awk -F'\t' '$1=="reference" && !swapped { if (!held) {held=$0;next} print;print held;swapped=1;next }{print}' "$scoped/loader.tsv" > "$scoped/reordered-ref.tsv"
-refuses reordered-reference 'compiler reference order mismatch' "$scoped/report.sarif" "$scoped/reordered-ref.tsv" "$scoped/aliases.txt" "$scoped/visited.txt"
-if [[ ${1:-} == --scoped-loader ]]; then exit 0; fi
 status=0
 (cd "$tool_dir" && dotnet fsharp-analyzers --project "$project" --analyzers-path "$tool_dir/bin/Debug/net10.0" --include-analyzers 'Alex published boundary' --fail-on-type-errors) > "$evidence/analysis.log" 2>&1 || status=$?
 [[ $status -ne 0 ]] || { printf 'In-project refusal case was not refused.\n' >&2; exit 1; }
@@ -139,9 +69,6 @@ rg -Fq "$witnesses_source(26,2): Error AXA010 : Alex must not call SMTTransfer.o
 ! rg -Fq "$elements_clean_source" "$evidence/analysis.log" || { printf 'Unexpected diagnostic in allowed Elements fixture.\n' >&2; exit 1; }
 [[ $(rg -F "$elements_source" "$evidence/analysis.log" | wc -l) -eq 20 ]] || { printf 'Unexpected Elements refusal case diagnostic count.\n' >&2; exit 1; }
 env -u DEPENDENCY_CONTROL_ONLY dotnet fsi "$tool_dir/tests/DependencyControls.fsx" > "$evidence/dependency.log" 2>&1
-clef_status=0
-bash "$tool_dir/check-project.sh" clef "$project" > "$evidence/clef-refusal.log" 2>&1 || clef_status=$?
-[[ $clef_status -ne 0 ]] && rg -Fq 'Clef mode is suspended pending an owner convention for permitted dependency sets (P-dep4).' "$evidence/clef-refusal.log" || { printf 'Missing explicit clef dependency refusal.\n' >&2; exit 1; }
 ratchet_dir="$evidence/ratchet"
 rm -rf "$ratchet_dir"
 mkdir -p "$ratchet_dir/src/Alex/Dialects/Core" "$ratchet_dir/src/Alex/Patterns" "$ratchet_dir/src/Alex/Traversal" "$ratchet_dir/src/Alex/Witnesses"
@@ -322,6 +249,6 @@ rg -Fq "$ratchet_new_witness(2,31): Error AXA005 : Mutable locals, mutable bindi
 ! rg -Fq "$ratchet_values" "$evidence/ratchet.log" || { printf 'Unexpected diagnostic in the ratchet Traversal/Values.fs acceptance case.\n' >&2; exit 1; }
 rg -Fq "$ratchet_transfer(27,15): Error AXA008 : Alex must not add a settable property to MLIRAccumulator; 'RegionBufferAssoc' is outside the 17 settable properties declared at the introduction of AXA008." "$evidence/ratchet.log" || { printf 'Missing AXA008 diagnostic for a settable MLIRAccumulator property outside the closed set.\n' >&2; exit 1; }
 [[ $(rg -F "$ratchet_transfer" "$evidence/ratchet.log" | wc -l) -eq 1 ]] || { printf 'Unexpected diagnostic on the 17 permitted properties, the get-only property or the matched pins in TransferTypes.fs.\n' >&2; exit 1; }
-sha256sum "$tool_dir/bin/Debug/net10.0/Alex.Analyzers.dll" "$tool_dir/ProjectInputs.fsx" "$tool_dir/check-project.sh" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$source" "$dialects_source" "$elements_source" "$elements_clean_source" "$patterns_source" "$witnesses_source" "$values_source" "$tool_dir/tests/DependencyControls.fsx" "$tool_dir/tests/project-control.sh" "$evidence/analysis.log" "$evidence/dependency.log" "$evidence/clef-refusal.log" "$evidence/ratchet.log" > "$evidence/truth.sha256"
+sha256sum "$tool_dir/bin/Debug/net10.0/Alex.Analyzers.dll" "$tool_dir/ProjectInputs.fsx" "$tool_dir/check-project.sh" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$source" "$dialects_source" "$elements_source" "$elements_clean_source" "$patterns_source" "$witnesses_source" "$values_source" "$tool_dir/tests/DependencyControls.fsx" "$tool_dir/tests/project-control.sh" "$evidence/analysis.log" "$evidence/dependency.log" "$evidence/ratchet.log" \
+  "$evidence/clef-mode.log" "$evidence/clef-provenance-mode.log" "$evidence/alternate-argument.log" "$evidence/alternate-environment.log" "$evidence/alternate-wrapper.log" > "$evidence/truth.sha256"
 printf 'PASS in-project historical predicate, AXA003-AXA010 layer controls, ratchet controls and the MLIRAccumulator property control; acceptance cases clean\n'
-sha256sum "$scoped_project" "$first" "$last" "$scoped/fixture/Host.fs" "$scoped/selected.txt" "$scoped/loader.json" "$scoped/loader.tsv" "$scoped/report.sarif" "$scoped/visited.txt" "$scoped/verified.log" "$scoped"/{empty,omitted,reordered,omitted-reference,omitted-project,replaced,non-sibling,empty-scope,duplicate-scope,outside-scope,partial-scope,wrong-visited,forged-digest,inconsistent-digest,missing-assembly,wrong-project,reordered-reference}.log >> "$evidence/truth.sha256"

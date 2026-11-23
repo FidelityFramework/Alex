@@ -56,7 +56,7 @@ let private analyzeShared (context: CliContext) = async {
                if ambientState then AmbientStateDependency entity ]
     let rejectApi code reason range (entity: FSharpEntity) =
       diagnostics.Add {
-        Type = "Clef production boundary"
+        Type = "Alex pure-core boundary"
         Message = sprintf "%s: %s (assembly %s)." reason (entity.TryFullName |> Option.defaultValue entity.DisplayName) entity.Assembly.SimpleName
         Code = code
         Severity = Severity.Error
@@ -109,14 +109,14 @@ let private analyzeShared (context: CliContext) = async {
       | Ok dependencies ->
         for dependency in dependencies do
           match dependency with
-          | BclDependency target -> rejectApi "AXC002" "Clef production code must not depend on .NET library APIs" range target
-          | ReflectionDependency target -> rejectApi "AXC009" "Clef production code must not use reflection APIs" range target
-          | AmbientStateDependency target -> rejectApi "AXC010" "Clef production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state" range target
+          | BclDependency target -> rejectApi "AXC002" "Alex production code must not depend on .NET library APIs" range target
+          | ReflectionDependency target -> rejectApi "AXC009" "Alex production code must not use reflection APIs" range target
+          | AmbientStateDependency target -> rejectApi "AXC010" "Alex production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state" range target
           | ObjectDependency ->
-            diagnostics.Add { Type = "Clef production boundary"; Message = sprintf "Clef production code must not declare obj types. %s resolves to System.Object." entity.DisplayName; Code = "AXC005"; Severity = Severity.Error; Range = range; Fixes = [] }
+            diagnostics.Add { Type = "Alex pure-core boundary"; Message = sprintf "Alex production code must not declare obj types. %s resolves to System.Object." entity.DisplayName; Code = "AXC005"; Severity = Severity.Error; Range = range; Fixes = [] }
       | Error reason ->
         diagnostics.Add {
-          Type = "Clef analysis incomplete"
+          Type = "Alex analysis incomplete"
           Message = reason
           Code = "AXA000"
           Severity = Severity.Error
@@ -148,7 +148,7 @@ let private analyzeShared (context: CliContext) = async {
     for symbolUse in context.GetAllSymbolUsesOfFile() do
       match symbolUse.Symbol with
       | :? FSharpMemberOrFunctionOrValue as value when value.CompiledName = "Box" && (value.DeclaringEntity |> Option.exists (fun entity -> entity.TryFullName = Some "Microsoft.FSharp.Core.Operators")) ->
-        diagnostics.Add { Type = "Clef production boundary"; Message = "Clef production code must not widen a value to obj."; Code = "AXC004"; Severity = Severity.Error; Range = symbolUse.Range; Fixes = [] }
+        diagnostics.Add { Type = "Alex pure-core boundary"; Message = "Alex production code must not widen a value to obj."; Code = "AXC004"; Severity = Severity.Error; Range = symbolUse.Range; Fixes = [] }
       | _ -> ()
       let isReferenceIdentity =
         match symbolUse.Symbol with
@@ -165,8 +165,8 @@ let private analyzeShared (context: CliContext) = async {
         | _ -> false
       if isReferenceIdentity then
         diagnostics.Add {
-          Type = "Clef production boundary"
-          Message = "Clef production code must not use reference identity (PhysicalEquality or ReferenceEquals)."
+          Type = "Alex pure-core boundary"
+          Message = "Alex production code must not use reference identity (PhysicalEquality or ReferenceEquals)."
           Code = "AXC006"
           Severity = Severity.Error
           Range = symbolUse.Range
@@ -187,8 +187,8 @@ let private analyzeShared (context: CliContext) = async {
         | _ -> false
       if isExceptionOperator then
         diagnostics.Add {
-          Type = "Clef production boundary"
-          Message = "Clef production code must not throw or catch CLR exceptions."
+          Type = "Alex pure-core boundary"
+          Message = "Alex production code must not throw or catch CLR exceptions."
           Code = "AXC008"
           Severity = Severity.Error
           Range = symbolUse.Range
@@ -216,8 +216,8 @@ let private analyzeShared (context: CliContext) = async {
       | _ -> ()
     let rejectNull range =
       diagnostics.Add {
-        Type = "Clef production boundary"
-        Message = "Clef production code must not use null."
+        Type = "Alex pure-core boundary"
+        Message = "Alex production code must not use null."
         Code = "AXC001"
         Severity = Severity.Error
         Range = range
@@ -225,8 +225,8 @@ let private analyzeShared (context: CliContext) = async {
       }
     let rejectReflectionFormat range =
       diagnostics.Add {
-        Type = "Clef production boundary"
-        Message = "Clef production code must not use %A reflection formatting."
+        Type = "Alex pure-core boundary"
+        Message = "Alex production code must not use %A reflection formatting."
         Code = "AXC007"
         Severity = Severity.Error
         Range = range
@@ -269,8 +269,8 @@ let private analyzeShared (context: CliContext) = async {
         | SynExpr.Null range -> rejectNull range
         | SynExpr.TryWith(range = range) ->
           diagnostics.Add {
-            Type = "Clef production boundary"
-            Message = "Clef production code must not throw or catch CLR exceptions."
+            Type = "Alex pure-core boundary"
+            Message = "Alex production code must not throw or catch CLR exceptions."
             Code = "AXC008"
             Severity = Severity.Error
             Range = range
@@ -312,8 +312,8 @@ let private analyzeShared (context: CliContext) = async {
             let authored = explicit.IsSome || (authoredValues |> Seq.contains input.Range)
             if isObject targetType && not (isObject input.Type) && authored then
               diagnostics.Add {
-                Type = "Clef production boundary"
-                Message = "Clef production code must not widen a value to obj."
+                Type = "Alex pure-core boundary"
+                Message = "Alex production code must not widen a value to obj."
                 Code = "AXC004"
                 Severity = Severity.Error
                 Range = explicit |> Option.map snd |> Option.defaultValue input.Range
@@ -328,8 +328,8 @@ let private analyzeShared (context: CliContext) = async {
                 entity.FullName = "Microsoft.FSharp.Control.BackgroundTaskBuilder")
             if taskBuilder then
               diagnostics.Add {
-                Type = "Clef production boundary"
-                Message = "Clef production code must not use task computation expressions."
+                Type = "Alex pure-core boundary"
+                Message = "Alex production code must not use task computation expressions."
                 Code = "AXC003"
                 Severity = Severity.Error
                 Range = range
@@ -358,8 +358,8 @@ let private analyzeShared (context: CliContext) = async {
             if definition.Assembly.SimpleName = "FSharp.Core" && definition.AccessPath = "Microsoft.FSharp.Collections" &&
                (definition.CompiledName = "FSharpMap`2" || definition.CompiledName = "FSharpSet`1") then
               diagnostics.Add {
-                Type = "Clef production boundary"
-                Message = sprintf "Clef production code must not hold module-level mutable Map or Set state: %s.%s (binding '%s')." definition.AccessPath definition.CompiledName value.DisplayName
+                Type = "Alex pure-core boundary"
+                Message = sprintf "Alex production code must not hold module-level mutable Map or Set state: %s.%s (binding '%s')." definition.AccessPath definition.CompiledName value.DisplayName
                 Code = "AXC010"
                 Severity = Severity.Error
                 Range = value.DeclarationLocation
@@ -384,15 +384,15 @@ let private objectDeclarations (context: CliContext) = async {
             if typ.HasTypeDefinition then typ.TypeDefinition.TryFullName else None
           with _ -> None
         if target = Some "System.Object" then
-          diagnostics.Add { Type = "Clef production boundary"; Message = "Clef production code must not declare obj types."; Code = "AXC005"; Severity = Severity.Error; Range = symbolUse.Range; Fixes = [] }
+          diagnostics.Add { Type = "Alex pure-core boundary"; Message = "Alex production code must not declare obj types."; Code = "AXC005"; Severity = Severity.Error; Range = symbolUse.Range; Fixes = [] }
         else
-          diagnostics.Add { Type = "Clef analysis incomplete"; Message = "Cannot establish the target of the obj abbreviation."; Code = "AXA000"; Severity = Severity.Error; Range = symbolUse.Range; Fixes = [] }
+          diagnostics.Add { Type = "Alex analysis incomplete"; Message = "Cannot establish the target of the obj abbreviation."; Code = "AXA000"; Severity = Severity.Error; Range = symbolUse.Range; Fixes = [] }
       | _ -> ()
   return diagnostics |> Seq.distinctBy (fun diagnostic -> diagnostic.Code, diagnostic.Range.StartLine, diagnostic.Range.StartColumn) |> List.ofSeq
 }
 
-[<CliAnalyzer("Clef production baseline")>]
-let clefBaseline : Analyzer<CliContext> = fun context -> async {
+[<CliAnalyzer("Alex pure-core baseline")>]
+let alexBaseline : Analyzer<CliContext> = fun context -> async {
   let! baseline = analyzeShared context
   let! objects = objectDeclarations context
   return baseline @ objects

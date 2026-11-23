@@ -204,7 +204,7 @@ printf 'let value = 0I\nlet n = System.Numerics.BigInteger.Parse("1")\n' > "$scr
 printf 'module NumericLiteralI =\n  let FromZero () = System.Numerics.BigInteger.Zero\nlet value = 0I\n' > "$scratch/integer-literal-custom.fsx"
 
 run_case() {
-  local name=$1 expected=$2 positions=${3:-} object_positions=${4:-} reason count rc=0 analyzer='Clef production baseline'
+  local name=$1 expected=$2 positions=${3:-} object_positions=${4:-} reason count rc=0 analyzer='Alex pure-core baseline'
   if [[ -n ${ALEX_ANALYZER_ONLY:-} && "$name" != "$ALEX_ANALYZER_ONLY" ]]; then return 0; fi
   executed=$((executed + 1))
   cases+=("$name")
@@ -215,10 +215,10 @@ run_case() {
     AXC009)
       local identity=$object_positions required=0
       for position in $positions; do
-        rg -Fq "$scratch/$name.fsx($position): Error AXC009 : Clef production code must not use reflection APIs: $identity." "$scratch/$name.log" || { printf 'FAIL %s AXC009 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        rg -Fq "$scratch/$name.fsx($position): Error AXC009 : Alex production code must not use reflection APIs: $identity." "$scratch/$name.log" || { printf 'FAIL %s AXC009 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
         required=$((required + 1))
         if [[ $identity == System.Reflection.* ]]; then
-          rg -Fq "$scratch/$name.fsx($position): Error AXC002 : Clef production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
+          rg -Fq "$scratch/$name.fsx($position): Error AXC002 : Alex production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
           required=$((required + 1))
         fi
       done
@@ -228,8 +228,8 @@ run_case() {
     AXC010)
       local identity=$object_positions required=0
       for position in $positions; do
-        rg -Fq "$scratch/$name.fsx($position): Error AXC010 : Clef production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state: $identity (assembly " "$scratch/$name.log" || { printf 'FAIL %s AXC010 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
-        rg -Fq "$scratch/$name.fsx($position): Error AXC002 : Clef production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
+        rg -Fq "$scratch/$name.fsx($position): Error AXC010 : Alex production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state: $identity (assembly " "$scratch/$name.log" || { printf 'FAIL %s AXC010 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        rg -Fq "$scratch/$name.fsx($position): Error AXC002 : Alex production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
         required=$((required + 2))
       done
       count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
@@ -274,16 +274,16 @@ run_case() {
         AXA009-values) expected=AXA009; reason="Alex must take SSA names from getNodeSSA / getNodeSSAs; direct uses of the SSA-producing members of Alex.Traversal.Values are confined to Traversal/Values.fs and XParsec/PSGCombinators.fs (in 'bad')." ;;
         AXA010-fn) expected=AXA010; reason="Alex must not call NanopassArchitecture.visitAllNodes or ScopeContext.root / createChild / addOp / addOps / enterScope / exitScope in Patterns/ or in a Witnesses/ function that is not a pinned scope boundary (in 'bad')." ;;
         AXA010-smt) expected=AXA010; reason="Alex must not call SMTTransfer.operations or SMTTransfer.transfer in Patterns/ or Witnesses/ (in 'bad')." ;;
-        AXC001) reason='Clef production code must not use null.' ;;
-        AXC002) reason='Clef production code must not depend on .NET library APIs:' ;;
-        AXC003) reason='Clef production code must not use task computation expressions.' ;;
-        AXC004) reason='Clef production code must not widen a value to obj.' ;;
-        AXC005) reason='Clef production code must not declare obj types.' ;;
-        AXC006) reason='Clef production code must not use reference identity (PhysicalEquality or ReferenceEquals).' ;;
-        AXC007) reason='Clef production code must not use %A reflection formatting.' ;;
-        AXC008) reason='Clef production code must not throw or catch CLR exceptions.' ;;
-        AXC010-module-map) expected=AXC010; reason="Clef production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpMap\`2 (binding '$4')."; object_positions= ;;
-        AXC010-module-set) expected=AXC010; reason="Clef production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpSet\`1 (binding '$4')."; object_positions= ;;
+        AXC001) reason='Alex production code must not use null.' ;;
+        AXC002) reason='Alex production code must not depend on .NET library APIs:' ;;
+        AXC003) reason='Alex production code must not use task computation expressions.' ;;
+        AXC004) reason='Alex production code must not widen a value to obj.' ;;
+        AXC005) reason='Alex production code must not declare obj types.' ;;
+        AXC006) reason='Alex production code must not use reference identity (PhysicalEquality or ReferenceEquals).' ;;
+        AXC007) reason='Alex production code must not use %A reflection formatting.' ;;
+        AXC008) reason='Alex production code must not throw or catch CLR exceptions.' ;;
+        AXC010-module-map) expected=AXC010; reason="Alex production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpMap\`2 (binding '$4')."; object_positions= ;;
+        AXC010-module-set) expected=AXC010; reason="Alex production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpSet\`1 (binding '$4')."; object_positions= ;;
         *) printf 'Unknown expected diagnostic %s\n' "$expected" >&2; return 1 ;;
       esac
       count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
@@ -292,7 +292,7 @@ run_case() {
         rg -Fq "$scratch/$name.fsx($position): Error $expected : $reason" "$scratch/$name.log" || { printf 'FAIL %s diagnostic at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
       done
       for position in $object_positions; do
-        rg -Fq "$scratch/$name.fsx($position): Error AXC005 : Clef production code must not declare obj types." "$scratch/$name.log" || { printf 'FAIL %s obj diagnostic at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        rg -Fq "$scratch/$name.fsx($position): Error AXC005 : Alex production code must not declare obj types." "$scratch/$name.log" || { printf 'FAIL %s obj diagnostic at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
       done
       if [[ $expected == AXC002 ]]; then
         [[ $(rg -c 'Error AXC002 : .+ \(assembly .+\)\.' "$scratch/$name.log" || true) -eq $(wc -w <<< "$positions") ]] || { printf 'FAIL %s missing resolved identity\n' "$name" >&2; return 1; }

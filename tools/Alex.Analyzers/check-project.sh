@@ -4,28 +4,18 @@ export MSBUILDDISABLENODEREUSE=1
 
 tool_dir=$(cd -P "$(dirname "$0")" && pwd)
 repo_dir=$(git -C "$tool_dir" rev-parse --show-toplevel)
-mode=${1:?expected alex, alex-boundary, clef or clef-provenance}
-if [[ "$mode" == alex || "$mode" == alex-boundary ]]; then
-  project=${2:-${ALEX_ANALYZER_PROJECT:-$repo_dir/src/Alex/Alex.fsproj}}
-else
-  project=${2:-${ALEX_ANALYZER_PROJECT:?set ALEX_ANALYZER_PROJECT or supply an absolute F# project path}}
-fi
-[[ "$project" = /* && -f "$project" ]] || { printf 'Project must be an existing absolute path.\n' >&2; exit 2; }
-supplied_project=$project
-project=$(realpath "$project")
+mode=${1:-}
 case "$mode" in
-  alex|alex-boundary)
-    alex_project=$(realpath "${ALEX_ANALYZER_PROJECT:-$repo_dir/src/Alex/Alex.fsproj}")
-    [[ "$project" == "$alex_project" ]] || { printf 'Alex rules require the configured Alex production project.\n' >&2; exit 2; }
-    if [[ "$mode" == alex ]]; then analyzers=("Clef production baseline" "Alex published boundary" "Alex dependency context"); else analyzers=("Alex published boundary"); fi
-    ;;
-  clef) printf 'Clef mode is suspended pending an owner convention for permitted dependency sets (P-dep4).\n' >&2; exit 2 ;;
-  clef-provenance)
-    [[ "$project" -ef "$repo_dir/../clef/src/Compiler/Clef.Compiler.Service.fsproj" ]] || { printf 'Clef provenance requires the sibling compiler service project.\n' >&2; exit 2; }
-    analyzers=("Alex dependency context")
-    ;;
-  *) printf 'Expected alex, alex-boundary, clef or clef-provenance mode.\n' >&2; exit 2 ;;
+  alex) analyzers=("Alex pure-core baseline" "Alex published boundary" "Alex dependency context") ;;
+  alex-boundary) analyzers=("Alex published boundary") ;;
+  *) printf 'Expected alex or alex-boundary mode.\n' >&2; exit 2 ;;
 esac
+# The published PSG boundary applies to tooling: https://forge.spkez.dev/FidelityFramework/Alex/wiki/01_Boundary
+project="$repo_dir/src/Alex/Alex.fsproj"
+requested_project=${2:-${ALEX_ANALYZER_PROJECT:-$project}}
+[[ "$requested_project" = /* && "$requested_project" -ef "$project" && -f "$project" ]] || {
+  printf 'Alex rules require the Alex production project in this checkout.\n' >&2; exit 2;
+}
 
 [[ -f "$tool_dir/bin/Debug/net10.0/Alex.Analyzers.dll" ]] || { printf 'Analyzer assembly is not built.\n' >&2; exit 1; }
 receipt=${ALEX_ANALYZER_TRUTH_RECEIPT:-$repo_dir/artifacts/alex-analyzers-tests/latest-truth.sha256}
@@ -68,24 +58,9 @@ if [[ "$mode" == alex ]]; then
   "$host" fsi "$tool_dir/ProjectInputs.fsx" --compare-preprocess "$scratch/preprocess-before.xml" "$scratch/preprocess-after.xml"
   sha256sum "$scratch/restore-graph.json" "$scratch/restore-graph-scrubbed.json" "$scratch/references.json" "$scratch/references-scrubbed.json" "$scratch/dependencies.txt" "$scratch/preprocess-before.xml" "$scratch/preprocess-scrubbed.xml" "$scratch/preprocess-after.xml" "$scratch/retained-environment.txt" > "$scratch/dependencies.sha256"
 fi
-if [[ "$mode" == clef-provenance ]]; then
-  "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -target:Build -getItem:Compile,ReferencePathWithRefAssemblies,ProjectReference,ClefCoreVerifiedSource > "$scratch/loader.json"
-  "$host" fsi "$tool_dir/ProjectInputs.fsx" --capture-loader "$project" "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/inputs.txt"
-  sha256sum "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/inputs.txt" > "$scratch/captured.sha256"
-else
-  "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -getItem:Compile > "$scratch/items.json"
-  "$host" fsi "$tool_dir/ProjectInputs.fsx" "$scratch/items.json" "$scratch/inputs.txt"
-fi
+"$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU -getItem:Compile > "$scratch/items.json"
+"$host" fsi "$tool_dir/ProjectInputs.fsx" "$scratch/items.json" "$scratch/inputs.txt"
 mapfile -t sources < "$scratch/inputs.txt"
-if [[ "$mode" == clef-provenance && "$supplied_project" != "$project" ]]; then
-  # The CLI matches pathname spellings before the verifier checks the actual file identities.
-  project_dir=$(dirname "$project")
-  supplied_dir=$(dirname "$supplied_project")
-  for path in "${sources[@]}"; do
-    alternate="$supplied_dir/${path#"$project_dir"/}"
-    if [[ "$path" -ef "$alternate" ]]; then sources+=("$alternate"); fi
-  done
-fi
 set +e
 "$host" fsharp-analyzers --project "$project" --analyzers-path "$tool_dir/bin/Debug/net10.0" \
   --include-analyzers "${analyzers[@]}" --include-files "${sources[@]}" --fail-on-type-errors --verbosity d --report "$scratch/report.sarif" \
@@ -94,14 +69,7 @@ status=${PIPESTATUS[0]}
 set -e
 [[ -f "$scratch/report.sarif" ]] || { printf 'Analyzer did not produce SARIF (exit %s).\n' "$status" >&2; exit 1; }
 if [[ $status -ne 0 ]]; then printf 'Analyzer exited %s; see %s.\n' "$status" "$scratch/analysis.log" >&2; fi
-if [[ "$mode" == clef-provenance ]]; then
-  sha256sum --check --status "$scratch/captured.sha256" || { printf 'Clef guard or compiler input capture changed during analysis.\n' >&2; exit 1; }
-  "$host" fsi "$tool_dir/VerifyProjectLog.fsx" "$scratch/inputs.txt" "$scratch/analysis.log" "$mode" "$scratch/visited.txt"
-  "$host" fsi "$tool_dir/ProjectInputs.fsx" --verify-scoped-loader "$scratch/report.sarif" "$scratch/loader.tsv" "$scratch/inputs.txt" "$scratch/visited.txt" | tee "$scratch/loader-context.txt"
-  sha256sum "$scratch/loader.json" "$scratch/loader.tsv" "$scratch/captured.sha256" "$scratch/inputs.txt" "$scratch/visited.txt" "$scratch/report.sarif" "$scratch/analysis.log" "$scratch/loader-context.txt" > "$scratch/provenance.sha256"
-else
-  "$host" fsi "$tool_dir/VerifyProjectLog.fsx" "$scratch/inputs.txt" "$scratch/analysis.log" "$mode"
-fi
+"$host" fsi "$tool_dir/VerifyProjectLog.fsx" "$scratch/inputs.txt" "$scratch/analysis.log" "$mode"
 if [[ "$mode" == alex ]]; then
   "$host" fsi "$tool_dir/ProjectInputs.fsx" --compare-project-context "$scratch/report.sarif" "$scratch/references.json" "$scratch/dependencies.txt" "$scratch/inputs.txt" "$scratch/restore-graph.json" > "$scratch/loader-context.txt"
   "$host" msbuild -noAutoResponse "$project" -property:Configuration=Debug -property:Platform=AnyCPU "-preprocess:$scratch/preprocess-after-analysis.xml" > "$scratch/preprocess-after-analysis.log"
