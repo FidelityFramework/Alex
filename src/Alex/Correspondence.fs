@@ -6,14 +6,12 @@ module Alex.Correspondence
 open Fidelity.PSG
 open Alex.Dialects.Core.Types
 
-/// The current full-witness pipeline supplies one whole revision.
-/// witnessRun distinguishes emission bookkeeping, not an accepted source
-/// revision or temporal freshness.
-type WitnessRun = private WitnessRun of int64
-
+/// The current full-witness pipeline supplies one whole published revision.
+/// Scope identity is the exact published revision, not a process-global counter
+/// or host observation label.
 [<NoEquality; NoComparison>]
 type SemanticScope =
-    | WholeCheckedGraph of witnessRun: WitnessRun * graph: Revision
+    | WholeCheckedGraph of graph: Revision
 
 [<NoEquality; NoComparison>]
 type Occurrence = {
@@ -42,25 +40,17 @@ type WitnessEmission<'result> = {
     TopLevelOps: MLIROp list
 }
 
-// Alex #64 tracks removal of this process-wide counter under revision contract D3.
-// https://forge.spkez.dev/FidelityFramework/Alex/issues/64
-let private nextRunId = ref 0L
-
-let witnessRun (WholeCheckedGraph(id, _)) = id
-let graph (WholeCheckedGraph(_, graph)) = graph
-let beginWholeGraphWitness graph =
-    nextRunId.Value <- nextRunId.Value + 1L
-    WholeCheckedGraph(WitnessRun nextRunId.Value, graph)
+let graph (WholeCheckedGraph graph) = graph
+let beginWholeGraphWitness (graph: Revision) : SemanticScope = WholeCheckedGraph graph
 
 let sameScope left right =
-    witnessRun left = witnessRun right
-    && graph left = graph right
+    graph left = graph right
 
 let validateOccurrence scope (occurrence: Occurrence) =
     let nodes = (graph scope).Nodes
     let current (node: SemanticNode) =
         nodes.TryFind node.Id |> Option.exists (fun actual -> actual = node)
-    if not (sameScope scope occurrence.Scope) then Error "Witness occurrence belongs to a different checked graph snapshot or witness run"
+    if not (sameScope scope occurrence.Scope) then Error "Witness occurrence belongs to a different checked graph snapshot"
     elif not (current occurrence.Focus) then
         Error "Witness occurrence does not retain the actual current PSG focus and Huet path"
     else

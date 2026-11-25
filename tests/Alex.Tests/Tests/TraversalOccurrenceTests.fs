@@ -66,16 +66,99 @@ let private context graph position visited =
       GlobalVisited = visited; TraversalVisited = visited }
 
 [<Fact>]
-let ``witness scope requires both original run and original graph identities`` () =
+let ``witness scope preserves exact published revision identity across value-equal copies and refuses edits`` () =
     let value = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
-    let graph = single value
+    let root = node 1 (SemanticKind.Sequential [value.Id]) boolType [0] None
+    let domain = numericDomain 2
+    let graph =
+        { revision [value; root; domain] with
+            Emission =
+                { Empty.emission with
+                    Callable = dataRows [value; root]
+                    Numeric =
+                        boolRows [boolCarrier value [value; domain]; boolCarrier root [value; root; domain]]
+                                 [value; root] } }
+        |> declareTraversalReadings
     let scope = Alex.Correspondence.beginWholeGraphWitness graph
+    let repeated = Alex.Correspondence.beginWholeGraphWitness graph
+    let copiedNodes = graph.Nodes |> Map.toList |> Map.ofList
+    let equalCopy = Alex.Correspondence.beginWholeGraphWitness { graph with Nodes = copiedNodes }
+    // Value-equal positive controls: deterministic scope equality without process-global counters or heap identity.
     Assert.True(Alex.Correspondence.sameScope scope scope)
-    for _ in 1 .. 100 do
-        Assert.False(Alex.Correspondence.sameScope scope (Alex.Correspondence.beginWholeGraphWitness graph))
-    let copy = { graph with DeclarationRoots = [value.Id, DeclRoot.EntryPoint] }
-    let forged = Alex.Correspondence.WholeCheckedGraph(Alex.Correspondence.witnessRun scope, copy)
-    Assert.False(Alex.Correspondence.sameScope scope forged)
+    Assert.True(Alex.Correspondence.sameScope scope repeated)
+    Assert.True(Alex.Correspondence.sameScope scope equalCopy)
+    let position = Zipper.create graph root.Id |> require "Missing root" |> atChild value.Id
+    let validOccurrence : Alex.Correspondence.Occurrence =
+        { Scope = scope; Focus = position.Focus; Anchor = root.Id; Path = position.Path }
+    Assert.Equal(Ok (), Alex.Correspondence.validateOccurrence scope validOccurrence)
+    Assert.Equal(Ok (), Alex.Correspondence.validateOccurrence repeated validOccurrence)
+    Assert.Equal(Ok (), Alex.Correspondence.validateOccurrence equalCopy validOccurrence)
+    // Changed-revision exact-reason negative controls.
+    let changedRoots = Alex.Correspondence.beginWholeGraphWitness { graph with DeclarationRoots = [root.Id, DeclRoot.EntryPoint] }
+    let changedNode =
+        Alex.Correspondence.beginWholeGraphWitness
+            { graph with Nodes = graph.Nodes.Add(value.Id, { value with Kind = SemanticKind.Literal(NativeLiteral.Bool false) }) }
+    Assert.False(Alex.Correspondence.sameScope scope changedRoots)
+    Assert.False(Alex.Correspondence.sameScope scope changedNode)
+    Assert.Equal(Result.Error "Witness occurrence belongs to a different checked graph snapshot",
+        Alex.Correspondence.validateOccurrence changedRoots validOccurrence)
+    Assert.Equal(Result.Error "Witness occurrence belongs to a different checked graph snapshot",
+        Alex.Correspondence.validateOccurrence changedNode validOccurrence)
+    // Fault-injection negative controls: mutated Focus, wrong Path ordinal, and truncated Path / wrong Anchor.
+    let mutatedFocus = { validOccurrence with Focus = { value with IsReachable = not value.IsReachable } }
+    Assert.Equal(Result.Error "Witness occurrence does not retain the actual current PSG focus and Huet path",
+        Alex.Correspondence.validateOccurrence scope mutatedFocus)
+    let wrongOrdinal = { validOccurrence with Path = [{ position.Path.Head with Ordinal = 1 }] }
+    match Alex.Correspondence.validateOccurrence scope wrongOrdinal with
+    | Result.Error reason -> Assert.StartsWith("Witness occurrence does not retain the actual current PSG focus and Huet path: ", reason)
+    | Result.Ok () -> failwith "Wrong ordinal path was accepted"
+    let truncatedPath = { validOccurrence with Path = [] }
+    match Alex.Correspondence.validateOccurrence scope truncatedPath with
+    | Result.Error reason -> Assert.StartsWith("Witness occurrence does not retain the actual current PSG focus and Huet path: ", reason)
+    | Result.Ok () -> failwith "Truncated path was accepted"
+    let wrongAnchor = { validOccurrence with Anchor = value.Id }
+    Assert.Equal(Result.Error "Witness occurrence anchor differs from its whole source-authored path",
+        Alex.Correspondence.validateOccurrence scope wrongAnchor)
+
+[<Fact>]
+let ``independent concurrent witnesses produce deterministic scopes occurrences and operations`` () =
+    let published literal =
+        let value = node 0 (SemanticKind.Literal(NativeLiteral.Bool literal)) boolType [] None
+        let baseGraph = single value
+        let held = baseGraph.Nodes |> Map.toList |> List.map snd
+        { baseGraph with
+            DeclarationRoots = [value.Id, DeclRoot.EntryPoint]
+            Platform = { baseGraph.Platform with Register = Ok 64; Pointer = Ok 64 }
+            Emission = { baseGraph.Emission with Callable = dataRows held } }
+    let graphTrue = published true
+    let graphFalse = published false
+    Assert.Empty(Integrity.check graphTrue)
+    Assert.Empty(Integrity.check graphFalse)
+    let run revision =
+        match Alex.Generation.generate { Revision = revision; Target = Alex.Target.CPU } with
+        | Result.Ok witnessed -> witnessed
+        | Result.Error refusal -> failwithf "Unexpected witness refusal: %s" refusal.Reason
+    let baseline = run graphTrue
+    Assert.NotEmpty baseline.Operations
+    Assert.NotEmpty baseline.Emissions
+    let tasks =
+        [| for _ in 1 .. 16 ->
+            System.Threading.Tasks.Task.Run(fun () ->
+                [ for _ in 1 .. 8 -> run graphTrue, run graphFalse ]) |]
+    let results = System.Threading.Tasks.Task.WhenAll(tasks).GetAwaiter().GetResult() |> Array.toList |> List.concat
+    Assert.Equal(128, results.Length)
+    for (witnessedTrue, witnessedFalse) in results do
+        Assert.True(Alex.Correspondence.sameScope baseline.Scope witnessedTrue.Scope)
+        Assert.False(Alex.Correspondence.sameScope baseline.Scope witnessedFalse.Scope)
+        Assert.Equal<MLIROp list>(baseline.Operations, witnessedTrue.Operations)
+        Assert.Equal(baseline.Text, witnessedTrue.Text)
+        Assert.Equal(baseline.Emissions.Length, witnessedTrue.Emissions.Length)
+        for emission in witnessedTrue.Emissions do
+            Assert.Equal(Result.Ok (), Alex.Correspondence.validateOccurrence baseline.Scope emission.Occurrence)
+            Assert.Equal(Result.Ok (), Alex.Correspondence.validateOccurrence witnessedTrue.Scope emission.Occurrence)
+        for emission in witnessedFalse.Emissions do
+            Assert.Equal(Result.Error "Witness occurrence belongs to a different checked graph snapshot",
+                Alex.Correspondence.validateOccurrence baseline.Scope emission.Occurrence)
 
 [<Fact>]
 let ``witness result capture refuses a missing run scope without creating one`` () =
