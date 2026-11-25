@@ -70,6 +70,26 @@ let private captured sample =
     Binary.openSource limits (BAREWire.Memory.ByteSource.ofArray(output.ToArray())) |> take |> Binary.readRevision |> take
 
 [<Theory>]
+[<InlineData(59)>]
+[<InlineData(61)>]
+let ``A-06: old-schema captures are refused with exact SchemaMismatch`` (oldSchema: int) =
+    let path = System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../Fixtures/22_RegionEscape.psg.gz")
+    use input = System.IO.File.OpenRead path
+    use compressed = new System.IO.Compression.GZipStream(input, System.IO.Compression.CompressionMode.Decompress)
+    use output = new System.IO.MemoryStream()
+    compressed.CopyTo output
+    let bytes = output.ToArray()
+    let schemaBytes = System.BitConverter.GetBytes(oldSchema)
+    System.Buffer.BlockCopy(schemaBytes, 0, bytes, 12, 4)
+    let limits : Binary.Limits =
+        { MaxBytes = 256 * 1024 * 1024; MaxCollectionLength = 2000000; MaxDepth = 256
+          MaxStringBytes = 4 * 1024 * 1024; MaxBigIntegerBytes = 4096; MaxValues = 100000000 }
+    let result =
+        Binary.openSource limits (BAREWire.Memory.ByteSource.ofArray bytes)
+        |> Result.bind Binary.readRevision
+    Assert.Equal(Result.Error(BinaryError.SchemaMismatch(Revision.Schema, oldSchema)), result)
+
+[<Theory>]
 [<InlineData("19_AsyncParallel")>]
 [<InlineData("20_BasicRegion")>]
 [<InlineData("21_RegionPassing")>]

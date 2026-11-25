@@ -121,3 +121,58 @@ let ``SMT comparisons retain constants before uses and the complete ordered anch
           SMTEq(s 11, s 10, s 9, SMTBool); SMTAssert(s 11); SMTNot(s 12, s 10); SMTAssert(s 12); SMTCheck ]
         |> List.map SMTOp
     Assert.Equal<MLIROp list>(expected, solver)
+
+[<Fact>]
+let ``materialized sentinel retains entry and offset and separates observation from zero`` () =
+    let obligation: ObligationInfo =
+        { Id = "sentinel-fixture"; Kind = "terminator-sentinel"; Logic = "QF_BV"
+          Statement = "The checked byte is zero."; Source = "fixture"; Refs = []
+          Body = ObligationBody.MaterializedNulSentinel(3, 11, 5, 13, 0x41uy) }
+    let omitted = { obligation with Id = "sentinel-omitted"; Body = ObligationBody.OmittedNulSentinel }
+    let omittedOperations = Alex.Traversal.SMTTransfer.operations [omitted] |> Result.defaultWith failwith
+    Assert.Empty omittedOperations
+    let solver =
+        Alex.Traversal.SMTTransfer.operations [omitted; obligation]
+        |> Result.defaultWith failwith
+        |> List.choose (function SMTOp(SMTSolver body) -> Some body | _ -> None)
+        |> Assert.Single
+    let s n = V(0, n)
+    let field n name width observed expected =
+        [ SMTDeclareFun(s n, name, SMTBV width)
+          SMTBVConstant(s (n + 1), observed, width)
+          SMTEq(s (n + 2), s n, s (n + 1), SMTBV width)
+          SMTAssert(s (n + 2))
+          SMTBVConstant(s (n + 3), expected, width)
+          SMTEq(s (n + 4), s n, s (n + 3), SMTBV width) ]
+    let expected =
+        ([ SMTSetLogic "QF_BV" ] @
+         field 0 "sentinel-fixture_entry" 32 5L 3L @
+         field 5 "sentinel-fixture_offset" 32 13L 11L @
+         field 10 "sentinel-fixture_byte" 8 0x41L 0L @
+         [ SMTAnd(s 15, [s 4; s 9; s 14])
+           SMTDeclareFun(s 16, "sentinel-fixture", SMTBool)
+           SMTEq(s 17, s 16, s 15, SMTBool)
+           SMTAssert(s 17)
+           SMTNot(s 18, s 16)
+           SMTAssert(s 18)
+           SMTCheck ])
+        |> List.map SMTOp
+    Assert.Equal<MLIROp list>(expected, solver)
+
+[<Fact>]
+let ``retired legacy NulSentinel is refused with exact reason and OmittedNulSentinel emits no solver scope`` () =
+    let omitted: ObligationInfo =
+        { Id = "sentinel-omitted"; Kind = "terminator-sentinel"; Logic = "QF_BV"
+          Statement = "Omitted storage requires no terminator sentinel scope."; Source = "fixture"; Refs = []
+          Body = ObligationBody.OmittedNulSentinel }
+    Assert.False(ObligationBody.hasSolverScope omitted.Body)
+    Assert.Equal(Result.Ok [], Alex.Traversal.SMTTransfer.operations [omitted])
+    let legacy: ObligationInfo =
+        { Id = "sentinel-legacy"; Kind = "terminator-sentinel"; Logic = "QF_BV"
+          Statement = "The checked byte is zero."; Source = "fixture"; Refs = []
+          Body = ObligationBody.NulSentinel 0 }
+    let expectedError =
+        Result.Error "Obligation 'sentinel-legacy' uses retired legacy NulSentinel without checked storage coordinates."
+    Assert.True(ObligationBody.hasSolverScope legacy.Body)
+    Assert.Equal(expectedError, Alex.Traversal.SMTTransfer.operations [legacy])
+    Assert.Equal(expectedError, Alex.Traversal.SMTTransfer.transfer [legacy])

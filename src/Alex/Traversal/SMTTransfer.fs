@@ -1231,15 +1231,27 @@ let private scope (ob: ObligationInfo) : Result<MLIROp list, string> =
                       smt (SMTEq (eq, vw, l, SMTInt))
                       smt (SMTIntCmp (lt, SmtLt, vw, s))
                       smt (SMTAnd (def, [eq; lt])) ])
-        | ObligationBody.NulSentinel lastByte ->
-            let b = v ()
-            let z = v ()
-            let def = v ()
-            Ok (
-                anchor def
-                    [ smt (SMTBVConstant (b, int64 lastByte, 8))
-                      smt (SMTBVConstant (z, 0L, 8))
-                      smt (SMTEq (def, b, z, SMTBV 8)) ])
+        | ObligationBody.NulSentinel _ ->
+            Error (sprintf "Obligation '%s' uses retired legacy NulSentinel without checked storage coordinates." ob.Id)
+        | ObligationBody.MaterializedNulSentinel (entry, offset, observedEntry, observedOffset, observedByte) ->
+            let rows =
+                ObligationBody.sentinelFields ob.Id (entry, offset, observedEntry, observedOffset, observedByte)
+                |> List.map (fun (name, width, observed, expected) ->
+                    let variable = v ()
+                    let observation = v ()
+                    let premise = v ()
+                    let claim = v ()
+                    let clause = v ()
+                    [ smt (SMTDeclareFun (variable, name, SMTBV width))
+                      smt (SMTBVConstant (observation, observed, width))
+                      smt (SMTEq (premise, variable, observation, SMTBV width))
+                      smt (SMTAssert premise)
+                      smt (SMTBVConstant (claim, expected, width))
+                      smt (SMTEq (clause, variable, claim, SMTBV width)) ], clause)
+            let definition = v ()
+            Ok (anchor definition ((rows |> List.collect fst) @ [smt (SMTAnd (definition, List.map snd rows))]))
+        | ObligationBody.OmittedNulSentinel ->
+            Error (sprintf "Obligation '%s' has an established storage omission and no solver scope." ob.Id)
         | ObligationBody.StaticStorageLayout (slots, usedSize, allocationSize, poolAlignment, capacity, spaceAlignment, granularity) ->
             // Every placement is a concrete compiler fact. No adjacency premise
             // assumes the layout that this claim is meant to establish.
@@ -1585,16 +1597,16 @@ let private scope (ob: ObligationInfo) : Result<MLIROp list, string> =
         ] @ transformation @ [ smt (SMTSolver (smt (SMTSetLogic logic) :: ops @ [ smt SMTCheck ])) ])
 
 /// The verification module from the graph's obligations.
-/// Pure function: ObligationInfo list -> MLIR text. The list is
-/// the complete ledger; only its non-Pending partition has solver scopes.
+/// Pure function: ObligationInfo list -> Result<MLIROp list, string>. The list is
+/// the complete ledger; only bodies with a solver scope (`ObligationBody.hasSolverScope`)
+/// emit solver scopes.
 let operations (obs: ObligationInfo list) : Result<MLIROp list, string> =
     let rec loop acc remaining =
         match remaining with
         | [] -> Ok (acc |> List.rev |> List.concat)
         | ob :: rest ->
-            match ob.Body with
-            | ObligationBody.Pending _ -> loop acc rest
-            | _ ->
+            if not (ObligationBody.hasSolverScope ob.Body) then loop acc rest
+            else
                 match scope ob with
                 | Ok scopedOps -> loop (scopedOps :: acc) rest
                 | Error reason -> Error reason
