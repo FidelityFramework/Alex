@@ -11,66 +11,29 @@
     ALEX004  A library emission spells an LLVM dialect type or operation. Target
              realization belongs to the selected backend, never the middle end.
   -->
-  <UsingTask TaskName="ValidateAlexBoundary"
-             TaskFactory="RoslynCodeTaskFactory"
-             AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
-    <ParameterGroup>
-      <Sources ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
-      <ProjectReferences ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="false" />
-      <Permitted ParameterType="System.String" Required="true" />
-      <Scope ParameterType="System.String" Required="true" />
-    </ParameterGroup>
-    <Task>
-      <Using Namespace="System" />
-      <Using Namespace="System.IO" />
-      <Using Namespace="System.Linq" />
-      <Using Namespace="System.Text.RegularExpressions" />
-      <Code Type="Method" Language="cs"><![CDATA[
-      public override bool Execute() {
-        var compilerService = new Regex(@"\bClef\s*\.\s*Compiler\b|\bFSharp\s*\.\s*Compiler\b");
-        var targetEmission = new Regex(@"(?:->\s*|sprintf\s*|RawMLIR\s*\(?\s*)""[^""]*(?:!llvm[.<]|\bllvm\.[A-Za-z_])");
-        var rewriteMarkers = new[] {
-          "MLIRNanopass", "declarationCollectionPass", "relocateDefinition",
-          "--load-pass-plugin", "--load-dialect-plugin", "--load-plugin",
-          "FIDELITY_MLIR_PLUGINS", "mlir-plugins"
-        };
-        var processMarkers = new[] { "--pass-pipeline", "System.Diagnostics.Process", "ProcessStartInfo" };
-        var markers = Scope == "library" ? rewriteMarkers.Concat(processMarkers).ToArray() : rewriteMarkers;
-        foreach (var item in Sources) {
-          var path = Path.GetFullPath(item.ItemSpec);
-          var lines = File.ReadAllLines(path);
-          for (var index = 0; index < lines.Length; index++) {
-            var line = lines[index];
-            if (Scope == "library" && !line.TrimStart().StartsWith("//", StringComparison.Ordinal) && targetEmission.IsMatch(line))
-              Log.LogError(null, "ALEX004", null, path, index + 1, 0, 0, 0,
-                "LLVM dialect emission belongs to backend realization, never Alex portable output.");
-            if (compilerService.IsMatch(line))
-              Log.LogError(null, "ALEX001", null, path, index + 1, 0, 0, 0,
-                "Alex reads a published PSG revision only. This line names the compiler service.");
-            foreach (var marker in markers)
-              if (line.IndexOf(marker, StringComparison.Ordinal) >= 0)
-                Log.LogError(null, "ALEX003", null, path, index + 1, 0, 0, 0,
-                  "Prohibited rewrite, process or plugin entry '{0}'. Alex witnesses settled facts and emits once.", marker);
-          }
-        }
-        var permitted = Permitted.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries).Select(Path.GetFullPath).ToArray();
-        if (ProjectReferences != null)
-          foreach (var reference in ProjectReferences) {
-            var path = Path.GetFullPath(reference.ItemSpec);
-            if (!permitted.Contains(path, StringComparer.Ordinal))
-              Log.LogError(null, "ALEX002", null, path, 0, 0, 0, 0,
-                "Alex references the published PSG contract and the library the contract references. No other project is permitted.");
-          }
-        return !Log.HasLoggedErrors;
-      }
-      ]]></Code>
-    </Task>
-  </UsingTask>
   <PropertyGroup>
+    <_AlexBoundaryTaskProject>$(MSBuildThisFileDirectory)Alex.Boundary.Tasks/Alex.Boundary.Tasks.csproj</_AlexBoundaryTaskProject>
+    <_AlexBoundaryTaskAssembly>$(MSBuildThisFileDirectory)Alex.Boundary.Tasks/bin/Debug/net10.0/Alex.Boundary.Tasks.dll</_AlexBoundaryTaskAssembly>
     <AlexBoundaryScope Condition="'$(AlexBoundaryScope)' == ''">library</AlexBoundaryScope>
     <AlexBoundaryPermitted>$(PsgContractProject);$(PsgContractLibrary);$(AlexBoundaryAlsoPermitted)</AlexBoundaryPermitted>
   </PropertyGroup>
-  <Target Name="CheckAlexBoundary" BeforeTargets="CoreCompile">
+  <UsingTask TaskName="Alex.Boundary.Tasks.ValidateAlexBoundary"
+             AssemblyFile="$(_AlexBoundaryTaskAssembly)"
+             TaskFactory="TaskHostFactory" />
+  <Target Name="BuildAlexBoundaryTask"
+          BeforeTargets="CheckAlexBoundary"
+          Condition="'$(SkipCompilerExecution)' != 'true'">
+    <MSBuild Projects="$(_AlexBoundaryTaskProject)"
+             Targets="Restore"
+             Properties="Configuration=Debug;Platform=AnyCPU"
+             Condition="!Exists('$(MSBuildThisFileDirectory)Alex.Boundary.Tasks/obj/project.assets.json')" />
+    <MSBuild Projects="$(_AlexBoundaryTaskProject)"
+             Targets="Build"
+             Properties="Configuration=Debug;Platform=AnyCPU;BuildProjectReferences=false" />
+  </Target>
+  <Target Name="CheckAlexBoundary"
+          BeforeTargets="CoreCompile"
+          Condition="'$(SkipCompilerExecution)' != 'true'">
     <ValidateAlexBoundary Sources="@(Compile)"
                           ProjectReferences="@(ProjectReference)"
                           Permitted="$(AlexBoundaryPermitted)"
