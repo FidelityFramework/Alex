@@ -813,26 +813,27 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                     not slots.IsEmpty && not writable && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall && not hasOpaqueHandle && declaration.FixedSentinels.IsEmpty
                 let isPureWritable =
                     writable && slots.IsEmpty && not hasReadOnly && absenceSlots.IsEmpty && not hasBorrowedResult && not isSharedCall && not hasOpaqueHandle && declaration.FixedSentinels.IsEmpty
-                let isBoundaryBufferCall =
+                let isBoundaryBufferShape =
                     hasReadOnly || not absenceSlots.IsEmpty || hasBorrowedResult || (writable && not slots.IsEmpty) || isSharedCall
-                    || hasOpaqueHandle || not declaration.FixedSentinels.IsEmpty
+                    || not declaration.FixedSentinels.IsEmpty
+                let isBoundaryBufferCall = isBoundaryBufferShape || hasOpaqueHandle
                 let! operation =
                     if isPureOptionalEntry then parser {
                         do! ensure (call.Entry.IsNone && call.Resource.IsNone)
                                 "Optional entry calls require their exact direct source invocation."
                         return OptionalEntryCall(call.Site, values, slots, results)
                     } else
-                    match isPureWritable, isBoundaryBufferCall, call.Entry with
-                    | true, _, None ->
+                    match isPureWritable, isBoundaryBufferShape, isBoundaryBufferCall, call.Entry with
+                    | true, _, _, None ->
                         preturn (WritableBufferCall(call.Site, values, List.tryHead results))
-                    | true, _, Some _ ->
+                    | true, _, _, Some _ ->
                         fail (Message "Writable byte calls require their exact direct source invocation.")
-                    | false, true, None ->
+                    | false, _, true, None ->
                         preturn (BoundaryBufferCall(call.Site, values, slots, absenceSlots, results))
-                    | false, true, Some _ ->
+                    | false, true, _, Some _ ->
                         fail (Message "Boundary buffer and borrowed-view calls require their exact direct source invocation.")
-                    | false, false, None -> pFuncCallResults results declaration.Symbol values
-                    | false, false, Some formation -> parser {
+                    | false, false, false, None -> pFuncCallResults results declaration.Symbol values
+                    | false, false, _, Some formation -> parser {
                         let! entry, imported =
                             match importedEntry boundary formation with
                             | Result.Ok value -> preturn value

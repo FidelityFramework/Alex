@@ -869,7 +869,7 @@ module Schema53BoundaryWitnessing =
             | Result.Ok other -> failwithf "Admitted BufferAbsence Direct(None) with mismatched ReadOnlyBufferDeclarations descriptor: %A" other
 
     [<Fact>]
-    let ``BorrowedResultView emits deferred BoundaryBufferCall with CompanionCall and borrowed ResourceHandle call emits FuncCall`` () =
+    let ``BorrowedResultView and direct borrowed ResourceHandle calls emit deferred BoundaryBufferCall matching ResourceImport`` () =
         let bvId = id 350
         let declBinding = id 351
         let bodyId = id 352
@@ -980,7 +980,8 @@ module Schema53BoundaryWitnessing =
             | other -> failwithf "Unexpected boundaryImportsAt result: %A" other
         | other -> failwithf "Unexpected BorrowedResultView positive result: %A" other
 
-        // Plain borrowed ResourceHandle argument (call.Resource.IsNone) returning i32 emits FuncCall
+        // Direct borrowed ResourceHandle argument (call.Resource.IsNone) returning i32 emits deferred
+        // BoundaryBufferCall paired with ResourceImport (Composer #220 / 8c9006b lower both to llvm.func + llvm.call).
         let plainBorrowedCall = { callRow with Result = Some(BoundaryScalar.Integer(32, true)) }
         let plainBorrowedImport = { importRow with Symbol = "fixture_column_bytes"; Result = Some(BoundaryScalar.Integer(32, true)) }
         let plainBorrowedGraph =
@@ -1002,8 +1003,55 @@ module Schema53BoundaryWitnessing =
                                 Imports = Map.ofList [ descId, plainBorrowedImport ]
                                 Calls = Map.ofList [ siteId, plainBorrowedCall ] } } }
         match runBoundaryCallAt siteId plainBorrowedGraph with
-        | Result.Ok(([ MLIROp.FuncOp(FuncOp.FuncCall([ { Type = TInt(IntWidth 32) } ], "fixture_column_bytes", [ { Type = TOpaqueHandle(_, 64, 8) } ])) ], TRValue _), _) -> ()
+        | Result.Ok(([ MLIROp.BoundaryBufferCall(NodeId 360, [ { Type = TOpaqueHandle(_, 64, 8) } ], [], [], [ { Type = TInt(IntWidth 32) } ]) ] as ops, TRValue _), _) ->
+            match Alex.Patterns.PlatformPatterns.boundaryImportsAt declBinding plainBorrowedGraph.Emission.Boundary with
+            | Result.Ok([ MLIROp.ResourceImport _ ] as decls) ->
+                Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None decls)
+                Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
+            | other -> failwithf "Unexpected boundaryImportsAt result for plain borrowed ResourceHandle: %A" other
         | other -> failwithf "Unexpected plain borrowed ResourceHandle result: %A" other
+
+        // Exact-reason negative control: indirect invocation on a borrowed ResourceHandle call is refused.
+        let indirectBorrowedGraph =
+            { plainBorrowedGraph with
+                Emission =
+                    { plainBorrowedGraph.Emission with
+                        Boundary =
+                            { plainBorrowedGraph.Emission.Boundary with
+                                Calls = Map.ofList [ siteId, { plainBorrowedCall with Entry = Some(id 369) } ] } } }
+        match runBoundaryCallAt siteId indirectBorrowedGraph with
+        | Result.Error reason ->
+            Assert.Equal("Boundary buffer, borrowed-handle, and borrowed-view calls require their exact direct signature and complete ordered actuals.", reason)
+        | Result.Ok other -> failwithf "Admitted indirect borrowed ResourceHandle call: %A" other
+
+        // Fault-injection control: removing the opaque ResourceHandle carrier (replacing with plain scalar i64)
+        // restores portable BoundaryFuncDecl + FuncCall, proving hasOpaqueHandle governs the BoundaryBufferCall route.
+        let scalarRep = ValueRepresentation.Scalar(SettledSlot.Integer(64, Some "uint64"))
+        let scalarImport =
+            { plainBorrowedImport with
+                Parameters = [ ownerFormal, BoundaryScalar.Integer(64, false) ]
+                SourceTypes = Map.empty
+                DeclarationFacts = Map.empty }
+        let scalarCall =
+            { plainBorrowedCall with
+                Arguments = [ { Actual = ownerActual; Formal = ownerFormal; Abi = BoundaryScalar.Integer(64, false); Adaptation = None; OptionalEntry = None; BufferAbsence = None } ] }
+        let scalarGraph =
+            { plainBorrowedGraph with
+                Emission =
+                    { plainBorrowedGraph.Emission with
+                        Numeric =
+                            { plainBorrowedGraph.Emission.Numeric with
+                                OccurrenceRepresentations =
+                                    plainBorrowedGraph.Emission.Numeric.OccurrenceRepresentations
+                                        .Add(ownerActual, Result.Ok scalarRep)
+                                        .Add(ownerFormal, Result.Ok scalarRep) }
+                        Boundary =
+                            { plainBorrowedGraph.Emission.Boundary with
+                                Imports = Map.ofList [ descId, scalarImport ]
+                                Calls = Map.ofList [ siteId, scalarCall ] } } }
+        match runBoundaryCallAt siteId scalarGraph with
+        | Result.Ok(([ MLIROp.FuncOp(FuncOp.FuncCall([ { Type = TInt(IntWidth 32) } ], "fixture_column_bytes", [ { Type = TInt(IntWidth 64) } ])) ], TRValue _), _) -> ()
+        | other -> failwithf "Unexpected plain scalar fault-injection result: %A" other
 
         // Negative control: mismatched handle identity on borrowed ResourceHandle must fail without widening
         let otherHandleType =
@@ -1826,6 +1874,42 @@ module Schema53BoundaryWitnessing =
             Assert.Empty accCall.AllOps
             Assert.True((MLIRAccumulator.recallNode siteId accCall).IsNone)
         | Result.Ok other -> failwithf "Admitted indirect pBoundaryCall for callback-nested ResourceHandle: %A" other
+
+        // Positive control: direct source invocation (Entry = None) on the same resource-bearing callback import
+        // emits deferred BoundaryBufferCall paired with ResourceImport (NeedsTargetRealization).
+        let directCbGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                Calls = Map.ofList [ siteId, { callRow with Entry = None } ] } } }
+            |> declareTraversalReadings
+        let accDirect = MLIRAccumulator.empty ()
+        MLIRAccumulator.bindNode cbArgId (Arg 0) (TFunc([ TOpaqueHandle(ptrHandleType, 64, 8) ], [])) accDirect
+        match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus directCbGraph directCbGraph.Nodes[siteId]) 64 accDirect with
+        | Result.Ok(([ MLIROp.BoundaryBufferCall(NodeId 707, [ { Type = TFunc([ TOpaqueHandle(_, 64, 8) ], []) } ], [], [], []) ] as ops, TRVoid), _) ->
+            Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
+        | other -> failwithf "Unexpected direct pBoundaryCall result for callback-nested ResourceHandle: %A" other
+
+        // Fault-injection control: adding a boundary-buffer shape (FixedSentinels) on the indirect callback call
+        // routes to the boundary-buffer direct-signature refusal rather than the resource-bearing indirect refusal.
+        let fixedSentinelCbGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                Imports =
+                                    Map.ofList
+                                        [ importId, { cbImport with FixedSentinels = [ 1, "SQLITE_STATIC", 0, BoundaryFixedType.EntryPointer 64 ] } ] } } }
+            |> declareTraversalReadings
+        let accSentinel = MLIRAccumulator.empty ()
+        MLIRAccumulator.bindNode cbArgId (Arg 0) (TFunc([ TOpaqueHandle(ptrHandleType, 64, 8) ], [])) accSentinel
+        match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus fixedSentinelCbGraph fixedSentinelCbGraph.Nodes[siteId]) 64 accSentinel with
+        | Result.Error reason ->
+            Assert.Equal("Boundary buffer, borrowed-handle, and borrowed-view calls require their exact direct signature and complete ordered actuals.", reason)
+        | Result.Ok other -> failwithf "Admitted indirect fixed-sentinel callback call: %A" other
 
     [<Fact>]
     let ``callbackHandleRepAt allows at most one settled optional wrapper and rejects double wrapping`` () =
