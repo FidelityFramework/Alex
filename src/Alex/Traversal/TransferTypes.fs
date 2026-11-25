@@ -308,7 +308,7 @@ type TransferResult =
 type VoidCompletion = internal {
     Graph: Revision
     Path: OccurrenceBreadcrumb list
-    Scope: ScopeContext ref
+    ScopeId: int64
 }
 
 /// One operation scope's complete operand reading. All three maps must move
@@ -497,19 +497,19 @@ module MLIRAccumulator =
 
     let forgetVoid nodeId (acc: MLIRAccumulator) = acc.VoidAssoc <- acc.VoidAssoc.Remove nodeId
 
-    let completeVoid (position: PSGZipper) scope (acc: MLIRAccumulator) =
+    let completeVoid (position: PSGZipper) (scope: ScopeContext ref) (acc: MLIRAccumulator) =
         let nodeId = position.Focus.Id
         // Transparent witnesses may bind a value directly and return TRVoid to
         // indicate that they emitted no operations. Preserve that result.
         if not (acc.NodeAssoc.ContainsKey nodeId || acc.CallableAssoc.ContainsKey nodeId ||
                 acc.CallableCellAssoc.ContainsKey nodeId || acc.SequenceAssoc.ContainsKey nodeId ||
                 acc.LazyAssoc.ContainsKey nodeId) then
-            acc.VoidAssoc <- acc.VoidAssoc.Add(nodeId, { Graph = position.Graph; Path = occurrencePath position; Scope = scope })
+            acc.VoidAssoc <- acc.VoidAssoc.Add(nodeId, { Graph = position.Graph; Path = occurrencePath position; ScopeId = scope.Value.Id })
 
     let completedVoid (position: PSGZipper) (scope: ScopeContext ref) (acc: MLIRAccumulator) =
         acc.VoidAssoc.TryFind position.Focus.Id |> Option.exists (fun completion ->
             completion.Graph = position.Graph &&
-            completion.Scope.Value.Id = scope.Value.Id &&
+            completion.ScopeId = scope.Value.Id &&
             completion.Path = occurrencePath position)
 
     let snapshotOperands (acc: MLIRAccumulator) =

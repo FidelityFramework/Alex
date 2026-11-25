@@ -265,7 +265,9 @@ let ``unit demand requires successful completion at the actual child occurrence`
     let ctx = context graph position operands
     match defect with
     | "visited only" -> ctx.GlobalVisited.Value <- Set.singleton effect
-    | "different scope" -> MLIRAccumulator.completeVoid (atChild effect position) (ref (ScopeContext.root ())) operands
+    | "different scope" ->
+        let otherScope = ref (ScopeContext.createChild ctx.ScopeContext.Value BlockLevel)
+        MLIRAccumulator.completeVoid (atChild effect position) otherScope operands
     | "different path" ->
         let child = Zipper.create graph alternate.Id |> require "Missing alternate effect parent" |> atChild effect
         MLIRAccumulator.completeVoid child ctx.ScopeContext operands
@@ -415,11 +417,185 @@ let ``void completion follows complete operand scope snapshot restoration`` () =
     let position = Zipper.create graph root |> require "Missing unit root" |> atChild marker
     let ctx = context graph position accumulator
     let child = atChild effect position
-    MLIRAccumulator.completeVoid child ctx.ScopeContext accumulator
+    let firstBranch = ref (ScopeContext.createChild ctx.ScopeContext.Value BlockLevel)
+    let firstCtx = { ctx with ScopeContext = firstBranch }
+    MLIRAccumulator.completeVoid child firstBranch accumulator
+    let expectedUnit = TRValue { SSA = requireSSA marker firstCtx |> Result.defaultWith failwith; Type = TInt(IntWidth 32) }
+    // Positive control: completion in firstBranch is visible and accepted in firstBranch.
+    Assert.True(MLIRAccumulator.completedVoid child firstBranch accumulator)
+    Assert.Equal(expectedUnit, (Alex.Witnesses.EagerWitness.nanopass.Witness firstCtx position.Focus).Result)
     let saved = MLIRAccumulator.snapshotOperands accumulator
-    MLIRAccumulator.completeVoid child (ref (ScopeContext.root ())) accumulator
+    // Re-enter the exact same graph, focus, and path in a sibling branch scope.
+    let secondBranch = ref (ScopeContext.createChild ctx.ScopeContext.Value BlockLevel)
+    let secondCtx = { ctx with ScopeContext = secondBranch }
+    Assert.NotEqual(ctx.ScopeContext.Value.Id, firstBranch.Value.Id)
+    Assert.NotEqual(ctx.ScopeContext.Value.Id, secondBranch.Value.Id)
+    Assert.NotEqual(firstBranch.Value.Id, secondBranch.Value.Id)
+    MLIRAccumulator.completeVoid child secondBranch accumulator
+    Assert.False(MLIRAccumulator.completedVoid child firstBranch accumulator)
     Assert.False(MLIRAccumulator.completedVoid child ctx.ScopeContext accumulator)
+    Assert.True(MLIRAccumulator.completedVoid child secondBranch accumulator)
+    // Exact-reason negative control: firstBranch must refuse secondBranch's completion.
+    match (Alex.Witnesses.EagerWitness.nanopass.Witness firstCtx position.Focus).Result with
+    | TRError diag ->
+        Assert.Contains("Explicit unit demand requires its successfully witnessed child result in this exact operation scope.", diag.Message)
+    | other -> failwithf "Foreign branch void completion was admitted: %A" other
     MLIRAccumulator.restoreOperands saved accumulator
-    Assert.True(MLIRAccumulator.completedVoid child ctx.ScopeContext accumulator)
+    Assert.True(MLIRAccumulator.completedVoid child firstBranch accumulator)
+    Assert.False(MLIRAccumulator.completedVoid child secondBranch accumulator)
+    Assert.Equal(expectedUnit, (Alex.Witnesses.EagerWitness.nanopass.Witness firstCtx position.Focus).Result)
+    match (Alex.Witnesses.EagerWitness.nanopass.Witness secondCtx position.Focus).Result with
+    | TRError diag ->
+        Assert.Contains("Explicit unit demand requires its successfully witnessed child result in this exact operation scope.", diag.Message)
+    | other -> failwithf "Restored first-branch void completion leaked into second branch: %A" other
     MLIRAccumulator.bindNode effect (Arg 0) (TInt(IntWidth 32)) accumulator
-    Assert.False(MLIRAccumulator.completedVoid child ctx.ScopeContext accumulator)
+    Assert.False(MLIRAccumulator.completedVoid child firstBranch accumulator)
+
+[<Fact>]
+let ``fault injection omitting scope identity check collapses two branch scopes at the same occurrence`` () =
+    let graph, root, marker, effect = unitFixture ()
+    let accumulator = MLIRAccumulator.empty ()
+    let position = Zipper.create graph root |> require "Missing unit root" |> atChild marker
+    let ctx = context graph position accumulator
+    let child = atChild effect position
+    let firstBranch = ref (ScopeContext.createChild ctx.ScopeContext.Value BlockLevel)
+    let secondBranch = ref (ScopeContext.createChild ctx.ScopeContext.Value BlockLevel)
+    let firstCtx = { ctx with ScopeContext = firstBranch }
+    let expectedUnit = TRValue { SSA = requireSSA marker firstCtx |> Result.defaultWith failwith; Type = TInt(IntWidth 32) }
+    MLIRAccumulator.completeVoid child firstBranch accumulator
+    let saved = MLIRAccumulator.snapshotOperands accumulator
+    MLIRAccumulator.completeVoid child secondBranch accumulator
+    // Production check keeps the two branch scopes distinct at identical graph/focus/path.
+    Assert.False(MLIRAccumulator.completedVoid child firstBranch accumulator)
+    match (Alex.Witnesses.EagerWitness.nanopass.Witness firstCtx position.Focus).Result with
+    | TRError diag ->
+        Assert.Contains("Explicit unit demand requires its successfully witnessed child result in this exact operation scope.", diag.Message)
+    | other -> failwithf "Expected scope refusal before fault injection: %A" other
+    // Fault injection 1: omitting the ScopeId comparison on the same graph/focus/path
+    // falsely admits secondBranch's completion as valid for firstBranch.
+    let completedWithoutScopeCheck =
+        accumulator.VoidAssoc.TryFind child.Focus.Id
+        |> Option.exists (fun completion ->
+            completion.Graph = child.Graph &&
+            completion.Path = child.Path)
+    Assert.True(completedWithoutScopeCheck)
+    // Fault injection 2: collapsing ScopeId (simulating a missing per-entry allocator)
+    // causes both completedVoid and EagerWitness to admit the foreign-branch completion.
+    let stored = accumulator.VoidAssoc[effect]
+    accumulator.VoidAssoc <- accumulator.VoidAssoc.Add(effect, { stored with ScopeId = firstBranch.Value.Id })
+    Assert.True(MLIRAccumulator.completedVoid child firstBranch accumulator)
+    Assert.Equal(expectedUnit, (Alex.Witnesses.EagerWitness.nanopass.Witness firstCtx position.Focus).Result)
+    MLIRAccumulator.restoreOperands saved accumulator
+    Assert.Equal(firstBranch.Value.Id, accumulator.VoidAssoc[effect].ScopeId)
+
+[<Fact>]
+let ``repeated witness of the same published revision yields identical operations and scope identities`` () =
+    let guard = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
+    let effect = node 1 (SemanticKind.PatternBinding "deterministicEffect") boolType [] None
+    let marker = node 2 (SemanticKind.EagerExpr effect.Id) boolType [1] None
+    let fallback = node 3 (SemanticKind.Literal(NativeLiteral.Bool false)) boolType [] None
+    let choice = node 4 (SemanticKind.IfThenElse(guard.Id, marker.Id, Some fallback.Id)) boolType [0; 2; 3] None
+    let carriers = [boolean 0 [0; 5]; boolean 1 [1; 5]; boolean 2 [1; 2; 5]; boolean 3 [3; 5]; boolean 4 [0; 2; 3; 4; 5]]
+    let graph =
+        revision ([guard; effect; marker; fallback; choice] @ List.map domain [5; 6; 7; 8])
+        |> withEdges
+            [ structural 1 2 EdgeRole.Subject; structural 0 4 EdgeRole.Guard
+              structural 2 4 EdgeRole.ThenBranch; structural 3 4 EdgeRole.ElseBranch ]
+            [demandEdge 2 1] carriers
+        |> withData [5; 6; 7; 8]
+        |> withNumeric carriers [0; 2; 3; 4]
+        |> withDemand [marker.Id, effect.Id] [marker.Id, [demandRelation 2 1]]
+        |> declareTraversalReadings
+    let runOnce () =
+        let accumulator = MLIRAccumulator.empty ()
+        let position = Zipper.create graph choice.Id |> require "Missing conditional"
+        let ctx = context graph position accumulator
+        let effectValue = { SSA = Alex.Traversal.Values.value effect.Id 0; Type = TInt(IntWidth 1) }
+        let observedScopes = ResizeArray<NodeId * int64>()
+        let rec witness ctx (node: SemanticNode) =
+            observedScopes.Add(node.Id, ctx.ScopeContext.Value.Id)
+            if node.Id = effect.Id then
+                { InlineOps = [MLIROp.FuncOp(FuncOp.FuncCall([effectValue], "observe_effect", []))]
+                  TopLevelOps = []; Result = TRValue effectValue }
+            else
+                match node.Kind with
+                | SemanticKind.IfThenElse _ -> (Alex.Witnesses.ControlFlowWitness.createNanopass (fun () -> witness)).Witness ctx node
+                | SemanticKind.EagerExpr _ -> Alex.Witnesses.EagerWitness.nanopass.Witness ctx node
+                | SemanticKind.Literal _ -> Alex.Witnesses.LiteralWitness.nanopass.Witness ctx node
+                | _ -> Alex.Witnesses.StructuralWitness.nanopass.Witness ctx node
+        visitAllNodes witness ctx position.Focus ctx.TraversalVisited
+        Assert.Empty accumulator.Errors
+        ScopeContext.getOps ctx.ScopeContext.Value, List.ofSeq observedScopes
+    let ops1, scopes1 = runOnce ()
+    let ops2, scopes2 = runOnce ()
+    Assert.Equal<MLIROp list>(ops1, ops2)
+    Assert.Equal<(NodeId * int64) list>(scopes1, scopes2)
+    // Verify distinct child scopes were actually allocated deterministically starting at root 1L:
+    // choice & guard in root (1L), then-branch (effect & marker) in 2L, else-branch (fallback) in 3L.
+    let scopeIds = scopes1 |> List.map snd |> List.distinct |> List.sort
+    Assert.Equal<int64 list>([1L; 2L; 3L], scopeIds)
+    Assert.Equal<int64>(1L, scopes1 |> List.find (fun (id, _) -> id = choice.Id) |> snd)
+    Assert.Equal<int64>(1L, scopes1 |> List.find (fun (id, _) -> id = guard.Id) |> snd)
+    Assert.Equal<int64>(2L, scopes1 |> List.find (fun (id, _) -> id = effect.Id) |> snd)
+    Assert.Equal<int64>(2L, scopes1 |> List.find (fun (id, _) -> id = marker.Id) |> snd)
+    Assert.Equal<int64>(3L, scopes1 |> List.find (fun (id, _) -> id = fallback.Id) |> snd)
+
+[<Fact>]
+let ``independent concurrent witness runs allocate deterministic per-traversal scope identities without interference`` () =
+    let guard = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
+    let effect = node 1 (SemanticKind.PatternBinding "concurrentEffect") boolType [] None
+    let marker = node 2 (SemanticKind.EagerExpr effect.Id) boolType [1] None
+    let fallback = node 3 (SemanticKind.Literal(NativeLiteral.Bool false)) boolType [] None
+    let choice = node 4 (SemanticKind.IfThenElse(guard.Id, marker.Id, Some fallback.Id)) boolType [0; 2; 3] None
+    let carriers = [boolean 0 [0; 5]; boolean 1 [1; 5]; boolean 2 [1; 2; 5]; boolean 3 [3; 5]; boolean 4 [0; 2; 3; 4; 5]]
+    let graph =
+        revision ([guard; effect; marker; fallback; choice] @ List.map domain [5; 6; 7; 8])
+        |> withEdges
+            [ structural 1 2 EdgeRole.Subject; structural 0 4 EdgeRole.Guard
+              structural 2 4 EdgeRole.ThenBranch; structural 3 4 EdgeRole.ElseBranch ]
+            [demandEdge 2 1] carriers
+        |> withData [5; 6; 7; 8]
+        |> withNumeric carriers [0; 2; 3; 4]
+        |> withDemand [marker.Id, effect.Id] [marker.Id, [demandRelation 2 1]]
+        |> declareTraversalReadings
+    let witnessRun () =
+        let accumulator = MLIRAccumulator.empty ()
+        let position = Zipper.create graph choice.Id |> require "Missing conditional"
+        let ctx = context graph position accumulator
+        let effectValue = { SSA = Alex.Traversal.Values.value effect.Id 0; Type = TInt(IntWidth 1) }
+        let observedScopes = ResizeArray<NodeId * int64>()
+        let rec witness ctx (node: SemanticNode) =
+            observedScopes.Add(node.Id, ctx.ScopeContext.Value.Id)
+            if node.Id = effect.Id then
+                { InlineOps = [MLIROp.FuncOp(FuncOp.FuncCall([effectValue], "observe_effect", []))]
+                  TopLevelOps = []; Result = TRValue effectValue }
+            else
+                match node.Kind with
+                | SemanticKind.IfThenElse _ -> (Alex.Witnesses.ControlFlowWitness.createNanopass (fun () -> witness)).Witness ctx node
+                | SemanticKind.EagerExpr _ -> Alex.Witnesses.EagerWitness.nanopass.Witness ctx node
+                | SemanticKind.Literal _ -> Alex.Witnesses.LiteralWitness.nanopass.Witness ctx node
+                | _ -> Alex.Witnesses.StructuralWitness.nanopass.Witness ctx node
+        visitAllNodes witness ctx position.Focus ctx.TraversalVisited
+        let rootScope = ScopeContext.root ()
+        let fnScope = ScopeContext.createChild rootScope FunctionLevel
+        let branch1 = ScopeContext.createChild fnScope BlockLevel
+        let nested = ScopeContext.createChild branch1 BlockLevel
+        let branch2 = ScopeContext.createChild fnScope BlockLevel
+        accumulator.Errors.Length,
+        ScopeContext.getOps ctx.ScopeContext.Value,
+        List.ofSeq observedScopes,
+        [rootScope.Id; fnScope.Id; branch1.Id; nested.Id; branch2.Id]
+    let baselineErrors, baselineOps, baselineScopes, baselineTree = witnessRun ()
+    Assert.Equal(0, baselineErrors)
+    Assert.Equal<int64 list>([1L; 2L; 3L; 4L; 5L], baselineTree)
+    let tasks =
+        [| for _ in 1 .. 16 ->
+            System.Threading.Tasks.Task.Run(fun () ->
+                [ for _ in 1 .. 8 -> witnessRun () ]) |]
+    let allResults = System.Threading.Tasks.Task.WhenAll(tasks).GetAwaiter().GetResult() |> Array.toList |> List.concat
+    Assert.Equal(128, allResults.Length)
+    for (errorCount, ops, scopes, tree) in allResults do
+        Assert.Equal(0, errorCount)
+        Assert.Equal<MLIROp list>(baselineOps, ops)
+        Assert.Equal<(NodeId * int64) list>(baselineScopes, scopes)
+        Assert.Equal<int64 list>([1L; 2L; 3L; 4L; 5L], tree)
