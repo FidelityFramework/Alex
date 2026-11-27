@@ -83,16 +83,49 @@ let ``witness scope preserves exact published revision identity across value-equ
     let repeated = Alex.Correspondence.beginWholeGraphWitness graph
     let copiedNodes = graph.Nodes |> Map.toList |> Map.ofList
     let equalCopy = Alex.Correspondence.beginWholeGraphWitness { graph with Nodes = copiedNodes }
+    // Deep independently allocated copy via Fidelity.PSG.Binary write/read round trip (#12596 item 2):
+    // catches any reference-equality field inside Revision that a shallow Map rebuild would share.
+    let binaryLimits : Binary.Limits =
+        { MaxBytes = 16 * 1024 * 1024
+          MaxCollectionLength = 100_000
+          MaxDepth = 64
+          MaxStringBytes = 1024 * 1024
+          MaxBigIntegerBytes = 1024
+          MaxValues = 1_000_000 }
+    let binaryBase = revision [value; root]
+    let binaryGraph =
+        { binaryBase with
+            DeclarationRoots = [root.Id, DeclRoot.EntryPoint]
+            Platform = { binaryBase.Platform with Register = Ok 64; Pointer = Ok 64 }
+            Emission =
+                { Empty.emission with
+                    Callable = dataRows [value; root]
+                    Numeric =
+                        boolRows [boolCarrier value [value; domain]; boolCarrier root [value; root; domain]]
+                                 [value; root] } }
+        |> declareTraversalReadings
+    Assert.Empty(Integrity.check binaryGraph)
+    let roundTrippedGraph =
+        match Binary.encode binaryLimits binaryGraph |> Result.bind (Binary.decode binaryLimits) with
+        | Result.Ok decoded -> decoded
+        | Result.Error err -> failwithf "Fidelity.PSG.Binary round trip failed: %A" err
+    let binaryScope = Alex.Correspondence.beginWholeGraphWitness binaryGraph
+    let roundTrippedScope = Alex.Correspondence.beginWholeGraphWitness roundTrippedGraph
+    let binaryPosition = Zipper.create binaryGraph root.Id |> require "Missing root" |> atChild value.Id
+    let binaryOccurrence : Alex.Correspondence.Occurrence =
+        { Scope = binaryScope; Focus = binaryPosition.Focus; Anchor = root.Id; Path = binaryPosition.Path }
     // Value-equal positive controls: deterministic scope equality without process-global counters or heap identity.
     Assert.True(Alex.Correspondence.sameScope scope scope)
     Assert.True(Alex.Correspondence.sameScope scope repeated)
     Assert.True(Alex.Correspondence.sameScope scope equalCopy)
+    Assert.True(Alex.Correspondence.sameScope binaryScope roundTrippedScope)
     let position = Zipper.create graph root.Id |> require "Missing root" |> atChild value.Id
     let validOccurrence : Alex.Correspondence.Occurrence =
         { Scope = scope; Focus = position.Focus; Anchor = root.Id; Path = position.Path }
     Assert.Equal(Ok (), Alex.Correspondence.validateOccurrence scope validOccurrence)
     Assert.Equal(Ok (), Alex.Correspondence.validateOccurrence repeated validOccurrence)
     Assert.Equal(Ok (), Alex.Correspondence.validateOccurrence equalCopy validOccurrence)
+    Assert.Equal(Ok (), Alex.Correspondence.validateOccurrence roundTrippedScope binaryOccurrence)
     // Changed-revision exact-reason negative controls.
     let changedRoots = Alex.Correspondence.beginWholeGraphWitness { graph with DeclarationRoots = [root.Id, DeclRoot.EntryPoint] }
     let changedNode =
@@ -161,7 +194,7 @@ let ``independent concurrent witnesses produce deterministic scopes occurrences 
                 Alex.Correspondence.validateOccurrence baseline.Scope emission.Occurrence)
 
 [<Fact>]
-let ``witness result capture refuses a missing run scope without creating one`` () =
+let ``witness result capture refuses a missing checked revision witness scope without creating one`` () =
     let value = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
     let graph = single value
     let position = Zipper.create graph value.Id |> require "Missing literal occurrence"
@@ -171,10 +204,10 @@ let ``witness result capture refuses a missing run scope without creating one`` 
     Assert.Empty ctx.Accumulator.WitnessEmissions
     Assert.True ctx.Accumulator.WitnessScope.IsNone
     let diagnostic = Assert.Single ctx.Accumulator.Errors
-    Assert.Equal("Witness result capture requires the existing witness run scope", diagnostic.Message)
+    Assert.Equal("Witness result capture requires the checked revision witness scope", diagnostic.Message)
 
 [<Fact>]
-let ``witness result capture refuses a different existing run scope`` () =
+let ``witness result capture refuses a different existing checked revision witness scope`` () =
     let value = node 0 (SemanticKind.Literal(NativeLiteral.Bool true)) boolType [] None
     let graph = single value
     let position = Zipper.create graph value.Id |> require "Missing literal occurrence"

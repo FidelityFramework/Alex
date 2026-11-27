@@ -695,7 +695,7 @@ type WitnessContext = {
 module EmissionCorrespondence =
     let private occurrence (ctx: WitnessContext) =
         match ctx.RootAccumulator.WitnessScope with
-        | None -> Result.Error "Witness result capture requires the existing witness run scope"
+        | None -> Result.Error "Witness result capture requires the checked revision witness scope"
         | Some scope ->
             let at: Alex.Correspondence.Occurrence =
                 { Scope = scope; Focus = ctx.Zipper.Focus

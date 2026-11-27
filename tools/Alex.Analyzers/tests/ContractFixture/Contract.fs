@@ -15,6 +15,7 @@ type NominalTypeIdentity = { Module: string; Name: string }
 type ConstructorIdentity = { Declaration: NominalTypeIdentity }
 type TypeIdentity = Application of ConstructorIdentity * TypeIdentity list
 type CaptureInfo = { Name: string }
+type NativeLiteral = Int of int64 | ByteArray of byte[]
 
 module Revision =
   let tryNode (id: NodeId) (revision: Revision) = revision.Nodes.TryFind id

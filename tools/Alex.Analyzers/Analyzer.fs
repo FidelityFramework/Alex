@@ -4,9 +4,11 @@ open FSharp.Analyzers.SDK
 open FSharp.Analyzers.SDK.TASTCollecting
 open FSharp.Analyzers.SDK.ASTCollecting
 open FSharp.Compiler.Syntax
+open FSharp.Compiler.SyntaxTrivia
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Symbols.FSharpExprPatterns
 open FSharp.Compiler.Text
+open FSharp.Compiler.Xml
 
 type private AliasDependency =
   | ObjectDependency
@@ -50,7 +52,13 @@ let private analyzeShared (context: CliContext) = async {
           // AXC010: resolved BCL cache and thread-shared state types, independent of binding form. Namespace
           // entities are excluded so the reported identity is always the concrete type (nested types included).
           let inType full = name = full || name.StartsWith(full + "`", System.StringComparison.Ordinal)
-          let ambientState = bclAssembly && (inType "System.Runtime.CompilerServices.ConditionalWeakTable" || inType "System.Threading.ThreadLocal" || name.StartsWith("System.Collections.Concurrent.", System.StringComparison.Ordinal))
+          let ambientState =
+            bclAssembly &&
+            (inType "System.Runtime.CompilerServices.ConditionalWeakTable" ||
+             inType "System.Threading.ThreadLocal" ||
+             inType "System.Threading.Tasks.ConcurrentExclusiveSchedulerPair" ||
+             inType "System.ThreadStaticAttribute" ||
+             name.StartsWith("System.Collections.Concurrent.", System.StringComparison.Ordinal))
           Ok [ if bclName && bclAssembly then BclDependency entity
                if reflection then ReflectionDependency entity
                if ambientState then AmbientStateDependency entity ]
@@ -111,7 +119,14 @@ let private analyzeShared (context: CliContext) = async {
           match dependency with
           | BclDependency target -> rejectApi "AXC002" "Alex production code must not depend on .NET library APIs" range target
           | ReflectionDependency target -> rejectApi "AXC009" "Alex production code must not use reflection APIs" range target
-          | AmbientStateDependency target -> rejectApi "AXC010" "Alex production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state" range target
+          | AmbientStateDependency target ->
+            let ambientReason =
+              match target.TryFullName with
+              | Some "System.Threading.Tasks.ConcurrentExclusiveSchedulerPair"
+              | Some "System.ThreadStaticAttribute" ->
+                "Alex production code must not hold ambient mutable state"
+              | _ -> "Alex production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state"
+            rejectApi "AXC010" ambientReason range target
           | ObjectDependency ->
             diagnostics.Add { Type = "Alex pure-core boundary"; Message = sprintf "Alex production code must not declare obj types. %s resolves to System.Object." entity.DisplayName; Code = "AXC005"; Severity = Severity.Error; Range = range; Fixes = [] }
       | Error reason ->
@@ -149,6 +164,21 @@ let private analyzeShared (context: CliContext) = async {
       match symbolUse.Symbol with
       | :? FSharpMemberOrFunctionOrValue as value when value.CompiledName = "Box" && (value.DeclaringEntity |> Option.exists (fun entity -> entity.TryFullName = Some "Microsoft.FSharp.Core.Operators")) ->
         diagnostics.Add { Type = "Alex pure-core boundary"; Message = "Alex production code must not widen a value to obj."; Code = "AXC004"; Severity = Severity.Error; Range = symbolUse.Range; Fixes = [] }
+      | :? FSharpMemberOrFunctionOrValue as value when
+          (value.CompiledName = "get_IsValueCreated" || value.LogicalName = "IsValueCreated") &&
+          (value.DeclaringEntity |> Option.exists (fun entity -> entity.TryFullName = Some "System.Lazy`1")) ->
+        let assembly =
+          value.DeclaringEntity
+          |> Option.map (fun entity -> entity.Assembly.SimpleName)
+          |> Option.defaultValue "unknown"
+        diagnostics.Add {
+          Type = "Alex pure-core boundary"
+          Message = sprintf "Alex production code must not observe the creation state of a System.Lazy value: System.Lazy`1 (assembly %s)." assembly
+          Code = "AXC010"
+          Severity = Severity.Error
+          Range = symbolUse.Range
+          Fixes = []
+        }
       | _ -> ()
       let isReferenceIdentity =
         match symbolUse.Symbol with
@@ -207,6 +237,63 @@ let private analyzeShared (context: CliContext) = async {
           && List.contains symbolUse.Range integerLiteralRanges
         if not isReferenceIdentity && not isExceptionOperator && not literalRepresentation && not (symbolUse.IsFromDefinition && value.IsFSharpAbbreviation) then
           checkEntity symbolUse.Range value)
+      // AXC009 inferred reflection coverage (Alex #61): inspect the resolved type of external
+      // member/function/active-pattern/field uses (such as Quotations.Patterns.Call) when the
+      // declaring entity is not itself a reflection type, so inferred System.Reflection.* /
+      // Microsoft.FSharp.Reflection.* payloads cannot bypass AXC009.
+      let declaringEntityIsReflection =
+        entity
+        |> Option.exists (fun decl ->
+          match classifyEntity decl with
+          | Ok deps -> deps |> List.exists (function ReflectionDependency _ -> true | _ -> false)
+          | Error _ -> false)
+      let checkReflectionTypeFromSymbol (typ: FSharpType) =
+        let reportReflectionGap reason =
+          diagnostics.Add {
+            Type = "Alex analysis incomplete"
+            Message = sprintf "Cannot establish inferred reflection provenance: %s" reason
+            Code = "AXA000"
+            Severity = Severity.Error
+            Range = symbolUse.Range
+            Fixes = []
+          }
+        let rec checkReflectionType (depth: int) (current: FSharpType) =
+          if depth > 32 then
+            reportReflectionGap (sprintf "type step %d exceeded the reflection inspection limit" depth)
+          else
+            try
+              if current.IsAbbreviation then
+                checkReflectionType (depth + 1) current.AbbreviatedType
+              elif current.IsTupleType || current.IsFunctionType || current.IsAnonRecordType || current.IsArrayType then
+                current.GenericArguments |> Seq.iter (checkReflectionType (depth + 1))
+              elif current.HasTypeDefinition then
+                let def = current.TypeDefinition
+                match classifyEntity def with
+                | Ok deps ->
+                  let hasRefl = deps |> List.exists (function ReflectionDependency _ -> true | _ -> false)
+                  if hasRefl then
+                    for dep in deps do
+                      match dep with
+                      | ReflectionDependency target -> rejectApi "AXC009" "Alex production code must not use reflection APIs" symbolUse.Range target
+                      | BclDependency target -> rejectApi "AXC002" "Alex production code must not depend on .NET library APIs" symbolUse.Range target
+                      | _ -> ()
+                | Error reason -> reportReflectionGap reason
+                current.GenericArguments |> Seq.iter (checkReflectionType (depth + 1))
+            with error -> reportReflectionGap (sprintf "type step %d failed: %s" depth error.Message)
+        checkReflectionType 0 typ
+      let isExternalSymbol (sym: FSharpSymbol) =
+        match sym.DeclarationLocation with
+        | Some loc -> loc.FileName <> context.FileName
+        | None -> true
+      if not isReferenceIdentity && not isExceptionOperator && not declaringEntityIsReflection && isExternalSymbol symbolUse.Symbol then
+        match symbolUse.Symbol with
+        | :? FSharpMemberOrFunctionOrValue as memberOrFunction ->
+          checkReflectionTypeFromSymbol memberOrFunction.FullType
+        | :? FSharpActivePatternCase as apCase ->
+          checkReflectionTypeFromSymbol apCase.Group.OverallType
+        | :? FSharpField as field ->
+          checkReflectionTypeFromSymbol field.FieldType
+        | _ -> ()
     for declaration in context.CheckFileResults.OpenDeclarations do
       match declaration.Range with
       | Some range when not declaration.IsOwnNamespace ->
@@ -337,37 +424,551 @@ let private analyzeShared (context: CliContext) = async {
               }
       }
     walkTast walker tree
-    // AXC010 follows direct mutable Map or Set bindings and FSharp.Core ref cells holding either type.
-    // The declaration walk excludes function locals and uses nominal types after resolving abbreviations.
+    // AXC010 follows every module-level or type-static `let mutable` binding and every
+    // module-level or type-static non-function value whose resolved type (or initializer
+    // expression before an upcast/closure capture) holds mutable state: an FSharp.Core ref
+    // cell, an array, MailboxProcessor/Event, or any record, union, struct or class
+    // (including inherited base-class fields and published contract union payloads such as
+    // NativeLiteral.ByteArray) holding mutable fields/properties or ref cells. Type-parameter
+    // instantiation stops at function fields so pure factories (`Factory<int ref>`) and
+    // immutable tables of functions (`Map<_, int ref -> int>`) are permitted, while
+    // inline module-level closure initializers capturing mutable/ref locals are refused.
+    // Function-local accumulators remain permitted (Alex #61 comment #11828 D3 positive control).
     let rec rejectModuleCaches (declarations: FSharpImplementationFileDeclaration list) =
+      let rec resolve (depth: int) (subst: Map<string, FSharpType>) (typ: FSharpType) =
+        if depth > 32 then Error (sprintf "type step %d exceeded the abbreviation expansion limit" depth)
+        elif typ.IsGenericParameter then
+          match subst.TryFind typ.GenericParameter.Name with
+          | Some mapped -> resolve (depth + 1) Map.empty mapped
+          | None -> Ok typ
+        elif typ.IsAbbreviation then resolve (depth + 1) subst typ.AbbreviatedType
+        else Ok typ
+      let refCell (resolved: FSharpType) =
+        resolved.HasTypeDefinition &&
+        (let cell = resolved.TypeDefinition
+         cell.Assembly.SimpleName = "FSharp.Core" && cell.AccessPath = "Microsoft.FSharp.Core" &&
+         cell.CompiledName = "FSharpRef`1" && resolved.GenericArguments.Count = 1)
+      let isMutableCoreStatefulType (def: FSharpEntity) =
+        def.Assembly.SimpleName = "FSharp.Core" &&
+        (def.AccessPath = "Microsoft.FSharp.Control" &&
+         (def.CompiledName = "FSharpMailboxProcessor`1" ||
+          def.CompiledName = "FSharpEvent`1" ||
+          def.CompiledName = "FSharpEvent`2"))
+      let immutableCoreContainers =
+        Set.ofList [
+          "FSharpList`1"
+          "FSharpMap`2"
+          "FSharpSet`1"
+          "FSharpOption`1"
+          "FSharpValueOption`1"
+          "FSharpResult`2"
+          "FSharpChoice`2"
+          "FSharpChoice`3"
+          "FSharpChoice`4"
+          "FSharpChoice`5"
+          "FSharpChoice`6"
+          "FSharpChoice`7"
+          "PrintfFormat`4"
+          "PrintfFormat`5"
+          "Format`4"
+          "Format`5"
+        ]
+      let immutableCoreAtoms =
+        Set.ofList [ "Unit" ]
+      let immutableBclAtoms =
+        Set.ofList [
+          "System.Boolean"; "System.Byte"; "System.SByte"
+          "System.Int16"; "System.UInt16"; "System.Int32"; "System.UInt32"
+          "System.Int64"; "System.UInt64"; "System.IntPtr"; "System.UIntPtr"
+          "System.Single"; "System.Double"; "System.Decimal"
+          "System.Char"; "System.String"; "System.Void"
+          "System.Guid"; "System.TimeSpan"; "System.DateTime"; "System.DateTimeOffset"
+          "System.Numerics.BigInteger"
+        ]
+      let rec checkSeq (items: seq<'T>) (f: 'T -> Result<bool, string>) : Result<bool, string> =
+        items
+        |> Seq.fold (fun acc item ->
+          match acc with
+          | Error reason -> Error reason
+          | Ok true -> Ok true
+          | Ok false -> f item) (Ok false)
+      let buildSubst (def: FSharpEntity) (args: System.Collections.Generic.IList<FSharpType>) (outerSubst: Map<string, FSharpType>) =
+        let gps = def.GenericParameters
+        let count = min gps.Count args.Count
+        [ for i in 0 .. count - 1 do
+            let resolvedArg =
+              match resolve 0 outerSubst args[i] with
+              | Ok t -> t
+              | Error _ -> args[i]
+            yield gps[i].Name, resolvedArg ]
+        |> Map.ofList
+      let rec formatTypeKey (depth: int) (subst: Map<string, FSharpType>) (typ: FSharpType) : string =
+        if depth > 16 then "..."
+        else
+          match resolve 0 subst typ with
+          | Error _ -> "?"
+          | Ok resolved ->
+            if resolved.IsGenericParameter then "'" + resolved.GenericParameter.Name
+            elif resolved.IsFunctionType then "fn"
+            elif resolved.IsArrayType then
+              let elem = if resolved.GenericArguments.Count > 0 then formatTypeKey (depth + 1) subst resolved.GenericArguments[0] else "?"
+              elem + "[]"
+            elif resolved.IsTupleType || resolved.IsAnonRecordType then
+              resolved.GenericArguments |> Seq.map (formatTypeKey (depth + 1) subst) |> String.concat "*"
+            elif resolved.HasTypeDefinition then
+              let def = resolved.TypeDefinition
+              let baseKey = sprintf "%s:%s.%s" def.Assembly.SimpleName def.AccessPath def.CompiledName
+              if resolved.GenericArguments.Count = 0 then baseKey
+              else
+                let args = resolved.GenericArguments |> Seq.map (formatTypeKey (depth + 1) subst) |> String.concat ","
+                sprintf "%s<%s>" baseKey args
+            else resolved.ToString()
+      let rec inspectMutableState (visited: Set<string>) (subst: Map<string, FSharpType>) (depth: int) (typ: FSharpType) : Result<bool, string> =
+        if depth > 32 then Error (sprintf "type step %d exceeded the mutable-state inspection limit" depth)
+        else
+          try
+            match resolve depth subst typ with
+            | Error reason -> Error reason
+            | Ok resolved ->
+              // Function types do not hold state in their signature; stop recursion here.
+              if resolved.IsFunctionType || resolved.IsGenericParameter || resolved.IsMeasureType then Ok false
+              elif resolved.IsArrayType then Ok true
+              elif refCell resolved then Ok true
+              elif resolved.IsTupleType || resolved.IsAnonRecordType then
+                checkSeq resolved.GenericArguments (inspectMutableState visited subst (depth + 1))
+              elif resolved.HasTypeDefinition then
+                let def = resolved.TypeDefinition
+                let fullName = def.TryFullName |> Option.defaultValue ""
+                if isMutableCoreStatefulType def then Ok true
+                elif def.Assembly.SimpleName = "FSharp.Core" && immutableCoreAtoms.Contains def.CompiledName then Ok false
+                elif immutableBclAtoms.Contains fullName then Ok false
+                elif def.Assembly.SimpleName = "FSharp.Core" && immutableCoreContainers.Contains def.CompiledName then
+                  checkSeq resolved.GenericArguments (inspectMutableState visited subst (depth + 1))
+                elif fullName.StartsWith("System.ValueTuple`", System.StringComparison.Ordinal) then
+                  checkSeq resolved.GenericArguments (inspectMutableState visited subst (depth + 1))
+                else
+                  let key = formatTypeKey 0 subst resolved
+                  if visited.Contains key then Ok false
+                  else
+                    let visited' = visited.Add key
+                    let innerSubst = buildSubst def resolved.GenericArguments subst
+                    if def.IsFSharpRecord then
+                      checkSeq def.FSharpFields (fun field ->
+                        if field.IsMutable then Ok true
+                        else inspectMutableState visited' innerSubst (depth + 1) field.FieldType)
+                    elif def.IsFSharpUnion then
+                      checkSeq def.UnionCases (fun uc ->
+                        checkSeq uc.Fields (fun field -> inspectMutableState visited' innerSubst (depth + 1) field.FieldType))
+                    elif def.IsFSharp && (def.IsClass || def.IsValueType) then
+                      let hasMutableSetter =
+                        def.MembersFunctionsAndValues
+                        |> Seq.exists (fun m -> m.IsInstanceMember && m.IsPropertySetterMethod)
+                      if hasMutableSetter then Ok true
+                      else
+                        match checkSeq def.FSharpFields (fun field ->
+                                if field.IsStatic then Ok false
+                                elif field.IsMutable then Ok true
+                                else inspectMutableState visited' innerSubst (depth + 1) field.FieldType) with
+                        | Error reason -> Error reason
+                        | Ok true -> Ok true
+                        | Ok false ->
+                          match def.BaseType with
+                          | Some baseTyp -> inspectMutableState visited' innerSubst (depth + 1) baseTyp
+                          | None -> Ok false
+                    else
+                      checkSeq resolved.GenericArguments (inspectMutableState visited' subst (depth + 1))
+              else Ok false
+          with error -> Error (sprintf "type step %d failed: %s" depth error.Message)
+      let bindingKey (v: FSharpMemberOrFunctionOrValue) =
+        match (v :> FSharpSymbol).DeclarationLocation with
+        | Some loc -> v.DisplayName, loc.StartLine, loc.StartColumn
+        | None -> v.DisplayName, 0, 0
+      let rec exprHoldsMutableState (cleanLocals: Set<string * int * int>) (depth: int) (expr: FSharpExpr) : Result<bool, string> =
+        if depth > 32 then Error (sprintf "expression step %d exceeded the mutable-state inspection limit" depth)
+        else
+          match expr with
+          | FSharpExprPatterns.Const(_, typ) ->
+            if typ.IsArrayType then Ok true else Ok false
+          | FSharpExprPatterns.Lambda _ -> Ok false
+          | FSharpExprPatterns.TypeLambda(_, bodyExpr) ->
+            exprHoldsMutableState cleanLocals (depth + 1) bodyExpr
+          | FSharpExprPatterns.Value v ->
+            if cleanLocals.Contains (bindingKey v) then Ok false
+            else inspectMutableState Set.empty Map.empty 0 v.FullType
+          | FSharpExprPatterns.Coerce(_, inner) ->
+            exprHoldsMutableState cleanLocals (depth + 1) inner
+          | FSharpExprPatterns.NewArray _ -> Ok true
+          | FSharpExprPatterns.NewObject(_, _, args) ->
+            match inspectMutableState Set.empty Map.empty 0 expr.Type with
+            | Error reason -> Error reason
+            | Ok true -> Ok true
+            | Ok false -> checkSeq args (exprHoldsMutableState cleanLocals (depth + 1))
+          | FSharpExprPatterns.NewRecord(recordType, args) ->
+            match resolve 0 Map.empty recordType with
+            | Error reason -> Error reason
+            | Ok resolved ->
+              let hasMutableField =
+                resolved.HasTypeDefinition &&
+                resolved.TypeDefinition.FSharpFields |> Seq.exists (fun f -> f.IsMutable)
+              if hasMutableField then Ok true
+              else checkSeq args (exprHoldsMutableState cleanLocals (depth + 1))
+          | FSharpExprPatterns.NewUnionCase(_, _, args)
+          | FSharpExprPatterns.NewAnonRecord(_, args)
+          | FSharpExprPatterns.NewTuple(_, args) ->
+            checkSeq args (exprHoldsMutableState cleanLocals (depth + 1))
+          | FSharpExprPatterns.Let((boundVar, boundExpr, _), bodyExpr) ->
+            if boundVar.IsMutable then Ok true
+            else
+              match exprHoldsMutableState cleanLocals (depth + 1) boundExpr with
+              | Error reason -> Error reason
+              | Ok true -> Ok true
+              | Ok false ->
+                let cleanLocals' = cleanLocals.Add (bindingKey boundVar)
+                exprHoldsMutableState cleanLocals' (depth + 1) bodyExpr
+          | FSharpExprPatterns.LetRec(bindings, bodyExpr) ->
+            match checkSeq bindings (fun (boundVar: FSharpMemberOrFunctionOrValue, boundExpr, _) ->
+                    if boundVar.IsMutable then Ok true
+                    else exprHoldsMutableState cleanLocals (depth + 1) boundExpr) with
+            | Error reason -> Error reason
+            | Ok true -> Ok true
+            | Ok false ->
+              let cleanLocals' =
+                bindings
+                |> List.fold (fun acc (v, _, _) -> Set.add (bindingKey v) acc) cleanLocals
+              exprHoldsMutableState cleanLocals' (depth + 1) bodyExpr
+          | FSharpExprPatterns.Sequential(first, second) ->
+            match exprHoldsMutableState cleanLocals (depth + 1) first with
+            | Error reason -> Error reason
+            | Ok true -> Ok true
+            | Ok false -> exprHoldsMutableState cleanLocals (depth + 1) second
+          | FSharpExprPatterns.IfThenElse(_, thenExpr, elseExpr) ->
+            match exprHoldsMutableState cleanLocals (depth + 1) thenExpr with
+            | Error reason -> Error reason
+            | Ok true -> Ok true
+            | Ok false -> exprHoldsMutableState cleanLocals (depth + 1) elseExpr
+          | FSharpExprPatterns.DecisionTree(_, targets) ->
+            checkSeq targets (fun (_, targetExpr) -> exprHoldsMutableState cleanLocals (depth + 1) targetExpr)
+          | FSharpExprPatterns.ObjectExpr(_, baseCall, _, _) ->
+            exprHoldsMutableState cleanLocals (depth + 1) baseCall
+          | FSharpExprPatterns.Call(objOpt, _, _, _, args) ->
+            match inspectMutableState Set.empty Map.empty 0 expr.Type with
+            | Error reason -> Error reason
+            | Ok true -> Ok true
+            | Ok false ->
+              let objCheck =
+                match objOpt with
+                | Some objExpr -> exprHoldsMutableState cleanLocals (depth + 1) objExpr
+                | None -> Ok false
+              match objCheck with
+              | Error reason -> Error reason
+              | Ok true -> Ok true
+              | Ok false -> checkSeq args (exprHoldsMutableState cleanLocals (depth + 1))
+          | _ -> inspectMutableState Set.empty Map.empty 0 expr.Type
+      let nominal (resolved: FSharpType) =
+        if resolved.HasTypeDefinition then
+          Some (resolved.TypeDefinition.AccessPath, resolved.TypeDefinition.CompiledName)
+        else None
       for declaration in declarations do
         match declaration with
-        | FSharpImplementationFileDeclaration.Entity(_, nested) -> rejectModuleCaches nested
-        | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(value, _, _)
-            when not value.IsMember && (value.DeclaringEntity |> Option.exists (fun scope -> scope.IsFSharpModule)) ->
-          let rec resolve (typ: FSharpType) = if typ.IsAbbreviation then resolve typ.AbbreviatedType else typ
-          let declared = resolve value.FullType
-          let isRefCell =
-            if not declared.HasTypeDefinition then false else
-            let cell = declared.TypeDefinition
-            cell.Assembly.SimpleName = "FSharp.Core" && cell.AccessPath = "Microsoft.FSharp.Core" &&
-            cell.CompiledName = "FSharpRef`1" && declared.GenericArguments.Count = 1
-          let container = if isRefCell then resolve declared.GenericArguments[0] else declared
-          if (value.IsMutable || isRefCell) && container.HasTypeDefinition then
-            let definition = container.TypeDefinition
-            if definition.Assembly.SimpleName = "FSharp.Core" && definition.AccessPath = "Microsoft.FSharp.Collections" &&
-               (definition.CompiledName = "FSharpMap`2" || definition.CompiledName = "FSharpSet`1") then
+        | FSharpImplementationFileDeclaration.Entity(entity, nested) ->
+          if entity.IsFSharp && not entity.IsFSharpModule then
+            for field in entity.FSharpFields do
+              if field.IsStatic && not (field.IsCompilerGenerated && field.Name.StartsWith("init@", System.StringComparison.Ordinal)) then
+                match resolve 0 Map.empty field.FieldType with
+                | Error reason ->
+                  diagnostics.Add {
+                    Type = "Alex analysis incomplete"
+                    Message = sprintf "Cannot inspect static field '%s' on '%s' for mutable state: %s" field.Name entity.DisplayName reason
+                    Code = "AXA000"
+                    Severity = Severity.Error
+                    Range = field.DeclarationLocation
+                    Fixes = []
+                  }
+                | Ok fieldDeclared ->
+                  let fieldCheck =
+                    if field.IsMutable then Ok true
+                    elif fieldDeclared.IsFunctionType then Ok false
+                    else inspectMutableState Set.empty Map.empty 0 fieldDeclared
+                  match fieldCheck with
+                  | Error reason ->
+                    diagnostics.Add {
+                      Type = "Alex analysis incomplete"
+                      Message = sprintf "Cannot inspect static field '%s' on '%s' for mutable state: %s" field.Name entity.DisplayName reason
+                      Code = "AXA000"
+                      Severity = Severity.Error
+                      Range = field.DeclarationLocation
+                      Fixes = []
+                    }
+                  | Ok false -> ()
+                  | Ok true ->
+                    let typeDesc =
+                      if fieldDeclared.IsArrayType then "System.Array"
+                      else
+                        fieldDeclared
+                        |> nominal
+                        |> Option.map (fun (accessPath, compiledName) ->
+                          if System.String.IsNullOrEmpty accessPath then compiledName
+                          else sprintf "%s.%s" accessPath compiledName)
+                        |> Option.defaultValue (fieldDeclared.ToString())
+                    diagnostics.Add {
+                      Type = "Alex pure-core boundary"
+                      Message = sprintf "Alex production code must not hold type-static mutable state or ref cells: %s (field '%s.%s')." typeDesc entity.DisplayName field.Name
+                      Code = "AXC010"
+                      Severity = Severity.Error
+                      Range = field.DeclarationLocation
+                      Fixes = []
+                    }
+          rejectModuleCaches nested
+        | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(value, argGroups, body)
+            when (not value.IsMember && (value.DeclaringEntity |> Option.exists (fun scope -> scope.IsFSharpModule))) ||
+                 (not value.IsInstanceMember && not value.IsConstructor && not value.IsImplicitConstructor &&
+                  (value.DeclaringEntity |> Option.exists (fun scope -> not scope.IsFSharpModule && scope.IsFSharp))) ->
+          match resolve 0 Map.empty value.FullType with
+          | Error reason ->
+            diagnostics.Add {
+              Type = "Alex analysis incomplete"
+              Message = sprintf "Cannot inspect binding '%s' for module-level mutable state: %s" value.DisplayName reason
+              Code = "AXA000"
+              Severity = Severity.Error
+              Range = value.DeclarationLocation
+              Fixes = []
+            }
+          | Ok declared ->
+            let stateCheck =
+              if value.IsMutable then Ok true
+              elif not argGroups.IsEmpty then Ok false
+              else exprHoldsMutableState Set.empty 0 body
+            match stateCheck with
+            | Error reason ->
               diagnostics.Add {
-                Type = "Alex pure-core boundary"
-                Message = sprintf "Alex production code must not hold module-level mutable Map or Set state: %s.%s (binding '%s')." definition.AccessPath definition.CompiledName value.DisplayName
-                Code = "AXC010"
+                Type = "Alex analysis incomplete"
+                Message = sprintf "Cannot inspect binding '%s' for module-level mutable state: %s" value.DisplayName reason
+                Code = "AXA000"
                 Severity = Severity.Error
                 Range = value.DeclarationLocation
                 Fixes = []
               }
+            | Ok false -> ()
+            | Ok true ->
+              let container =
+                if refCell declared then
+                  match resolve 0 Map.empty declared.GenericArguments[0] with
+                  | Ok inner -> inner
+                  | Error _ -> declared
+                else declared
+              match nominal container with
+              | Some (accessPath, compiledName) when
+                  accessPath = "Microsoft.FSharp.Collections" &&
+                  (compiledName = "FSharpMap`2" || compiledName = "FSharpSet`1") ->
+                diagnostics.Add {
+                  Type = "Alex pure-core boundary"
+                  Message = sprintf "Alex production code must not hold module-level mutable Map or Set state: %s.%s (binding '%s')." accessPath compiledName value.DisplayName
+                  Code = "AXC010"
+                  Severity = Severity.Error
+                  Range = value.DeclarationLocation
+                  Fixes = []
+                }
+              | _ ->
+                let typeDesc =
+                  if declared.IsArrayType then "System.Array"
+                  else
+                    declared
+                    |> nominal
+                    |> Option.map (fun (accessPath, compiledName) ->
+                      if System.String.IsNullOrEmpty accessPath then compiledName
+                      else sprintf "%s.%s" accessPath compiledName)
+                    |> Option.defaultValue (declared.ToString())
+                diagnostics.Add {
+                  Type = "Alex pure-core boundary"
+                  Message = sprintf "Alex production code must not hold module-level mutable state or ref cells: %s (binding '%s')." typeDesc value.DisplayName
+                  Code = "AXC010"
+                  Severity = Severity.Error
+                  Range = value.DeclarationLocation
+                  Fixes = []
+                }
         | _ -> ()
     rejectModuleCaches tree.Declarations
-  return diagnostics |> Seq.distinctBy (fun diagnostic -> diagnostic.Code, diagnostic.Range.StartLine, diagnostic.Range.StartColumn) |> List.ofSeq
+
+    // AXC011: checked-in monotonic shrinking ratchet for legacy mutable BCL collections and
+    // `let mutable` in Alex production sources. A file absent from the table may not introduce any
+    // of these constructs (zero new files permitted); a listed file is pinned at its exact
+    // checked-in count, which may only be lowered (both growth above cap and shrink below cap,
+    // including zero sites, are refused). Counting unit for `let mutable`: one per written
+    // `let mutable` binding at its `let` keyword (Alex #61 comments #11329 and #11467).
+    let legacyCollectionNames =
+      Set.ofList [
+        "System.Collections.Generic.List`1"
+        "System.Collections.Generic.Dictionary`2"
+        "System.Collections.Generic.HashSet`1"
+        "System.Collections.Generic.Queue`1"
+        "System.Collections.Generic.Stack`1"
+        "System.Collections.Queue"
+        "System.Collections.Stack"
+      ]
+    let legacyCollectionAssemblies =
+      Set.ofList [
+        "System.Private.CoreLib"
+        "System.Collections"
+        "System.Collections.NonGeneric"
+        "System.Runtime"
+        "mscorlib"
+        "netstandard"
+      ]
+    let rec resolveCollectionEntity (depth: int) (entity: FSharpEntity) : FSharpEntity option =
+      if depth > 32 then None
+      elif entity.IsFSharpAbbreviation then
+        try
+          let target = entity.AbbreviatedType
+          if target.HasTypeDefinition then resolveCollectionEntity (depth + 1) target.TypeDefinition
+          else None
+        with _ -> None
+      else Some entity
+    let legacyCollectionIdentity (symbol: FSharpSymbol) =
+      let entity =
+        match symbol with
+        | :? FSharpEntity as entity -> Some entity
+        | :? FSharpMemberOrFunctionOrValue as memberOrFunction -> memberOrFunction.DeclaringEntity
+        | _ -> None
+      match entity |> Option.bind (resolveCollectionEntity 0) with
+      | Some resolved when legacyCollectionAssemblies.Contains resolved.Assembly.SimpleName ->
+        let name = resolved.TryFullName |> Option.defaultValue resolved.DisplayName
+        if legacyCollectionNames.Contains name then Some name else None
+      | _ -> None
+    let rec collectMutableLetRanges (parseTree: ParsedInput) : range list =
+      let r0 = Range.range0
+      ([], parseTree)
+      ||> ParsedInput.fold (fun acc _ node ->
+        match node with
+        | SyntaxNode.SynBinding(SynBinding(isMutable = true; range = bindingRange; trivia = tr)) ->
+          let kwRange = tr.LeadingKeyword.Range
+          let siteRange = if kwRange.StartLine > 0 then kwRange else bindingRange
+          siteRange :: acc
+        | SyntaxNode.SynModule(SynModuleDecl.Exception(SynExceptionDefn(members = ms), _)) when not ms.IsEmpty ->
+          // ParsedInput.fold does not descend into SynExceptionDefn.members; wrap and fold
+          // them explicitly so `let mutable` inside exception members is counted (#11467).
+          let wrapped =
+            ParsedInput.ImplFile(
+              ParsedImplFileInput("s", false, QualifiedNameOfFile(Ident("s", r0)), [], [
+                SynModuleOrNamespace([Ident("M", r0)], false, SynModuleOrNamespaceKind.NamedModule, [
+                  SynModuleDecl.Types([
+                    SynTypeDefn(
+                      SynComponentInfo([], None, [], [Ident("T", r0)], PreXmlDoc.Empty, false, None, r0),
+                      SynTypeDefnRepr.ObjectModel(SynTypeDefnKind.Unspecified, ms, r0),
+                      [], None, r0, SynTypeDefnTrivia.Zero)
+                  ], r0)
+                ], PreXmlDoc.Empty, [], None, r0, { LeadingKeyword = SynModuleOrNamespaceLeadingKeyword.None })
+              ], (false, false), { ConditionalDirectives = []; WarnDirectives = []; CodeComments = [] }, Set.empty))
+          (collectMutableLetRanges wrapped) @ acc
+        | _ -> acc)
+    let alexMarker = "/src/Alex/"
+    let normalizedFileName = context.FileName.Replace("\\", "/")
+    let projectFilePath = context.ProjectOptions.ProjectFileName
+    let projectFileName = System.IO.Path.GetFileName(projectFilePath)
+    let markerIndex = normalizedFileName.IndexOf(alexMarker, System.StringComparison.Ordinal)
+    let isGeneratedObj (rel: string) =
+      rel.StartsWith("obj/", System.StringComparison.Ordinal) &&
+      (rel.EndsWith("AssemblyInfo.fs", System.StringComparison.Ordinal) ||
+       rel.EndsWith("AssemblyAttributes.fs", System.StringComparison.Ordinal))
+    let isProductionAlexProject = projectFileName = "Alex.fsproj"
+    let isScriptControlFile =
+      not isProductionAlexProject && markerIndex >= 0 &&
+      normalizedFileName.EndsWith(".fsx", System.StringComparison.Ordinal)
+    let relativeToProject (filePath: string) =
+      let projectDir = System.IO.Path.GetDirectoryName(projectFilePath)
+      if System.String.IsNullOrEmpty projectDir then filePath.Replace("\\", "/")
+      else System.IO.Path.GetRelativePath(projectDir, filePath).Replace("\\", "/")
+    let relativeFileOpt =
+      if isProductionAlexProject then
+        let rel = relativeToProject context.FileName
+        if isGeneratedObj rel then None else Some rel
+      elif isScriptControlFile then
+        Some (normalizedFileName.Substring(markerIndex + alexMarker.Length))
+      else None
+    match relativeFileOpt with
+    | None -> ()
+    | Some relativeFile ->
+      let compiledSourceList =
+        if isProductionAlexProject then
+          context.ProjectOptions.SourceFiles
+          |> Seq.toList
+          |> List.map relativeToProject
+          |> List.filter (fun rel -> not (isGeneratedObj rel))
+        else []
+      let compiledSources = Set.ofList compiledSourceList
+      // Production pin table contains only compiled Alex.fsproj `.fs` sources.
+      let productionRatchetPins : (string * (string * int) list) list =
+        [ ("Traversal/SMTTransfer.fs", [ ("let mutable", 24) ]) ]
+      // Standalone script control pins apply only to `.fsx` truth-suite fixtures (never to any compiled project).
+      let scriptFixturePins : (string * (string * int) list) list =
+        [ ("Controls/Axc011Pinned.fsx", [ ("let mutable", 2) ])
+          ("Controls/Axc011Growth.fsx", [ ("let mutable", 2) ])
+          ("Controls/Axc011Shrink1.fsx", [ ("let mutable", 2) ])
+          ("Controls/Axc011Shrink0.fsx", [ ("let mutable", 2) ]) ]
+      let activePins = if isProductionAlexProject then productionRatchetPins else scriptFixturePins
+      let mutableLetSites =
+        collectMutableLetRanges context.ParseFileResults.ParseTree
+        |> List.rev
+        |> List.distinctBy (fun r -> r.StartLine, r.StartColumn)
+        |> List.map (fun r -> ("let mutable", r))
+      let collectionSites =
+        context.GetAllSymbolUsesOfFile()
+        |> Seq.choose (fun symbolUse ->
+          match legacyCollectionIdentity symbolUse.Symbol with
+          | Some identity -> Some (identity, symbolUse.Range)
+          | None -> None)
+        |> Seq.toList
+        |> List.distinctBy (fun (target, r) -> target, r.StartLine, r.StartColumn)
+      let debtSites = mutableLetSites @ collectionSites
+      let emit message range =
+        diagnostics.Add {
+          Type = "Alex mutable debt ratchet"
+          Message = message
+          Code = "AXC011"
+          Severity = Severity.Error
+          Range = range
+          Fixes = []
+        }
+      // Check stale production pins once on the primary non-obj compiled Alex source file.
+      if isProductionAlexProject && List.tryHead compiledSourceList = Some relativeFile then
+        for (pinFile, _) in productionRatchetPins do
+          if not (compiledSources.Contains pinFile) then
+            emit
+              (sprintf "Alex must not keep an AXC011 ratchet entry for '%s'; the file is no longer compiled." pinFile)
+              (Range.mkRange context.FileName (Position.mkPos 1 0) (Position.mkPos 1 0))
+      let filePins =
+        activePins
+        |> List.choose (fun (file, targets) -> if file = relativeFile then Some targets else None)
+        |> List.concat
+        |> Map.ofList
+      let grouped =
+        debtSites
+        |> List.groupBy fst
+        |> List.map (fun (target, items) -> target, items |> List.map snd)
+        |> Map.ofList
+      if filePins.IsEmpty then
+        for (target, range) in debtSites do
+          emit (sprintf "Alex must not introduce legacy mutable state: %s in '%s' is outside the checked-in ratchet." target relativeFile) range
+      else
+        for KeyValue(target, ranges) in grouped do
+          match filePins.TryFind target with
+          | None ->
+            for range in ranges do
+              emit (sprintf "Alex must not introduce legacy mutable state: %s in '%s' is not a pinned ratchet target." target relativeFile) range
+          | Some cap ->
+            if ranges.Length > cap then
+              for range in ranges |> List.skip cap do
+                emit (sprintf "Alex must not grow the legacy mutable ratchet: %s in '%s' has %d sites, exceeding the checked-in cap %d." target relativeFile ranges.Length cap) range
+        for KeyValue(target, cap) in filePins do
+          let actualCount =
+            match grouped.TryFind target with
+            | Some ranges -> ranges.Length
+            | None -> 0
+          if actualCount < cap then
+            emit
+              (sprintf "Alex must shrink the legacy mutable ratchet: %s in '%s' pins %d site(s) but actual count is %d; tighten downward." target relativeFile cap actualCount)
+              (Range.mkRange context.FileName (Position.mkPos 1 0) (Position.mkPos 1 0))
+    // End AXC011
+  return diagnostics |> Seq.distinctBy (fun diagnostic -> diagnostic.Code, diagnostic.Range.StartLine, diagnostic.Range.StartColumn, (if diagnostic.Code = "AXC011" then diagnostic.Message else "")) |> List.ofSeq
 }
 
 let private objectDeclarations (context: CliContext) = async {

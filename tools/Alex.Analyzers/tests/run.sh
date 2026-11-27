@@ -99,6 +99,7 @@ printf 'let isUnion () = Microsoft.FSharp.Reflection.FSharpType.IsUnion(typeof<i
 printf 'type Reader = Microsoft.FSharp.Reflection.FSharpValue\nlet keep (value: Reader) = value\n' > "$scratch/reflection-fsharp-alias.fsx"
 printf 'let keep (value: System.Reflection.PropertyInfo) = value\n' > "$scratch/reflection-property.fsx"
 printf 'let keep (value: System.Reflection.MethodInfo) = value\n' > "$scratch/reflection-method.fsx"
+printf 'open Microsoft.FSharp.Quotations\nlet inspect expr = match expr with Patterns.Call(_, m, _) -> Some m | _ -> None\n' > "$scratch/reflection-quotation-call-inferred.fsx"
 printf 'module FSharpValue =\n  let identity value = Option.map id value\nlet value = FSharpValue.identity (Some 1)\n' > "$scratch/reflection-lookalike.fsx"
 printf 'module Entries =\n  let keep (value: System.Runtime.CompilerServices.ConditionalWeakTable<string, string>) = value\n' > "$scratch/cache-cwt.fsx"
 printf 'type Table = System.Collections.Concurrent.ConcurrentDictionary<string, string>\nlet keep (table: Table) = table\n' > "$scratch/cache-concurrent-alias.fsx"
@@ -114,7 +115,111 @@ printf 'module Inner =\n    type Entries = Set<int> ref\n    let rows: Entries =
 printf 'type Rows = Map<string, int>\nlet rows: Rows ref = ref Map.empty\n' > "$scratch/cache-module-ref-payload-alias.fsx"
 printf 'let collect keys =\n    let rows = ref Map.empty<string, int>\n    for key in keys do rows.Value <- Map.add key 1 rows.Value\n    rows.Value\n' > "$scratch/cache-local-ref-map.fsx"
 printf 'module Lookalike =\n    type FSharpRef<\x27T> = { mutable Value: \x27T }\n    let rows: FSharpRef<Map<string, int>> = { Value = Map.empty }\n' > "$scratch/cache-module-ref-lookalike.fsx"
+printf 'module Lookalike =\n    type FSharpRef<\x27T> = { Value: \x27T }\n    let rows: FSharpRef<Map<string, int>> = { Value = Map.empty }\n' > "$scratch/cache-module-ref-lookalike-immutable.fsx"
+printf 'type Holder = { Cell: int ref }\nlet holder = { Cell = ref 0 }\n' > "$scratch/cache-module-record-ref.fsx"
+printf 'type ScopeIdSequence = { mutable Next: int64 }\nlet sequence = { Next = 0L }\n' > "$scratch/cache-module-scope-sequence.fsx"
+printf 'type CellBox = Hold of int ref\nlet boxed = Hold (ref 0)\n' > "$scratch/cache-module-union-ref.fsx"
+printf 'let pair = (1, ref 0)\n' > "$scratch/cache-module-tuple-ref.fsx"
+printf 'let cells = [ ref 0 ]\n' > "$scratch/cache-module-list-ref.fsx"
+printf 'let items = [| 0 |]\n' > "$scratch/cache-module-array.fsx"
+printf 'type Counter() =\n  static let mutable count = 0\n  static member Next () = count <- count + 1; count\n' > "$scratch/cache-module-static-mutable.fsx"
+printf 'type Counter() =\n  static member val Count = 0 with get, set\n' > "$scratch/cache-module-static-prop.fsx"
+printf 'type Counter() =\n  static let cell = ref 0\n  static member Peek () = cell.Value\n' > "$scratch/cache-module-static-ref.fsx"
+printf 'type Counter() =\n  static let zero = 0\n  static member val Constant = 1\n  static member Read () = zero\nlet instance = Counter()\n' > "$scratch/cache-module-static-immutable.fsx"
+printf 'let handlers: Map<string, int ref -> int> = Map.empty\n' > "$scratch/cache-module-map-fn-ref.fsx"
+printf 'let nextId =\n  let n = ref 0L\n  fun () -> n.Value <- n.Value + 1L; n.Value\n' > "$scratch/cache-module-closure-ref.fsx"
+printf 'let private nextRunId = ref 0L\n' > "$scratch/cache-module-nextrunid.fsx"
+printf 'module ScopeContext =\n  let private nextScopeId = ref 0L\n' > "$scratch/cache-module-nextscopeid.fsx"
 printf 'let rows = ref 0\n' > "$scratch/cache-module-ref-scalar.fsx"
+printf 'let mutable counter = 0\nlet bump () = counter <- counter + 1\n' > "$scratch/cache-module-mutable-scalar.fsx"
+printf 'let counter = Some (ref 0)\nlet peek () = match counter with Some cell -> cell.Value | None -> 0\n' > "$scratch/cache-module-ref-option.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet shared = NativeLiteral.ByteArray [| 0uy |]\n' "$psg_dll" > "$scratch/cache-module-psg-bytearray.fsx"
+printf '#r "%s"\nopen Fidelity.PSG\nlet shared = NativeLiteral.Int 0L\n' "$psg_dll" > "$scratch/cache-module-psg-int-clean.fsx"
+cat > "$scratch/cache-module-interface-upcast.fsx" <<'FS'
+type ICounter = abstract Next: unit -> int
+type Counter() =
+  let cell = ref 0
+  interface ICounter with member _.Next() = cell.Value <- cell.Value + 1; cell.Value
+let shared : ICounter = Counter() :> ICounter
+FS
+cat > "$scratch/cache-module-derived-class-ref.fsx" <<'FS'
+type BaseCounter() =
+  let cell = ref 0
+  member _.Peek() = cell.Value
+type DerivedCounter() =
+  inherit BaseCounter()
+let shared = DerivedCounter()
+FS
+printf 'let runs = MailboxProcessor<int>.Start(fun inbox -> let rec loop () = async { let! _ = inbox.Receive() in return! loop () } in loop ())\n' > "$scratch/cache-module-mailbox.fsx"
+printf 'let bus = Event<int>()\n' > "$scratch/cache-module-event.fsx"
+printf 'type Factory<\x27a> = { Make: unit -> \x27a }\nlet shared : Factory<int ref> = { Make = fun () -> ref 0 }\n' > "$scratch/cache-module-factory-ref.fsx"
+printf 'type Factory = { Make: unit -> int }\nlet shared : Factory = { Make = let n = ref 0 in fun () -> n.Value <- n.Value + 1; n.Value }\n' > "$scratch/cache-module-record-closure-ref.fsx"
+cat > "$scratch/cache-module-object-expr-ref.fsx" <<'FS'
+type ICounter = abstract Next: unit -> int
+let shared : ICounter = let n = ref 0 in { new ICounter with member _.Next() = n.Value <- n.Value + 1; n.Value }
+FS
+cat > "$scratch/cache-module-nested-wrap-ref.fsx" <<'FS'
+type Wrap<'a> = { Value: 'a }
+let make () : Wrap<Wrap<int ref>> = { Value = { Value = ref 0 } }
+let shared = make ()
+FS
+printf 'let accumulator keys =\n  let total = ref 0\n  for key in keys do total.Value <- total.Value + 1\n  total.Value\n' > "$scratch/local-ref-accumulator.fsx"
+printf 'let thunk = lazy 1\nlet ready = thunk.IsValueCreated\n' > "$scratch/lazy-isvaluecreated.fsx"
+printf 'type LazyLike = { IsValueCreated: bool }\nlet ready = { IsValueCreated = false }.IsValueCreated\n' > "$scratch/lazy-lookalike.fsx"
+printf 'let pair = System.Threading.Tasks.ConcurrentExclusiveSchedulerPair()\n' > "$scratch/ambient-scheduler.fsx"
+printf '[<System.ThreadStaticAttribute>]\nlet counter = 0\n' > "$scratch/ambient-threadstatic.fsx"
+mkdir -p "$scratch/src/Alex/Controls"
+printf 'let pure (xs: int list) = List.sum xs\n' > "$scratch/src/Alex/Controls/Axc011Immutable.fsx"
+printf 'let bump () =\n  let mutable total = 0\n  total <- total + 1\n' > "$scratch/src/Alex/Controls/Axc011Mutable.fsx"
+printf 'let collect xs =\n  let rows = ResizeArray<int>()\n  for x in xs do ignore (rows.Add x)\n  rows\n' > "$scratch/src/Alex/Controls/Axc011ResizeArray.fsx"
+printf 'let make () = System.Collections.Generic.Dictionary<string, int>()\n' > "$scratch/src/Alex/Controls/Axc011Dictionary.fsx"
+printf 'let make () = System.Collections.Generic.HashSet<int>()\n' > "$scratch/src/Alex/Controls/Axc011HashSet.fsx"
+printf 'let make () = System.Collections.Generic.Queue<int>()\n' > "$scratch/src/Alex/Controls/Axc011Queue.fsx"
+printf 'let make () = System.Collections.Generic.Stack<int>()\n' > "$scratch/src/Alex/Controls/Axc011Stack.fsx"
+printf 'let make () = System.Collections.Queue()\n' > "$scratch/src/Alex/Controls/Axc011QueueNonGeneric.fsx"
+printf 'let make () = System.Collections.Stack()\n' > "$scratch/src/Alex/Controls/Axc011StackNonGeneric.fsx"
+printf 'let run () =\n  let mutable a = 1\n  let mutable b = 2\n  a + b\n' > "$scratch/src/Alex/Controls/Axc011Pinned.fsx"
+printf 'let run () =\n  let mutable a = 1\n  let mutable b = 2\n  let mutable c = 3\n  a + b + c\n' > "$scratch/src/Alex/Controls/Axc011Growth.fsx"
+printf 'let run () =\n  let mutable a = 1\n  a\n' > "$scratch/src/Alex/Controls/Axc011Shrink1.fsx"
+printf 'let run () = 1\n' > "$scratch/src/Alex/Controls/Axc011Shrink0.fsx"
+cat > "$scratch/src/Alex/Controls/Axc011SevenSites.fsx" <<'FS'
+let plain () = let mutable visible = 10 in visible
+let anonymous () = {| Value = (let mutable inAnonymous = 20 in inAnonymous) |}
+type Row = { Value: int }
+let record () = { Value = (let mutable inRecord = 30 in inRecord) }
+let copy () = { (let mutable inCopy = { Value = 40 } in inCopy) with Value = 50 }
+let matching () = async {
+  match! async { let mutable inMatched = 60 in return inMatched } with
+  | found -> let mutable inClause = 70 in return found + inClause
+}
+let shadowed () = let mutable n = 80 in (let mutable n = 81 in n)
+let tupleSite () = let mutable (a, b) = (1, 2) in a + b
+let wildSite () = let mutable _ = 1 in 0
+exception CustomEx of int with
+  member _.Compute() = let mutable inExn = 99 in inExn
+FS
+cat > "$scratch/src/Alex/Controls/Axc011ExceptionMember.fsx" <<'FS'
+exception CustomEx of int with
+  member _.Compute() = let mutable inExn = 99 in inExn
+FS
+cat > "$scratch/src/Alex/Controls/Axc011ExceptionMemberClean.fsx" <<'FS'
+exception CustomEx of int with
+  member _.Compute() = let inExn = 99 in inExn
+FS
+printf 'let tally (xs: ResizeArray<int>) = Seq.length xs\n' > "$scratch/src/Alex/Controls/Axc011ResizeArrayAnnotation.fsx"
+cat > "$scratch/src/Alex/Controls/Axc011DictionaryLookalike.fsx" <<'FS'
+namespace System.Collections.Generic
+type Dictionary<'K, 'V> = Empty | Entry of 'K * 'V
+module Use =
+  let empty : Dictionary<string, int> = Empty
+FS
+cat > "$scratch/src/Alex/Controls/Axc011ClassAndObjectExpr.fsx" <<'FS'
+type IBox = abstract Value: unit -> int
+type Counter() =
+  let mutable count = 0
+  member _.Inc() = count <- count + 1; count
+let makeObj () = { new IBox with member _.Value() = let mutable local = 1 in local <- local + 1; local }
+FS
 printf 'let run () = task { return 1 }\n' > "$scratch/task.fsx"
 printf 'let builder = task\nlet run () = builder { return 1 }\n' > "$scratch/task-alias.fsx"
 printf 'let task = 1\nlet run () = task + 1\n' > "$scratch/task-lookalike.fsx"
@@ -208,47 +313,79 @@ run_case() {
   if [[ -n ${ALEX_ANALYZER_ONLY:-} && "$name" != "$ALEX_ANALYZER_ONLY" ]]; then return 0; fi
   executed=$((executed + 1))
   cases+=("$name")
-  case "$name" in forward|revision|semantic-node|breadcrumb|impostor|missing-contract|stale-contract|nominal-*|other-name-field|published-width|published-string|Dialects/*|Elements/*|Patterns/*|Traversal/*|Witnesses/*|XParsec/*|Generation) analyzer='Alex published boundary' ;; esac
+  case "$name" in src/Alex/*) analyzer='Alex pure-core baseline' ;; forward|revision|semantic-node|breadcrumb|impostor|missing-contract|stale-contract|nominal-*|other-name-field|published-width|published-string|Dialects/*|Elements/*|Patterns/*|Traversal/*|Witnesses/*|XParsec/*|Generation) analyzer='Alex published boundary' ;; esac
   (cd "$tool_dir" && dotnet fsharp-analyzers --script "$scratch/$name.fsx" --analyzers-path "$analyzers" --include-analyzers "$analyzer" --fail-on-type-errors) > "$scratch/$name.log" 2>&1 || rc=$?
   case "$expected" in
-    clean|known-miss|policy-pending) [[ $rc -eq 0 ]] && ! rg -q 'AX[AC][0-9]+' "$scratch/$name.log" ;;
+    clean|known-miss|policy-pending) [[ $rc -eq 0 ]] && ! grep -Eq 'AX[AC][0-9]+' "$scratch/$name.log" ;;
     AXC009)
       local identity=$object_positions required=0
       for position in $positions; do
-        rg -Fq "$scratch/$name.fsx($position): Error AXC009 : Alex production code must not use reflection APIs: $identity." "$scratch/$name.log" || { printf 'FAIL %s AXC009 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        grep -Fq "$scratch/$name.fsx($position): Error AXC009 : Alex production code must not use reflection APIs: $identity." "$scratch/$name.log" || { printf 'FAIL %s AXC009 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
         required=$((required + 1))
         if [[ $identity == System.Reflection.* ]]; then
-          rg -Fq "$scratch/$name.fsx($position): Error AXC002 : Alex production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
+          grep -Fq "$scratch/$name.fsx($position): Error AXC002 : Alex production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
           required=$((required + 1))
         fi
       done
-      count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
       [[ $rc -ne 0 && $count -eq $required ]]
       ;;
     AXC010)
       local identity=$object_positions required=0
       for position in $positions; do
-        rg -Fq "$scratch/$name.fsx($position): Error AXC010 : Alex production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state: $identity (assembly " "$scratch/$name.log" || { printf 'FAIL %s AXC010 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
-        rg -Fq "$scratch/$name.fsx($position): Error AXC002 : Alex production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
+        grep -Fq "$scratch/$name.fsx($position): Error AXC010 : Alex production code must not hold ConditionalWeakTable, System.Collections.Concurrent or ThreadLocal state: $identity (assembly " "$scratch/$name.log" || { printf 'FAIL %s AXC010 identity at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        grep -Fq "$scratch/$name.fsx($position): Error AXC002 : Alex production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s AXC002 identity at %s\n' "$name" "$position" >&2; return 1; }
         required=$((required + 2))
       done
-      count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
       [[ $rc -ne 0 && $count -eq $required ]]
       ;;
-    type-error) [[ $rc -ne 0 ]] && rg -Fq 'did not type check and --fail-on-type-errors was passed' "$scratch/$name.log" ;;
+    AXC010-state)
+      local reason=$object_positions required=0
+      [[ $rc -ne 0 ]] || { printf 'FAIL %s %s exited clean\n' "$name" "$expected" >&2; return 1; }
+      for position in $positions; do
+        grep -Fq "$scratch/$name.fsx($position): Error AXC010 : $reason" "$scratch/$name.log" || { printf 'FAIL %s missing AXC010 at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        grep -Fq "$scratch/$name.fsx($position): Error AXC002 : Alex production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s missing AXC002 at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        required=$((required + 2))
+      done
+      count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      [[ $count -eq $required ]]
+      ;;
+    AXC011)
+      local reason=$object_positions required=0
+      [[ $rc -ne 0 ]] || { printf 'FAIL %s %s exited clean\n' "$name" "$expected" >&2; return 1; }
+      for position in $positions; do
+        grep -Fq "$scratch/$name.fsx($position): Error AXC011 : $reason" "$scratch/$name.log" || { printf 'FAIL %s missing AXC011 at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        required=$((required + 1))
+      done
+      count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      [[ $count -eq $required ]]
+      ;;
+    AXC011+AXC002)
+      local reason=$object_positions required=0
+      [[ $rc -ne 0 ]] || { printf 'FAIL %s %s exited clean\n' "$name" "$expected" >&2; return 1; }
+      for position in $positions; do
+        grep -Fq "$scratch/$name.fsx($position): Error AXC011 : $reason" "$scratch/$name.log" || { printf 'FAIL %s missing AXC011 at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        grep -Fq "$scratch/$name.fsx($position): Error AXC002 : Alex production code must not depend on .NET library APIs:" "$scratch/$name.log" || { printf 'FAIL %s missing AXC002 at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        required=$((required + 2))
+      done
+      count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      [[ $count -eq $required ]]
+      ;;
+    type-error) [[ $rc -ne 0 ]] && grep -Fq 'did not type check and --fail-on-type-errors was passed' "$scratch/$name.log" ;;
     AXA003+AXA004)
-      count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
       [[ $rc -ne 0 && $count -eq 2 ]] || { printf 'FAIL %s diagnostic count (exit %s; log %s)\n' "$name" "$rc" "$scratch/$name.log" >&2; return 1; }
       for pos_code in $positions; do
         pos="${pos_code%%:*}"; code="${pos_code#*:}"
-        rg -Fq "$scratch/$name.fsx($pos): Error $code :" "$scratch/$name.log" || { printf 'FAIL %s %s at %s (log %s)\n' "$name" "$code" "$pos" "$scratch/$name.log" >&2; return 1; }
+        grep -Fq "$scratch/$name.fsx($pos): Error $code :" "$scratch/$name.log" || { printf 'FAIL %s %s at %s (log %s)\n' "$name" "$code" "$pos" "$scratch/$name.log" >&2; return 1; }
       done
       ;;
     AXA005+AXA000-facts)
-      count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
       [[ $rc -ne 0 && $count -eq 2 ]] || { printf 'FAIL %s diagnostic count (exit %s; log %s)\n' "$name" "$rc" "$scratch/$name.log" >&2; return 1; }
-      rg -Fq "$scratch/$name.fsx(3,44): Error AXA005 : Mutable local 'facts' is forbidden in non-traversal Alex layers." "$scratch/$name.log" || { printf 'FAIL %s AXA005\n' "$name" >&2; return 1; }
-      rg -Fq "$scratch/$name.fsx(3,76): Error AXA000 : Cannot establish DeclarationFacts provenance through mutable local 'facts'." "$scratch/$name.log" || { printf 'FAIL %s AXA000\n' "$name" >&2; return 1; }
+      grep -Fq "$scratch/$name.fsx(3,44): Error AXA005 : Mutable local 'facts' is forbidden in non-traversal Alex layers." "$scratch/$name.log" || { printf 'FAIL %s AXA005\n' "$name" >&2; return 1; }
+      grep -Fq "$scratch/$name.fsx(3,76): Error AXA000 : Cannot establish DeclarationFacts provenance through mutable local 'facts'." "$scratch/$name.log" || { printf 'FAIL %s AXA000\n' "$name" >&2; return 1; }
       ;;
     *)
       case "$expected" in
@@ -284,18 +421,20 @@ run_case() {
         AXC008) reason='Alex production code must not throw or catch CLR exceptions.' ;;
         AXC010-module-map) expected=AXC010; reason="Alex production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpMap\`2 (binding '$4')."; object_positions= ;;
         AXC010-module-set) expected=AXC010; reason="Alex production code must not hold module-level mutable Map or Set state: Microsoft.FSharp.Collections.FSharpSet\`1 (binding '$4')."; object_positions= ;;
+        AXC010-any) expected=AXC010; reason="Alex production code must not hold module-level mutable state or ref cells: $4"; object_positions= ;;
+        AXC010-static) expected=AXC010; reason="Alex production code must not hold type-static mutable state or ref cells: $4"; object_positions= ;;
         *) printf 'Unknown expected diagnostic %s\n' "$expected" >&2; return 1 ;;
       esac
-      count=$(rg -c 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
       [[ $rc -ne 0 && $count -eq $(( $(wc -w <<< "$positions") + $(wc -w <<< "$object_positions") )) ]] || { printf 'FAIL %s diagnostic count (exit %s; log %s)\n' "$name" "$rc" "$scratch/$name.log" >&2; return 1; }
       for position in $positions; do
-        rg -Fq "$scratch/$name.fsx($position): Error $expected : $reason" "$scratch/$name.log" || { printf 'FAIL %s diagnostic at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        grep -Fq "$scratch/$name.fsx($position): Error $expected : $reason" "$scratch/$name.log" || { printf 'FAIL %s diagnostic at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
       done
       for position in $object_positions; do
-        rg -Fq "$scratch/$name.fsx($position): Error AXC005 : Alex production code must not declare obj types." "$scratch/$name.log" || { printf 'FAIL %s obj diagnostic at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
+        grep -Fq "$scratch/$name.fsx($position): Error AXC005 : Alex production code must not declare obj types." "$scratch/$name.log" || { printf 'FAIL %s obj diagnostic at %s (log %s)\n' "$name" "$position" "$scratch/$name.log" >&2; return 1; }
       done
       if [[ $expected == AXC002 ]]; then
-        [[ $(rg -c 'Error AXC002 : .+ \(assembly .+\)\.' "$scratch/$name.log" || true) -eq $(wc -w <<< "$positions") ]] || { printf 'FAIL %s missing resolved identity\n' "$name" >&2; return 1; }
+        [[ $(grep -Ec 'Error AXC002 : .+ \(assembly .+\)\.' "$scratch/$name.log" || true) -eq $(wc -w <<< "$positions") ]] || { printf 'FAIL %s missing resolved identity\n' "$name" >&2; return 1; }
       fi
       ;;
   esac || { printf 'FAIL %s %s (exit %s; log %s)\n' "$expected" "$name" "$rc" "$scratch/$name.log" >&2; return 1; }
@@ -378,6 +517,7 @@ run_case reflection-fsharp-type AXC009 '1,45 1,17' 'Microsoft.FSharp.Reflection.
 run_case reflection-fsharp-alias AXC009 '1,14 2,17' 'Microsoft.FSharp.Reflection.FSharpValue (assembly FSharp.Core)'
 run_case reflection-property AXC009 '1,17' 'System.Reflection.PropertyInfo (assembly System.Runtime)'
 run_case reflection-method AXC009 '1,17' 'System.Reflection.MethodInfo (assembly System.Runtime)'
+run_case reflection-quotation-call-inferred AXC009 '2,35' 'System.Reflection.MethodInfo (assembly netstandard)'
 run_case reflection-lookalike clean
 run_case cache-cwt AXC010 '2,19' 'System.Runtime.CompilerServices.ConditionalWeakTable`2'
 run_case cache-concurrent-alias AXC010 '1,13 2,17' 'System.Collections.Concurrent.ConcurrentDictionary`2'
@@ -385,15 +525,47 @@ run_case cache-threadlocal AXC010 '1,10' 'System.Threading.ThreadLocal`1'
 run_case cache-lookalike clean
 run_case cache-module-mutable-map AXC010-module-map '1,12' cache
 run_case cache-module-set-alias AXC010-module-set '3,14' nodes
-run_case cache-module-set-lookalike clean
 run_case cache-local-mutable-map clean
 run_case cache-module-table clean
 run_case cache-module-ref-map AXC010-module-map '1,4' rows
 run_case cache-module-ref-set-alias AXC010-module-set '3,8' rows
 run_case cache-module-ref-payload-alias AXC010-module-map '2,4' rows
 run_case cache-local-ref-map clean
-run_case cache-module-ref-lookalike clean
-run_case cache-module-ref-scalar clean
+run_case cache-module-ref-lookalike AXC010-any '3,8' "Cache-module-ref-lookalike.Lookalike.FSharpRef\`1 (binding 'rows')."
+run_case cache-module-ref-lookalike-immutable clean
+run_case cache-module-record-ref AXC010-any '2,4' "Cache-module-record-ref.Holder (binding 'holder')."
+run_case cache-module-scope-sequence AXC010-any '2,4' "Cache-module-scope-sequence.ScopeIdSequence (binding 'sequence')."
+run_case cache-module-union-ref AXC010-any '2,4' "Cache-module-union-ref.CellBox (binding 'boxed')."
+run_case cache-module-tuple-ref AXC010-any '1,4' "type Microsoft.FSharp.Core.int * Microsoft.FSharp.Core.int Microsoft.FSharp.Core.ref (binding 'pair')."
+run_case cache-module-list-ref AXC010-any '1,4' "Microsoft.FSharp.Collections.FSharpList\`1 (binding 'cells')."
+run_case cache-module-array AXC010-any '1,4' "System.Array (binding 'items')."
+run_case cache-module-static-mutable AXC010-static '2,21' "System.Int32 (field 'Counter.count')."
+run_case cache-module-static-prop AXC010-static '2,28' "System.Int32 (field 'Counter.Count@')."
+run_case cache-module-static-ref AXC010-static '2,13' "Microsoft.FSharp.Core.FSharpRef\`1 (field 'Counter.cell')."
+run_case cache-module-static-immutable clean
+run_case cache-module-map-fn-ref clean
+run_case cache-module-closure-ref AXC010-any '1,4' "type Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int64 (binding 'nextId')."
+run_case cache-module-nextrunid AXC010-any '1,12' "Microsoft.FSharp.Core.FSharpRef\`1 (binding 'nextRunId')."
+run_case cache-module-nextscopeid AXC010-any '2,14' "Microsoft.FSharp.Core.FSharpRef\`1 (binding 'nextScopeId')."
+run_case cache-module-ref-scalar AXC010-any '1,4' "Microsoft.FSharp.Core.FSharpRef\`1 (binding 'rows')."
+run_case cache-module-mutable-scalar AXC010-any '1,12' "System.Int32 (binding 'counter')."
+run_case cache-module-ref-option AXC010-any '1,4' "Microsoft.FSharp.Core.FSharpOption\`1 (binding 'counter')."
+run_case cache-module-set-lookalike AXC010-any '3,14' "Cache-module-set-lookalike.Inner.Set\`1 (binding 'nodes')."
+run_case cache-module-psg-bytearray AXC010-any '3,4' "Fidelity.PSG.NativeLiteral (binding 'shared')."
+run_case cache-module-psg-int-clean clean
+run_case cache-module-interface-upcast AXC010-any '5,4' "Cache-module-interface-upcast.ICounter (binding 'shared')."
+run_case cache-module-derived-class-ref AXC010-any '6,4' "Cache-module-derived-class-ref.DerivedCounter (binding 'shared')."
+run_case cache-module-mailbox AXC010-any '1,4' "Microsoft.FSharp.Control.FSharpMailboxProcessor\`1 (binding 'runs')."
+run_case cache-module-event AXC010-any '1,4' "Microsoft.FSharp.Control.FSharpEvent\`1 (binding 'bus')."
+run_case cache-module-factory-ref clean
+run_case cache-module-record-closure-ref AXC010-any '2,4' "Cache-module-record-closure-ref.Factory (binding 'shared')."
+run_case cache-module-object-expr-ref AXC010-any '2,4' "Cache-module-object-expr-ref.ICounter (binding 'shared')."
+run_case cache-module-nested-wrap-ref AXC010-any '3,4' "Cache-module-nested-wrap-ref.Wrap\`1 (binding 'shared')."
+run_case local-ref-accumulator clean
+run_case lazy-isvaluecreated AXC010-state '2,12' 'Alex production code must not observe the creation state of a System.Lazy value: System.Lazy`1 (assembly netstandard).'
+run_case lazy-lookalike clean
+run_case ambient-scheduler AXC010-state '1,11' 'Alex production code must not hold ambient mutable state: System.Threading.Tasks.ConcurrentExclusiveSchedulerPair (assembly System.Runtime).'
+run_case ambient-threadstatic AXC010-state '1,2 1,9' 'Alex production code must not hold ambient mutable state: System.ThreadStaticAttribute (assembly System.Runtime).'
 run_case integer-literals clean
 run_case integer-literal-open AXC002 '2,5'
 run_case integer-literal-constructor AXC002 '2,8 3,15 4,17'
@@ -645,9 +817,28 @@ run_case Witnesses/axel-smt-transfer AXA010-smt '3,37 3,88'
 run_case Witnesses/axel-visit-all AXA010-fn '4,28'
 run_case Traversal/axel-visit-all-ok clean
 run_case Patterns/axel-clean-getnodessa clean
+run_case src/Alex/Controls/Axc011Immutable clean
+run_case src/Alex/Controls/Axc011Mutable AXC011 '2,2' "Alex must not introduce legacy mutable state: let mutable in 'Controls/Axc011Mutable.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011ResizeArray AXC011+AXC002 '2,13 3,25' "Alex must not introduce legacy mutable state: System.Collections.Generic.List\`1 in 'Controls/Axc011ResizeArray.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011Dictionary AXC011+AXC002 '1,14' "Alex must not introduce legacy mutable state: System.Collections.Generic.Dictionary\`2 in 'Controls/Axc011Dictionary.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011HashSet AXC011+AXC002 '1,14' "Alex must not introduce legacy mutable state: System.Collections.Generic.HashSet\`1 in 'Controls/Axc011HashSet.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011Queue AXC011+AXC002 '1,14' "Alex must not introduce legacy mutable state: System.Collections.Generic.Queue\`1 in 'Controls/Axc011Queue.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011Stack AXC011+AXC002 '1,14' "Alex must not introduce legacy mutable state: System.Collections.Generic.Stack\`1 in 'Controls/Axc011Stack.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011QueueNonGeneric AXC011+AXC002 '1,14' "Alex must not introduce legacy mutable state: System.Collections.Queue in 'Controls/Axc011QueueNonGeneric.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011StackNonGeneric AXC011+AXC002 '1,14' "Alex must not introduce legacy mutable state: System.Collections.Stack in 'Controls/Axc011StackNonGeneric.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011Pinned clean
+run_case src/Alex/Controls/Axc011Growth AXC011 '4,2' "Alex must not grow the legacy mutable ratchet: let mutable in 'Controls/Axc011Growth.fsx' has 3 sites, exceeding the checked-in cap 2."
+run_case src/Alex/Controls/Axc011Shrink1 AXC011 '1,0' "Alex must shrink the legacy mutable ratchet: let mutable in 'Controls/Axc011Shrink1.fsx' pins 2 site(s) but actual count is 1; tighten downward."
+run_case src/Alex/Controls/Axc011Shrink0 AXC011 '1,0' "Alex must shrink the legacy mutable ratchet: let mutable in 'Controls/Axc011Shrink0.fsx' pins 2 site(s) but actual count is 0; tighten downward."
+run_case src/Alex/Controls/Axc011SevenSites AXC011 '1,15 2,31 4,27 5,17 7,17 8,13 10,18 10,41 11,19 12,18 14,23' "Alex must not introduce legacy mutable state: let mutable in 'Controls/Axc011SevenSites.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011ExceptionMember AXC011 '2,23' "Alex must not introduce legacy mutable state: let mutable in 'Controls/Axc011ExceptionMember.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011ExceptionMemberClean clean
+run_case src/Alex/Controls/Axc011ResizeArrayAnnotation AXC011 '1,15' "Alex must not introduce legacy mutable state: System.Collections.Generic.List\`1 in 'Controls/Axc011ResizeArrayAnnotation.fsx' is outside the checked-in ratchet."
+run_case src/Alex/Controls/Axc011DictionaryLookalike AXC002 '1,10'
+run_case src/Alex/Controls/Axc011ClassAndObjectExpr AXC011 '3,2 5,52' "Alex must not introduce legacy mutable state: let mutable in 'Controls/Axc011ClassAndObjectExpr.fsx' is outside the checked-in ratchet."
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 250 ]] || { printf 'Expected 250 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 302 ]] || { printf 'Expected 302 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done
@@ -661,6 +852,11 @@ if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
   sha256sum "$analyzers/Alex.Analyzers.dll" "$tool_dir/Analyzer.fs" "$tool_dir/tests/run.sh" "$tool_dir/.config/dotnet-tools.json" "$psg_dll" "$impostor_dll" "$alex_dll" "$stale_dll" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/ImpostorFixture/ImpostorFixture.fsproj" "$tool_dir/tests/AlexFixture/Ensure.fs" "$tool_dir/tests/AlexFixture/AlexFixture.fsproj" "$tool_dir/tests/AlexFixture/packages.lock.json" "$tool_dir/tests/StaleContract/Contract.fs" "$tool_dir/tests/StaleContract/StaleContract.fsproj" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$tool_dir/tests/InProject/Cases.fs" "$tool_dir/tests/InProject/Dialects/Cases.fs" "$tool_dir/tests/InProject/Elements/Cases.fs" "$tool_dir/tests/InProject/Elements/CleanCases.fs" "$tool_dir/tests/InProject/Patterns/Cases.fs" "$tool_dir/tests/InProject/Witnesses/Cases.fs" "$tool_dir/tests/InProject/Traversal/Values.fs" "$tool_dir/tests/project-control.sh" "$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256" "$tool_dir/analyze-alex.sh" "$tool_dir/check-project.sh" "$tool_dir/ProjectInputs.fsx" "$tool_dir/VerifyProjectLog.fsx" "$tool_dir/Alex.Analyzers.fsproj" "$tool_dir/Directory.Packages.props" "$tool_dir/packages.lock.json" "$tool_dir/NuGet.Config" "$scratch/truth.json" > "$scratch/truth.sha256"
   sha256sum "$alias_dll" "$tool_dir/tests/AliasFixture/Aliases.fs" "$tool_dir/tests/AliasFixture/AliasFixture.fsproj" "$tool_dir/tests/AliasFixture/packages.lock.json" "$tool_dir/tests/DependencyControls.fsx" >> "$scratch/truth.sha256"
   cp "$scratch/truth.sha256" "${ALEX_ANALYZER_TRUTH_RECEIPT_OUT:-$repo_dir/artifacts/alex-analyzers-tests/latest-truth.sha256}"
+  grep -Fv '/truth.json' "$scratch/truth.sha256" > "$scratch/truth-missing-json.sha256"
+  tamper_status=0
+  ALEX_ANALYZER_TRUTH_RECEIPT="$scratch/truth-missing-json.sha256" bash "$tool_dir/check-project.sh" alex-boundary > "$scratch/truth-missing-json.log" 2>&1 || tamper_status=$?
+  [[ $tamper_status -ne 0 ]] && grep -Fxq 'Truth receipt does not bind truth.json.' "$scratch/truth-missing-json.log" || { printf 'check-project.sh failed to refuse truth receipt without truth.json.\n' >&2; exit 1; }
+  printf 'PASS truth-receipt-missing-json refusal\n'
   printf 'Truth receipt: %s\n' "$scratch/truth.sha256"
 fi
 printf 'Evidence: %s\n' "$scratch"

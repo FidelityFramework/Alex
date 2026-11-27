@@ -6,6 +6,8 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- #12620 item 1: incomplete and redundant pattern matches are fatal while preserving SDK defaults (3239). -->
+    <WarningsAsErrors>$(WarningsAsErrors);FS0025;FS0026</WarningsAsErrors>
     <OutputType>Library</OutputType>
     <AssemblyName>Alex</AssemblyName>
     <RootNamespace>Alex</RootNamespace>

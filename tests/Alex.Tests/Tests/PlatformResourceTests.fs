@@ -1946,23 +1946,95 @@ module Schema53BoundaryWitnessing =
         | Result.Ok other -> failwithf "Admitted indirect fixed-sentinel callback call: %A" other
 
     [<Fact>]
-    let ``Boundary call classification arms are structurally exhaustive without the isBoundaryBufferCall invariant`` () =
-        // Defect-sensitivity control for Alex #69 item 1: exhaustiveness of the boundary classification match
-        // must be carried by its own arms, not by the external invariant
-        // isBoundaryBufferCall = isBoundaryBufferShape || hasOpaqueHandle.
-        let patternPath = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../../src/Alex/Patterns/PlatformPatterns.fs"))
-        let text = File.ReadAllText patternPath
-        Assert.True(text.Contains "match isPureWritable, isBoundaryBufferShape, isBoundaryBufferCall, call.Entry with",
-                   "Expected the boundary call classification match in PlatformPatterns.fs.")
-        // Every remaining (isPureWritable = false) combination of the two buffer flags and the entry option is matched.
-        for arm in
-            [ "| false, true, _, None"
-              "| false, false, true, None ->"
-              "| false, true, _, Some _"
-              "| false, false, false, None ->"
-              "| false, false, _, Some formation ->" ] do
-            Assert.True(text.Contains arm, sprintf "Missing boundary classification arm: %s" arm)
-        Assert.False(text.Contains "| false, _, true, None ->", "The invariant-dependent arm | false, _, true, None -> is back.")
+    let ``Boundary call classification distinguishes plain direct calls from opaque-handle direct calls`` () =
+        // Behavioral replacement for the source-text exhaustiveness check superseded by
+        // Alex.fsproj <WarningsAsErrors>$(WarningsAsErrors);FS0025;FS0026</WarningsAsErrors>
+        // (Alex #61 comment #12620 item 1). Verifies the plain FuncCall arm
+        // (isPureWritable=false, isBoundaryBufferShape=false, isBoundaryBufferCall=false, Entry=None)
+        // emits direct FuncCall while replacing the scalar parameter with an opaque ResourceHandle
+        // routes the identical direct call to deferred BoundaryBufferCall.
+        let scopeId = id 730
+        let importId = id 731
+        let siteId = id 732
+        let calleeId = id 733
+        let argId = id 734
+        let formalId = id 736
+        let plainImport : BoundaryImport =
+            { Identity = importId; Binding = scopeId; Scope = scopeId
+              Library = "fixture"; Symbol = "fixture_plain_direct"; CallingConvention = "CDecl"
+              FixedSentinels = []; DeclarationPath = [ scopeId ]
+              Parameters = [ formalId, BoundaryScalar.Integer(32, true) ]
+              Result = None; Participants = Set.ofList [ scopeId; importId; formalId ]
+              SourceTypes = Map.ofList [ formalId, intType ]
+              DeclarationFacts = Map.ofList [ formalId, { emptyFact "binding" with SourceType = intType } ] }
+        let plainCall : BoundaryCall =
+            { Site = siteId; Import = importId; Callee = calleeId; Entry = None; Resource = None
+              Arguments =
+                [ { Actual = argId; Formal = formalId; Abi = BoundaryScalar.Integer(32, true)
+                    Adaptation = None; OptionalEntry = None; BufferAbsence = None } ]
+              ErasedUnitArguments = []; Result = None; ResultAdaptation = None
+              Participants = Set.ofList [ siteId; importId; calleeId; argId; formalId ]; SourceTypes = Map.empty }
+        let emptyGraph = revision []
+        let plainGraph =
+            { emptyGraph with
+                Nodes =
+                    Map.ofList
+                        [ siteId, mkNode siteId unitType (SemanticKind.Application(calleeId, [ argId ])) [ calleeId; argId ]
+                          calleeId, mkNode calleeId (functionFrom intType unitType) (SemanticKind.VarRef("fixture_plain_direct", Some scopeId)) []
+                          argId, mkNode argId intType (SemanticKind.VarRef("arg", None)) [] ]
+                Emission =
+                    { emptyGraph.Emission with
+                        Boundary =
+                            { emptyGraph.Emission.Boundary with
+                                Imports = Map.ofList [ importId, plainImport ]
+                                ByScope = Map.ofList [ scopeId, [ importId ] ]
+                                Calls = Map.ofList [ siteId, plainCall ] } } }
+            |> declareTraversalReadings
+        let accPlain = MLIRAccumulator.empty ()
+        MLIRAccumulator.bindNode argId (Arg 0) (TInt(IntWidth 32)) accPlain
+        match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus plainGraph plainGraph.Nodes[siteId]) 64 accPlain with
+        | Result.Ok(([ MLIROp.FuncOp(FuncOp.FuncCall([], "fixture_plain_direct", [ { SSA = Arg 0; Type = TInt(IntWidth 32) } ])) ], TRVoid), _) -> ()
+        | other -> failwithf "Expected plain direct boundary call to emit FuncCall, got: %A" other
+
+        let handleImport =
+            { plainImport with
+                Symbol = "fixture_handle_direct"
+                Parameters = [ formalId, BoundaryScalar.ResourceHandle(formalId, false) ]
+                SourceTypes = Map.ofList [ formalId, ptrHandleType ]
+                DeclarationFacts = Map.ofList [ formalId, { emptyFact "binding" with SourceType = ptrHandleType } ] }
+        let handleCall =
+            { plainCall with
+                Arguments =
+                    [ { Actual = argId; Formal = formalId; Abi = BoundaryScalar.ResourceHandle(formalId, false)
+                        Adaptation = None; OptionalEntry = None; BufferAbsence = None } ] }
+        let handleGraph =
+            { emptyGraph with
+                Nodes =
+                    Map.ofList
+                        [ siteId, mkNode siteId unitType (SemanticKind.Application(calleeId, [ argId ])) [ calleeId; argId ]
+                          calleeId, mkNode calleeId (functionFrom ptrHandleType unitType) (SemanticKind.VarRef("fixture_handle_direct", Some scopeId)) []
+                          argId, mkNode argId ptrHandleType (SemanticKind.VarRef("handle", None)) [] ]
+                Emission =
+                    { emptyGraph.Emission with
+                        Boundary =
+                            { emptyGraph.Emission.Boundary with
+                                Imports = Map.ofList [ importId, handleImport ]
+                                ByScope = Map.ofList [ scopeId, [ importId ] ]
+                                Calls = Map.ofList [ siteId, handleCall ] }
+                        Numeric =
+                            { emptyGraph.Emission.Numeric with
+                                TypeRepresentations = Map.ofList [ ptrHandleType, Result.Ok handleRep ]
+                                OccurrenceRepresentations =
+                                    Map.ofList
+                                        [ argId, Result.Ok handleRep
+                                          formalId, Result.Ok handleRep ] } } }
+            |> declareTraversalReadings
+        let accHandle = MLIRAccumulator.empty ()
+        MLIRAccumulator.bindNode argId (Arg 0) (TOpaqueHandle(ptrHandleType, 64, 8)) accHandle
+        match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus handleGraph handleGraph.Nodes[siteId]) 64 accHandle with
+        | Result.Ok(([ MLIROp.BoundaryBufferCall(NodeId 732, [ { SSA = Arg 0; Type = TOpaqueHandle(_, 64, 8) } ], [], [], []) ] as ops, TRVoid), _) ->
+            Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
+        | other -> failwithf "Expected opaque-handle direct boundary call to emit deferred BoundaryBufferCall, got: %A" other
 
     [<Fact>]
     let ``callbackHandleRepAt allows at most one settled optional wrapper and rejects double wrapping`` () =

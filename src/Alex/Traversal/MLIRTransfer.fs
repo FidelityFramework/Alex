@@ -41,7 +41,7 @@ let transferWithCorrespondence
         | [], Some scope ->
             Result.Ok (operations, scope, List.rev accumulator.EmittedDefinitions, List.rev accumulator.WitnessEmissions)
         | [], None ->
-            Result.Error { Reason = "Transfer lacks its witness run scope"; Witnessed = operations }
+            Result.Error { Reason = "Transfer lacks its checked revision witness scope"; Witnessed = operations }
         | errors, _ ->
             Result.Error { Reason = errors |> List.map Diagnostic.format |> String.concat "\n"; Witnessed = operations }
 

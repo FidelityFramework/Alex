@@ -20,17 +20,23 @@ requested_project=${2:-${ALEX_ANALYZER_PROJECT:-$project}}
 [[ -f "$tool_dir/bin/Debug/net10.0/Alex.Analyzers.dll" ]] || { printf 'Analyzer assembly is not built.\n' >&2; exit 1; }
 receipt=${ALEX_ANALYZER_TRUTH_RECEIPT:-$repo_dir/artifacts/alex-analyzers-tests/latest-truth.sha256}
 [[ -f "$receipt" ]] && sha256sum --check --status "$receipt" || { printf 'Truth receipt is missing or does not bind current inputs.\n' >&2; exit 1; }
+truth_json_rows=$(grep -E '^[0-9a-f]{64}  .*/artifacts/alex-analyzers-tests/run\.[^/]+/truth\.json$' "$receipt" || true)
+[[ $(printf '%s\n' "$truth_json_rows" | sed '/^$/d' | wc -l) -eq 1 ]] || { printf 'Truth receipt does not bind truth.json.\n' >&2; exit 1; }
+truth_json_path=${truth_json_rows#*  }
+[[ -f "$truth_json_path" ]] && jq -e '(.executed | type == "number" and . >= 302) and (.cases | type == "array") and ((.cases | length) == .executed)' "$truth_json_path" > /dev/null 2>&1 || { printf 'Truth receipt truth.json is missing or invalid.\n' >&2; exit 1; }
+inproject_receipt="$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256"
+[[ -f "$inproject_receipt" ]] && sha256sum --check --status "$inproject_receipt" || { printf 'In-project control receipt failed verification.\n' >&2; exit 1; }
 for required in "$tool_dir/bin/Debug/net10.0/Alex.Analyzers.dll" "$tool_dir/Analyzer.fs" "$tool_dir/tests/run.sh" "$tool_dir/.config/dotnet-tools.json" "$tool_dir/check-project.sh" "$tool_dir/ProjectInputs.fsx" "$tool_dir/VerifyProjectLog.fsx" "$tool_dir/Alex.Analyzers.fsproj" "$tool_dir/Directory.Packages.props" "$tool_dir/packages.lock.json" "$tool_dir/NuGet.Config" "$tool_dir/tests/ContractFixture/Contract.fs" "$tool_dir/tests/ContractFixture/ContractFixture.fsproj" "$tool_dir/tests/ContractFixture/bin/Debug/net10.0/Fidelity.PSG.dll" "$tool_dir/tests/ImpostorFixture/ImpostorFixture.fsproj" "$tool_dir/tests/ImpostorFixture/bin/Debug/net10.0/Unrelated.Contract.dll" "$tool_dir/tests/AlexFixture/Ensure.fs" "$tool_dir/tests/AlexFixture/AlexFixture.fsproj" "$tool_dir/tests/AlexFixture/bin/Debug/net10.0/Alex.dll"; do
   binding=$(sha256sum "$required")
-  rg -Fqx "$binding" "$receipt" || { printf 'Truth receipt does not bind %s.\n' "$required" >&2; exit 1; }
+  grep -Fqx "$binding" "$receipt" || { printf 'Truth receipt does not bind %s.\n' "$required" >&2; exit 1; }
 done
 for required in "$tool_dir/tests/StaleContract/Contract.fs" "$tool_dir/tests/StaleContract/StaleContract.fsproj" "$tool_dir/tests/StaleContract/bin/Debug/net10.0/Fidelity.PSG.dll" "$tool_dir/tests/AlexFixture/packages.lock.json" "$tool_dir/tests/InProject/InProject.fsproj" "$tool_dir/tests/InProject/Ensure.fs" "$tool_dir/tests/InProject/Cases.fs" "$tool_dir/tests/InProject/Dialects/Cases.fs" "$tool_dir/tests/InProject/Elements/Cases.fs" "$tool_dir/tests/InProject/Elements/CleanCases.fs" "$tool_dir/tests/InProject/Patterns/Cases.fs" "$tool_dir/tests/InProject/Witnesses/Cases.fs" "$tool_dir/tests/InProject/Traversal/Values.fs" "$tool_dir/tests/DependencyControls.fsx" "$tool_dir/tests/project-control.sh" "$tool_dir/analyze-alex.sh" "$repo_dir/artifacts/alex-analyzers-tests/inproject-control/truth.sha256"; do
   binding=$(sha256sum "$required")
-  rg -Fqx "$binding" "$receipt" || { printf 'Truth receipt does not bind %s.\n' "$required" >&2; exit 1; }
+  grep -Fqx "$binding" "$receipt" || { printf 'Truth receipt does not bind %s.\n' "$required" >&2; exit 1; }
 done
 for required in "$tool_dir/tests/AliasFixture/Aliases.fs" "$tool_dir/tests/AliasFixture/AliasFixture.fsproj" "$tool_dir/tests/AliasFixture/packages.lock.json" "$tool_dir/tests/AliasFixture/bin/Debug/net10.0/AliasFixture.dll"; do
   binding=$(sha256sum "$required")
-  rg -Fqx "$binding" "$receipt" || { printf 'Truth receipt does not bind %s.\n' "$required" >&2; exit 1; }
+  grep -Fqx "$binding" "$receipt" || { printf 'Truth receipt does not bind %s.\n' "$required" >&2; exit 1; }
 done
 mkdir -p "$repo_dir/artifacts/alex-analyzers-tests"
 scratch=$(mktemp -d "$repo_dir/artifacts/alex-analyzers-tests/project.XXXXXXXX")
