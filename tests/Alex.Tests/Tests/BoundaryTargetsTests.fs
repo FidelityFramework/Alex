@@ -137,7 +137,7 @@ let ``ALEX002 positive controls: CheckAlexBoundary accepts real symlinked repo p
             Assert.True((exitCode = 0), sprintf "Expected PASS for %s, got exit %d:\n%s" label exitCode output))
 
 [<Fact>]
-let ``ALEX002 design-time controls: DesignTimeBuild enforces ALEX002 unless SkipCompilerExecution is true`` () =
+let ``ALEX002 design-time controls: DesignTimeBuild enforces ALEX002 and the check stays active under SkipCompilerExecution`` () =
     withScratch (fun scratch ->
         let _, _, _, realForeign, linkRepos, _, _ = setupSymlinkTopology scratch
         let linkPsg = Path.Combine(linkRepos, "Fidelity.PSG", "src", "Fidelity.PSG", "Fidelity.PSG.fsproj")
@@ -155,7 +155,8 @@ let ``ALEX002 design-time controls: DesignTimeBuild enforces ALEX002 unless Skip
         Assert.True((enforcedExit <> 0), sprintf "Expected DesignTimeBuild=true without SkipCompilerExecution to fail with ALEX002, got exit 0:\n%s" enforcedOutput)
         Assert.Contains("error ALEX002:", enforcedOutput)
         Assert.Contains(refusalText, enforcedOutput)
-        // DesignTimeBuild=true WITH SkipCompilerExecution=true skips compilation and CheckAlexBoundary cleanly.
+        // DesignTimeBuild=true WITH SkipCompilerExecution=true: compilation is skipped, but the boundary task
+        // assembly already exists, so the check still runs and still refuses the unpermitted reference.
         let skippedExit, skippedOutput =
             runMsbuild scratch harness
                 [ "-target:CheckAlexBoundary"
@@ -164,8 +165,9 @@ let ``ALEX002 design-time controls: DesignTimeBuild enforces ALEX002 unless Skip
                   "-property:TestPermittedPrimary=" + linkPsg
                   "-property:TestPermittedLibrary=" + linkBareWire
                   "-property:TestRef=" + realForeign ]
-        Assert.True((skippedExit = 0), sprintf "Expected DesignTimeBuild=true with SkipCompilerExecution=true to skip cleanly, got exit %d:\n%s" skippedExit skippedOutput)
-        Assert.DoesNotContain("ALEX002", skippedOutput))
+        Assert.True((skippedExit <> 0), sprintf "Expected the boundary check to stay active with SkipCompilerExecution=true while the task assembly exists, got exit %d:\n%s" skippedExit skippedOutput)
+        Assert.Contains("error ALEX002:", skippedOutput)
+        Assert.Contains(refusalText, skippedOutput))
 
 [<Fact>]
 let ``ALEX002 exact-reason negative controls: unpermitted direct, symlinked, spoofed, and cyclic paths fail`` () =
@@ -236,3 +238,119 @@ let ``ALEX002 fault-injection control: disabling symlink canonicalization reject
         Assert.True(exitCode <> 0, sprintf "Expected fault-injected lexical task to fail with ALEX002, got exit 0:\n%s" output)
         Assert.Contains("error ALEX002:", output)
         Assert.Contains("Alex references the published PSG contract and the library the contract references. No other project is permitted.", output))
+
+let private taskAssemblyPath =
+    Path.Combine(repoRoot, "build", "Alex.Boundary.Tasks", "bin", "Debug", "net10.0", "Alex.Boundary.Tasks.dll")
+
+// Harness that supplies only a source probe: the source scans decide ALEX001, ALEX003 and ALEX004
+// from @(Compile), so no project reference is needed for them.
+let private writeScanHarness (targetsPath: string) (harnessDir: string) (source: string) =
+    File.WriteAllText(Path.Combine(harnessDir, "BoundaryProbe.fs"), source)
+    let harnessPath = Path.Combine(harnessDir, "ScanHarness.proj")
+    let escapedTargets = SecurityElement.Escape(targetsPath)
+    let xml =
+        sprintf
+            """<Project>
+  <PropertyGroup>
+    <AlexBoundaryScope>library</AlexBoundaryScope>
+  </PropertyGroup>
+  <Import Project="%s" />
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)BoundaryProbe.fs" />
+  </ItemGroup>
+  <Target Name="CoreCompile" />
+</Project>"""
+            escapedTargets
+    File.WriteAllText(harnessPath, xml)
+    harnessPath
+
+// Markers are assembled at run time so this test file never carries a boundary marker itself.
+let private cleanProbeSource = "module BoundaryProbe\nlet ok = 1\n"
+
+let private violatingProbeSource =
+    "module BoundaryProbe\n"
+    + "let service = " + "Clef" + "." + "Compiler.emit 1\n"
+    + "let pipeline = \"--pass-pipeline\"\n"
+    + "let emission = sprintf \"" + "llvm" + ".func\"\n"
+
+// A targets copy whose task assembly path deliberately does not exist, for the guard-necessity control.
+let private taskAssemblyAbsentTargets (targetsPath: string) (scratch: string) =
+    let needle = "<_AlexBoundaryTaskAssembly>$(MSBuildThisFileDirectory)Alex.Boundary.Tasks/bin/Debug/net10.0/Alex.Boundary.Tasks.dll</_AlexBoundaryTaskAssembly>"
+    let text = File.ReadAllText(targetsPath)
+    let mutated =
+        text.Replace(needle, "<_AlexBoundaryTaskAssembly>" + Path.Combine(scratch, "absent", "Alex.Boundary.Tasks.dll") + "</_AlexBoundaryTaskAssembly>")
+    Assert.True(mutated <> text, "Expected to relocate the boundary task assembly path in the fault targets copy.")
+    let path = Path.Combine(scratch, "Boundary.absent.targets")
+    File.WriteAllText(path, mutated)
+    path
+
+let private alex001Reason = "Alex reads a published PSG revision only. This line names the compiler service."
+let private alex003Reason = "Prohibited rewrite, process or plugin entry '--pass-pipeline'. Alex witnesses settled facts and emits once."
+let private alex004Reason = "LLVM dialect emission belongs to backend realization, never Alex portable output."
+
+[<Fact>]
+let ``ALEX001/003/004 source scans stay active under SkipCompilerExecution when the task assembly exists`` () =
+    withScratch (fun scratch ->
+        Assert.True(File.Exists(taskAssemblyPath), sprintf "Expected the built boundary task assembly at %s before the SkipCompilerExecution scan control." taskAssemblyPath)
+
+        // Positive control: a clean probe passes with compilation skipped.
+        let cleanHarness = writeScanHarness boundaryTargetsPath scratch cleanProbeSource
+        let cleanExit, cleanOutput =
+            runMsbuild scratch cleanHarness
+                [ "-target:CheckAlexBoundary"; "-property:SkipCompilerExecution=true" ]
+        Assert.True((cleanExit = 0), sprintf "Expected a clean probe to pass with SkipCompilerExecution=true, got exit %d:\n%s" cleanExit cleanOutput)
+        for code in [ "ALEX001"; "ALEX003"; "ALEX004" ] do
+            Assert.DoesNotContain("error " + code, cleanOutput)
+
+        // Exact-reason negative control: the same scan still catches every source violation.
+        let probeHarness = writeScanHarness boundaryTargetsPath scratch violatingProbeSource
+        let probeExit, probeOutput =
+            runMsbuild scratch probeHarness
+                [ "-target:CheckAlexBoundary"; "-property:SkipCompilerExecution=true" ]
+        Assert.True(probeExit <> 0, sprintf "Expected the source scan to run and fail with SkipCompilerExecution=true, got exit 0:\n%s" probeOutput)
+        Assert.Contains("error ALEX001: " + alex001Reason, probeOutput)
+        Assert.Contains("error ALEX003: " + alex003Reason, probeOutput)
+        Assert.Contains("error ALEX004: " + alex004Reason, probeOutput)
+
+        // Guard-necessity control: with the skip flag set and no task assembly present the target is skipped,
+        // so the very same violation escapes. The scan, not the flag, is what catches it.
+        let absentTargets = taskAssemblyAbsentTargets boundaryTargetsPath scratch
+        let absentHarness = writeScanHarness absentTargets scratch violatingProbeSource
+        let absentExit, absentOutput =
+            runMsbuild scratch absentHarness
+                [ "-target:CheckAlexBoundary"; "-property:SkipCompilerExecution=true" ]
+        Assert.True((absentExit = 0), sprintf "Expected the scan to be skipped when the task assembly is absent, got exit %d:\n%s" absentExit absentOutput)
+        for code in [ "ALEX001"; "ALEX003"; "ALEX004" ] do
+            Assert.DoesNotContain("error " + code, absentOutput))
+
+[<Fact>]
+let ``Fault-injection control: the scan executed under SkipCompilerExecution, it did not silently pass`` () =
+    withScratch (fun scratch ->
+        let faultDir = Path.Combine(scratch, "fault-build")
+        let faultTaskDir = Path.Combine(faultDir, "Alex.Boundary.Tasks")
+        Directory.CreateDirectory(faultTaskDir) |> ignore
+        File.Copy(taskProjectPath, Path.Combine(faultTaskDir, "Alex.Boundary.Tasks.csproj"))
+        let originalSource = File.ReadAllText(taskSourcePath)
+        let needle = "if (compilerService.IsMatch(line))"
+        Assert.True(originalSource.Contains(needle), "Expected the ALEX001 detector in the boundary task source.")
+        File.WriteAllText(
+            Path.Combine(faultTaskDir, "ValidateAlexBoundary.cs"),
+            originalSource.Replace(needle, "if (false && compilerService.IsMatch(line))"))
+        let faultTargets = Path.Combine(faultDir, "Boundary.targets")
+        File.Copy(boundaryTargetsPath, faultTargets)
+        let harness = writeScanHarness faultTargets scratch violatingProbeSource
+
+        // Build the fault-injected task, then run the scan with compilation skipped.
+        let buildExit, buildOutput = runMsbuild scratch harness [ "-target:CheckAlexBoundary" ]
+        Assert.True(buildExit <> 0, sprintf "Expected the fault-injected scan to fail, got exit 0:\n%s" buildOutput)
+        Assert.DoesNotContain("error ALEX001:", buildOutput)
+        Assert.Contains("error ALEX003: " + alex003Reason, buildOutput)
+        Assert.Contains("error ALEX004: " + alex004Reason, buildOutput)
+
+        let skipExit, skipOutput =
+            runMsbuild scratch harness
+                [ "-target:CheckAlexBoundary"; "-property:SkipCompilerExecution=true" ]
+        Assert.True(skipExit <> 0, sprintf "Expected the scan to run with SkipCompilerExecution=true, got exit 0:\n%s" skipOutput)
+        Assert.DoesNotContain("error ALEX001:", skipOutput)
+        Assert.Contains("error ALEX003: " + alex003Reason, skipOutput)
+        Assert.Contains("error ALEX004: " + alex004Reason, skipOutput))

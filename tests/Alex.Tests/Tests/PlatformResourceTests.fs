@@ -1,6 +1,7 @@
 module Alex.Tests.PlatformResourceTests
 
 open Xunit
+open System.IO
 open Fidelity.PSG
 open BAREWire.Descriptors
 open Alex.Dialects.Core.Types
@@ -974,14 +975,16 @@ module Schema53BoundaryWitnessing =
         match runBoundaryCallAt siteId validGraph with
         | Result.Ok(([ MLIROp.BoundaryBufferCall(NodeId 360, [ { Type = TOpaqueHandle _ } ], [], [], [ { Type = TMemRef(TInt(IntWidth 8)) } ]) ] as ops, TRValue _), _) ->
             match Alex.Patterns.PlatformPatterns.boundaryImportsAt declBinding validGraph.Emission.Boundary with
-            | Result.Ok([ MLIROp.ResourceImport _ ] as decls) ->
+            | Result.Ok([ MLIROp.ResourceImport imp ] as decls) ->
+                Assert.Equal(descId, imp.Identity)
                 Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None decls)
                 Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
             | other -> failwithf "Unexpected boundaryImportsAt result: %A" other
         | other -> failwithf "Unexpected BorrowedResultView positive result: %A" other
 
-        // Direct borrowed ResourceHandle argument (call.Resource.IsNone) returning i32 emits deferred
-        // BoundaryBufferCall paired with ResourceImport (Composer #220 / 8c9006b lower both to llvm.func + llvm.call).
+        // Direct borrowed ResourceHandle argument (call.Resource.IsNone) returning i32 emits a deferred
+        // BoundaryBufferCall paired with the published ResourceImport (Farscape #220, borrowed-handle
+        // descriptor surface). Both are portable middle-end ops; realization is the backend's business.
         let plainBorrowedCall = { callRow with Result = Some(BoundaryScalar.Integer(32, true)) }
         let plainBorrowedImport = { importRow with Symbol = "fixture_column_bytes"; Result = Some(BoundaryScalar.Integer(32, true)) }
         let plainBorrowedGraph =
@@ -1005,7 +1008,8 @@ module Schema53BoundaryWitnessing =
         match runBoundaryCallAt siteId plainBorrowedGraph with
         | Result.Ok(([ MLIROp.BoundaryBufferCall(NodeId 360, [ { Type = TOpaqueHandle(_, 64, 8) } ], [], [], [ { Type = TInt(IntWidth 32) } ]) ] as ops, TRValue _), _) ->
             match Alex.Patterns.PlatformPatterns.boundaryImportsAt declBinding plainBorrowedGraph.Emission.Boundary with
-            | Result.Ok([ MLIROp.ResourceImport _ ] as decls) ->
+            | Result.Ok([ MLIROp.ResourceImport imp ] as decls) ->
+                Assert.Equal(descId, imp.Identity)
                 Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None decls)
                 Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
             | other -> failwithf "Unexpected boundaryImportsAt result for plain borrowed ResourceHandle: %A" other
@@ -1050,7 +1054,15 @@ module Schema53BoundaryWitnessing =
                                 Imports = Map.ofList [ descId, scalarImport ]
                                 Calls = Map.ofList [ siteId, scalarCall ] } } }
         match runBoundaryCallAt siteId scalarGraph with
-        | Result.Ok(([ MLIROp.FuncOp(FuncOp.FuncCall([ { Type = TInt(IntWidth 32) } ], "fixture_column_bytes", [ { Type = TInt(IntWidth 64) } ])) ], TRValue _), _) -> ()
+        | Result.Ok(([ MLIROp.FuncOp(FuncOp.FuncCall([ { Type = TInt(IntWidth 32) } ], "fixture_column_bytes", [ { Type = TInt(IntWidth 64) } ])) ] as ops, TRValue _), _) ->
+            // The FuncCall route is only admissible together with the import identity it names.
+            match Alex.Patterns.PlatformPatterns.boundaryImportsAt declBinding scalarGraph.Emission.Boundary with
+            | Result.Ok([ MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(imp, _, _)) ] as decls) ->
+                Assert.Equal(descId, imp.Identity)
+                Assert.Equal("fixture_column_bytes", imp.Symbol)
+                Assert.Equal(1, decls.Length)
+                Assert.True((Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops |> Result.isOk), "Expected the admitted FuncCall to serialize.")
+            | other -> failwithf "Unexpected published imports beside the plain scalar FuncCall: %A" other
         | other -> failwithf "Unexpected plain scalar fault-injection result: %A" other
 
         // Negative control: mismatched handle identity on borrowed ResourceHandle must fail without widening
@@ -1892,6 +1904,28 @@ module Schema53BoundaryWitnessing =
             Assert.Equal(Result.Ok NeedsTargetRealization, Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops)
         | other -> failwithf "Unexpected direct pBoundaryCall result for callback-nested ResourceHandle: %A" other
 
+        // Indirect resource fault-injection control for the classification match in PlatformPatterns.fs.
+        // This call carries no buffer, borrowed result, absence contract, shared buffer or fixed sentinel, so
+        // the direct-signature guard above does not decide it: the (isPureWritable, isBoundaryBufferShape,
+        // isBoundaryBufferCall, call.Entry) match does, and the entry arm refuses a call whose entry names a
+        // transport that is not the callee it invokes.
+        let staleTransportGraph =
+            { graph with
+                Emission =
+                    { graph.Emission with
+                        Boundary =
+                            { graph.Emission.Boundary with
+                                Entries = Map.ofList [ entryFormId, { entryRow with Transport = Set.singleton (id 712) } ] } } }
+            |> declareTraversalReadings
+        let accStaleTransport = MLIRAccumulator.empty ()
+        MLIRAccumulator.bindNode cbArgId (Arg 0) (TFunc([ TOpaqueHandle(ptrHandleType, 64, 8) ], [])) accStaleTransport
+        match matchAt Alex.Patterns.PlatformPatterns.pBoundaryCall (focus staleTransportGraph staleTransportGraph.Nodes[siteId]) 64 accStaleTransport with
+        | Result.Error reason ->
+            Assert.Equal("Imported invocation differs from its source entry and pointer transport.", reason)
+            Assert.Empty accStaleTransport.AllOps
+            Assert.True((MLIRAccumulator.recallNode siteId accStaleTransport).IsNone)
+        | Result.Ok other -> failwithf "Admitted indirect callback call with a stale entry transport: %A" other
+
         // Fault-injection control: adding a boundary-buffer shape (FixedSentinels) on the indirect callback call
         // routes to the boundary-buffer direct-signature refusal rather than the resource-bearing indirect refusal.
         let fixedSentinelCbGraph =
@@ -1910,6 +1944,25 @@ module Schema53BoundaryWitnessing =
         | Result.Error reason ->
             Assert.Equal("Boundary buffer, borrowed-handle, and borrowed-view calls require their exact direct signature and complete ordered actuals.", reason)
         | Result.Ok other -> failwithf "Admitted indirect fixed-sentinel callback call: %A" other
+
+    [<Fact>]
+    let ``Boundary call classification arms are structurally exhaustive without the isBoundaryBufferCall invariant`` () =
+        // Defect-sensitivity control for Alex #69 item 1: exhaustiveness of the boundary classification match
+        // must be carried by its own arms, not by the external invariant
+        // isBoundaryBufferCall = isBoundaryBufferShape || hasOpaqueHandle.
+        let patternPath = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../../src/Alex/Patterns/PlatformPatterns.fs"))
+        let text = File.ReadAllText patternPath
+        Assert.True(text.Contains "match isPureWritable, isBoundaryBufferShape, isBoundaryBufferCall, call.Entry with",
+                   "Expected the boundary call classification match in PlatformPatterns.fs.")
+        // Every remaining (isPureWritable = false) combination of the two buffer flags and the entry option is matched.
+        for arm in
+            [ "| false, true, _, None"
+              "| false, false, true, None ->"
+              "| false, true, _, Some _"
+              "| false, false, false, None ->"
+              "| false, false, _, Some formation ->" ] do
+            Assert.True(text.Contains arm, sprintf "Missing boundary classification arm: %s" arm)
+        Assert.False(text.Contains "| false, _, true, None ->", "The invariant-dependent arm | false, _, true, None -> is back.")
 
     [<Fact>]
     let ``callbackHandleRepAt allows at most one settled optional wrapper and rejects double wrapping`` () =

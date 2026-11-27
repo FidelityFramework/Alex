@@ -10,6 +10,10 @@
              plugin. The tests start the MLIR verifier and are exempt from the process rule.
     ALEX004  A library emission spells an LLVM dialect type or operation. Target
              realization belongs to the selected backend, never the middle end.
+
+    The source scans run whenever the boundary task assembly is present. Skipping the
+    compile (SkipCompilerExecution='true') stops the task from being built, it does not
+    stop the boundary from being checked.
   -->
   <PropertyGroup>
     <_AlexBoundaryTaskProject>$(MSBuildThisFileDirectory)Alex.Boundary.Tasks/Alex.Boundary.Tasks.csproj</_AlexBoundaryTaskProject>
@@ -33,7 +37,7 @@
   </Target>
   <Target Name="CheckAlexBoundary"
           BeforeTargets="CoreCompile"
-          Condition="'$(SkipCompilerExecution)' != 'true'">
+          Condition="'$(SkipCompilerExecution)' != 'true' Or Exists('$(_AlexBoundaryTaskAssembly)')">
     <ValidateAlexBoundary Sources="@(Compile)"
                           ProjectReferences="@(ProjectReference)"
                           Permitted="$(AlexBoundaryPermitted)"

@@ -828,7 +828,8 @@ let pBoundaryCall : PSGParser<MLIROp list * TransferResult> =
                         preturn (WritableBufferCall(call.Site, values, List.tryHead results))
                     | true, _, _, Some _ ->
                         fail (Message "Writable byte calls require their exact direct source invocation.")
-                    | false, _, true, None ->
+                    | false, true, _, None
+                    | false, false, true, None ->
                         preturn (BoundaryBufferCall(call.Site, values, slots, absenceSlots, results))
                     | false, true, _, Some _ ->
                         fail (Message "Boundary buffer and borrowed-view calls require their exact direct source invocation.")
