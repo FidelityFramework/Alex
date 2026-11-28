@@ -583,26 +583,56 @@ let private analyzeShared (context: CliContext) = async {
         match (v :> FSharpSymbol).DeclarationLocation with
         | Some loc -> v.DisplayName, loc.StartLine, loc.StartColumn
         | None -> v.DisplayName, 0, 0
-      let rec exprHoldsMutableState (cleanLocals: Set<string * int * int>) (depth: int) (expr: FSharpExpr) : Result<bool, string> =
+      let exprReferencesAny (targets: Set<string * int * int>) (root: FSharpExpr) : bool =
+        if targets.IsEmpty then false
+        else
+          let rec loop (stack: FSharpExpr list) =
+            match stack with
+            | [] -> false
+            | current :: rest ->
+              match current with
+              | FSharpExprPatterns.Value v when targets.Contains (bindingKey v) -> true
+              | FSharpExprPatterns.ValueSet(v, _) when targets.Contains (bindingKey v) -> true
+              | FSharpExprPatterns.ObjectExpr(_, baseCall, overrides, interfaceImpls) ->
+                let bodies =
+                  baseCall
+                  :: (overrides |> List.map (fun ov -> ov.Body))
+                  @ (interfaceImpls |> List.collect (fun (_, ovs) -> ovs |> List.map (fun ov -> ov.Body)))
+                loop (bodies @ rest)
+              | _ ->
+                let children = current.ImmediateSubExpressions |> Seq.toList
+                loop (children @ rest)
+          loop [ root ]
+      let rec exprHoldsMutableState (cleanLocals: Set<string * int * int>) (dirtyLocals: Set<string * int * int>) (depth: int) (expr: FSharpExpr) : Result<bool, string> =
         if depth > 32 then Error (sprintf "expression step %d exceeded the mutable-state inspection limit" depth)
         else
           match expr with
           | FSharpExprPatterns.Const(_, typ) ->
             if typ.IsArrayType then Ok true else Ok false
-          | FSharpExprPatterns.Lambda _ -> Ok false
+          | FSharpExprPatterns.Lambda _ -> Ok (exprReferencesAny dirtyLocals expr)
           | FSharpExprPatterns.TypeLambda(_, bodyExpr) ->
-            exprHoldsMutableState cleanLocals (depth + 1) bodyExpr
+            exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) bodyExpr
           | FSharpExprPatterns.Value v ->
-            if cleanLocals.Contains (bindingKey v) then Ok false
+            let key = bindingKey v
+            if dirtyLocals.Contains key then Ok true
+            elif cleanLocals.Contains key then Ok false
             else inspectMutableState Set.empty Map.empty 0 v.FullType
           | FSharpExprPatterns.Coerce(_, inner) ->
-            exprHoldsMutableState cleanLocals (depth + 1) inner
+            exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) inner
+          | FSharpExprPatterns.TupleGet(_, _, inner)
+          | FSharpExprPatterns.FSharpFieldGet(Some inner, _, _)
+          | FSharpExprPatterns.UnionCaseGet(inner, _, _, _)
+          | FSharpExprPatterns.AnonRecordGet(inner, _, _) ->
+            match inspectMutableState Set.empty Map.empty 0 expr.Type with
+            | Error reason -> Error reason
+            | Ok true -> Ok true
+            | Ok false -> exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) inner
           | FSharpExprPatterns.NewArray _ -> Ok true
           | FSharpExprPatterns.NewObject(_, _, args) ->
             match inspectMutableState Set.empty Map.empty 0 expr.Type with
             | Error reason -> Error reason
             | Ok true -> Ok true
-            | Ok false -> checkSeq args (exprHoldsMutableState cleanLocals (depth + 1))
+            | Ok false -> checkSeq args (exprHoldsMutableState cleanLocals dirtyLocals (depth + 1))
           | FSharpExprPatterns.NewRecord(recordType, args) ->
             match resolve 0 Map.empty recordType with
             | Error reason -> Error reason
@@ -611,45 +641,59 @@ let private analyzeShared (context: CliContext) = async {
                 resolved.HasTypeDefinition &&
                 resolved.TypeDefinition.FSharpFields |> Seq.exists (fun f -> f.IsMutable)
               if hasMutableField then Ok true
-              else checkSeq args (exprHoldsMutableState cleanLocals (depth + 1))
+              else checkSeq args (exprHoldsMutableState cleanLocals dirtyLocals (depth + 1))
           | FSharpExprPatterns.NewUnionCase(_, _, args)
           | FSharpExprPatterns.NewAnonRecord(_, args)
           | FSharpExprPatterns.NewTuple(_, args) ->
-            checkSeq args (exprHoldsMutableState cleanLocals (depth + 1))
+            checkSeq args (exprHoldsMutableState cleanLocals dirtyLocals (depth + 1))
           | FSharpExprPatterns.Let((boundVar, boundExpr, _), bodyExpr) ->
             if boundVar.IsMutable then Ok true
             else
-              match exprHoldsMutableState cleanLocals (depth + 1) boundExpr with
+              match exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) boundExpr with
               | Error reason -> Error reason
               | Ok true -> Ok true
               | Ok false ->
                 let cleanLocals' = cleanLocals.Add (bindingKey boundVar)
-                exprHoldsMutableState cleanLocals' (depth + 1) bodyExpr
+                exprHoldsMutableState cleanLocals' dirtyLocals (depth + 1) bodyExpr
           | FSharpExprPatterns.LetRec(bindings, bodyExpr) ->
             match checkSeq bindings (fun (boundVar: FSharpMemberOrFunctionOrValue, boundExpr, _) ->
                     if boundVar.IsMutable then Ok true
-                    else exprHoldsMutableState cleanLocals (depth + 1) boundExpr) with
+                    else exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) boundExpr) with
             | Error reason -> Error reason
             | Ok true -> Ok true
             | Ok false ->
               let cleanLocals' =
                 bindings
                 |> List.fold (fun acc (v, _, _) -> Set.add (bindingKey v) acc) cleanLocals
-              exprHoldsMutableState cleanLocals' (depth + 1) bodyExpr
+              exprHoldsMutableState cleanLocals' dirtyLocals (depth + 1) bodyExpr
           | FSharpExprPatterns.Sequential(first, second) ->
-            match exprHoldsMutableState cleanLocals (depth + 1) first with
+            match exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) first with
             | Error reason -> Error reason
             | Ok true -> Ok true
-            | Ok false -> exprHoldsMutableState cleanLocals (depth + 1) second
+            | Ok false -> exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) second
           | FSharpExprPatterns.IfThenElse(_, thenExpr, elseExpr) ->
-            match exprHoldsMutableState cleanLocals (depth + 1) thenExpr with
+            match exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) thenExpr with
             | Error reason -> Error reason
             | Ok true -> Ok true
-            | Ok false -> exprHoldsMutableState cleanLocals (depth + 1) elseExpr
+            | Ok false -> exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) elseExpr
           | FSharpExprPatterns.DecisionTree(_, targets) ->
-            checkSeq targets (fun (_, targetExpr) -> exprHoldsMutableState cleanLocals (depth + 1) targetExpr)
+            checkSeq targets (fun (_, targetExpr) -> exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) targetExpr)
           | FSharpExprPatterns.ObjectExpr(_, baseCall, _, _) ->
-            exprHoldsMutableState cleanLocals (depth + 1) baseCall
+            match exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) baseCall with
+            | Error reason -> Error reason
+            | Ok true -> Ok true
+            | Ok false -> Ok (exprReferencesAny dirtyLocals expr)
+          | FSharpExprPatterns.Application(funcExpr, _, args) ->
+            match inspectMutableState Set.empty Map.empty 0 expr.Type with
+            | Error reason -> Error reason
+            | Ok true -> Ok true
+            | Ok false ->
+              match exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) funcExpr with
+              | Error reason -> Error reason
+              | Ok true -> Ok true
+              | Ok false -> checkSeq args (exprHoldsMutableState cleanLocals dirtyLocals (depth + 1))
+          | FSharpExprPatterns.TryFinally(bodyExpr, _, _, _) ->
+            exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) bodyExpr
           | FSharpExprPatterns.Call(objOpt, _, _, _, args) ->
             match inspectMutableState Set.empty Map.empty 0 expr.Type with
             | Error reason -> Error reason
@@ -657,12 +701,12 @@ let private analyzeShared (context: CliContext) = async {
             | Ok false ->
               let objCheck =
                 match objOpt with
-                | Some objExpr -> exprHoldsMutableState cleanLocals (depth + 1) objExpr
+                | Some objExpr -> exprHoldsMutableState cleanLocals dirtyLocals (depth + 1) objExpr
                 | None -> Ok false
               match objCheck with
               | Error reason -> Error reason
               | Ok true -> Ok true
-              | Ok false -> checkSeq args (exprHoldsMutableState cleanLocals (depth + 1))
+              | Ok false -> checkSeq args (exprHoldsMutableState cleanLocals dirtyLocals (depth + 1))
           | _ -> inspectMutableState Set.empty Map.empty 0 expr.Type
       let nominal (resolved: FSharpType) =
         if resolved.HasTypeDefinition then
@@ -687,7 +731,6 @@ let private analyzeShared (context: CliContext) = async {
                 | Ok fieldDeclared ->
                   let fieldCheck =
                     if field.IsMutable then Ok true
-                    elif fieldDeclared.IsFunctionType then Ok false
                     else inspectMutableState Set.empty Map.empty 0 fieldDeclared
                   match fieldCheck with
                   | Error reason ->
@@ -719,6 +762,126 @@ let private analyzeShared (context: CliContext) = async {
                       Fixes = []
                     }
           rejectModuleCaches nested
+        | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(value, _, body)
+            when value.CompiledName = ".cctor" &&
+                 not value.IsInstanceMember &&
+                 (value.DeclaringEntity |> Option.exists (fun scope -> not scope.IsFSharpModule && scope.IsFSharp)) ->
+          let rec inspectStaticInitializer (cleanLocals: Set<string * int * int>) (dirtyLocals: Set<string * int * int>) (depth: int) (expr: FSharpExpr) =
+            if depth > 32 then
+              diagnostics.Add {
+                Type = "Alex analysis incomplete"
+                Message = sprintf "Cannot inspect static initializer for '%s': expression step %d exceeded the mutable-state inspection limit" value.DisplayName depth
+                Code = "AXA000"
+                Severity = Severity.Error
+                Range = value.DeclarationLocation
+                Fixes = []
+              }
+            else
+              match expr with
+              | FSharpExprPatterns.FSharpFieldSet(None, _, field, rhs)
+                  when field.IsStatic && not (field.IsCompilerGenerated && field.Name.StartsWith("init@", System.StringComparison.Ordinal)) ->
+                let entityName =
+                  field.DeclaringEntity
+                  |> Option.map (fun e -> e.DisplayName)
+                  |> Option.defaultValue "<type>"
+                match resolve 0 Map.empty field.FieldType with
+                | Error reason ->
+                  diagnostics.Add {
+                    Type = "Alex analysis incomplete"
+                    Message = sprintf "Cannot inspect static field '%s' on '%s' for mutable state: %s" field.Name entityName reason
+                    Code = "AXA000"
+                    Severity = Severity.Error
+                    Range = field.DeclarationLocation
+                    Fixes = []
+                  }
+                | Ok fieldDeclared ->
+                  match exprHoldsMutableState cleanLocals dirtyLocals 0 rhs with
+                  | Error reason ->
+                    diagnostics.Add {
+                      Type = "Alex analysis incomplete"
+                      Message = sprintf "Cannot inspect static field '%s' on '%s' for mutable state: %s" field.Name entityName reason
+                      Code = "AXA000"
+                      Severity = Severity.Error
+                      Range = field.DeclarationLocation
+                      Fixes = []
+                    }
+                  | Ok false -> ()
+                  | Ok true ->
+                    let typeDesc =
+                      if fieldDeclared.IsArrayType then "System.Array"
+                      else
+                        fieldDeclared
+                        |> nominal
+                        |> Option.map (fun (accessPath, compiledName) ->
+                          if System.String.IsNullOrEmpty accessPath then compiledName
+                          else sprintf "%s.%s" accessPath compiledName)
+                        |> Option.defaultValue (fieldDeclared.ToString())
+                    diagnostics.Add {
+                      Type = "Alex pure-core boundary"
+                      Message = sprintf "Alex production code must not hold type-static mutable state or ref cells: %s (field '%s.%s')." typeDesc entityName field.Name
+                      Code = "AXC010"
+                      Severity = Severity.Error
+                      Range = field.DeclarationLocation
+                      Fixes = []
+                    }
+              | FSharpExprPatterns.Sequential(first, second) ->
+                inspectStaticInitializer cleanLocals dirtyLocals (depth + 1) first
+                inspectStaticInitializer cleanLocals dirtyLocals (depth + 1) second
+              | FSharpExprPatterns.Let((boundVar, boundExpr, _), bodyExpr) ->
+                match if boundVar.IsMutable then Ok true else exprHoldsMutableState cleanLocals dirtyLocals 0 boundExpr with
+                | Error reason ->
+                  diagnostics.Add {
+                    Type = "Alex analysis incomplete"
+                    Message = sprintf "Cannot inspect static initializer local '%s': %s" boundVar.DisplayName reason
+                    Code = "AXA000"
+                    Severity = Severity.Error
+                    Range = boundVar.DeclarationLocation
+                    Fixes = []
+                  }
+                | Ok true ->
+                  let key = bindingKey boundVar
+                  inspectStaticInitializer (cleanLocals.Remove key) (dirtyLocals.Add key) (depth + 1) bodyExpr
+                | Ok false ->
+                  let key = bindingKey boundVar
+                  inspectStaticInitializer (cleanLocals.Add key) (dirtyLocals.Remove key) (depth + 1) bodyExpr
+              | FSharpExprPatterns.LetRec(bindings, bodyExpr) ->
+                let cleanLocals', dirtyLocals', hadError =
+                  bindings
+                  |> List.fold (fun (cleanAcc, dirtyAcc, errAcc) (v, e, _) ->
+                    match if v.IsMutable then Ok true else exprHoldsMutableState cleanLocals dirtyLocals 0 e with
+                    | Error reason ->
+                      diagnostics.Add {
+                        Type = "Alex analysis incomplete"
+                        Message = sprintf "Cannot inspect static initializer local '%s': %s" v.DisplayName reason
+                        Code = "AXA000"
+                        Severity = Severity.Error
+                        Range = v.DeclarationLocation
+                        Fixes = []
+                      }
+                      cleanAcc, dirtyAcc, true
+                    | Ok true ->
+                      let key = bindingKey v
+                      Set.remove key cleanAcc, Set.add key dirtyAcc, errAcc
+                    | Ok false ->
+                      let key = bindingKey v
+                      Set.add key cleanAcc, Set.remove key dirtyAcc, errAcc) (cleanLocals, dirtyLocals, false)
+                if not hadError then
+                  inspectStaticInitializer cleanLocals' dirtyLocals' (depth + 1) bodyExpr
+              | FSharpExprPatterns.IfThenElse(_, thenExpr, elseExpr) ->
+                inspectStaticInitializer cleanLocals dirtyLocals (depth + 1) thenExpr
+                inspectStaticInitializer cleanLocals dirtyLocals (depth + 1) elseExpr
+              | FSharpExprPatterns.DecisionTree(_, targets) ->
+                for (_, targetExpr) in targets do
+                  inspectStaticInitializer cleanLocals dirtyLocals (depth + 1) targetExpr
+              | FSharpExprPatterns.TryFinally(tryExpr, _, _, _) ->
+                inspectStaticInitializer cleanLocals dirtyLocals (depth + 1) tryExpr
+              | FSharpExprPatterns.TryWith(tryExpr, _, _, _, catchExpr, _, _) ->
+                inspectStaticInitializer cleanLocals dirtyLocals (depth + 1) tryExpr
+                inspectStaticInitializer cleanLocals dirtyLocals (depth + 1) catchExpr
+              | FSharpExprPatterns.Coerce(_, inner) ->
+                inspectStaticInitializer cleanLocals dirtyLocals (depth + 1) inner
+              | _ -> ()
+          inspectStaticInitializer Set.empty Set.empty 0 body
         | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(value, argGroups, body)
             when (not value.IsMember && (value.DeclaringEntity |> Option.exists (fun scope -> scope.IsFSharpModule))) ||
                  (not value.IsInstanceMember && not value.IsConstructor && not value.IsImplicitConstructor &&
@@ -737,7 +900,7 @@ let private analyzeShared (context: CliContext) = async {
             let stateCheck =
               if value.IsMutable then Ok true
               elif not argGroups.IsEmpty then Ok false
-              else exprHoldsMutableState Set.empty 0 body
+              else exprHoldsMutableState Set.empty Set.empty 0 body
             match stateCheck with
             | Error reason ->
               diagnostics.Add {

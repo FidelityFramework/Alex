@@ -126,6 +126,72 @@ printf 'type Counter() =\n  static let mutable count = 0\n  static member Next (
 printf 'type Counter() =\n  static member val Count = 0 with get, set\n' > "$scratch/cache-module-static-prop.fsx"
 printf 'type Counter() =\n  static let cell = ref 0\n  static member Peek () = cell.Value\n' > "$scratch/cache-module-static-ref.fsx"
 printf 'type Counter() =\n  static let zero = 0\n  static member val Constant = 1\n  static member Read () = zero\nlet instance = Counter()\n' > "$scratch/cache-module-static-immutable.fsx"
+cat > "$scratch/cache-module-static-closure-ref.fsx" <<'FS'
+type Counter() =
+  static let next =
+    let n = ref 0L
+    fun () -> n.Value <- n.Value + 1L; n.Value
+  static member Next () = next ()
+FS
+cat > "$scratch/cache-module-static-prop-closure-ref.fsx" <<'FS'
+type Counter() =
+  static member val Next =
+    let n = ref 0L
+    fun () -> n.Value <- n.Value + 1L; n.Value
+FS
+cat > "$scratch/cache-module-static-pure-fn.fsx" <<'FS'
+type Counter() =
+  static let pureAdd = fun (x: int) -> x + 1
+  static member val PureAdd = fun (x: int) -> x + 1
+  static member Apply x = pureAdd x
+FS
+cat > "$scratch/cache-module-static-tuple-closure-ref.fsx" <<'FS'
+type Counter() =
+  static let next, reset = let n = ref 0 in (fun () -> n.Value), (fun () -> n.Value <- 0)
+  static member N () = next ()
+  static member R () = reset ()
+FS
+cat > "$scratch/cache-module-static-tuple-pure.fsx" <<'FS'
+type Counter() =
+  static let inc, dec = let k = 1 in (fun x -> x + k), (fun x -> x - k)
+  static member Inc x = inc x
+  static member Dec x = dec x
+FS
+cat > "$scratch/cache-module-static-cctor-objexpr-ref.fsx" <<'FS'
+type ICounter = abstract Next: unit -> int
+type Counter() =
+  static let n = ref 0
+  static member val Shared : ICounter = { new ICounter with member _.Next() = n.Value <- n.Value + 1; n.Value }
+FS
+cat > "$scratch/cache-module-static-cctor-objexpr-pure.fsx" <<'FS'
+type ICounter = abstract Next: unit -> int
+type Counter() =
+  static let k = 1
+  static member val Shared : ICounter = { new ICounter with member _.Next() = k }
+FS
+cat > "$scratch/cache-module-static-cctor-id-lambda-ref.fsx" <<'FS'
+type Counter() =
+  static let n = ref 0
+  static let next = id (fun () -> n.Value <- n.Value + 1; n.Value)
+  static member Next () = next ()
+FS
+cat > "$scratch/cache-module-static-cctor-id-lambda-pure.fsx" <<'FS'
+type Counter() =
+  static let k = 1
+  static let next = id (fun () -> k)
+  static member Next () = next ()
+FS
+printf 'let next = (fun (n: int ref) () -> n.Value <- n.Value + 1; n.Value) (ref 0)\n' > "$scratch/cache-module-inline-app-ref.fsx"
+printf 'let addOne = (fun (k: int) (x: int) -> k + x) 1\n' > "$scratch/cache-module-inline-app-pure.fsx"
+printf 'let next = try (let n = ref 0 in fun () -> n.Value <- n.Value + 1; n.Value) finally ()\n' > "$scratch/cache-module-tryfinally-ref.fsx"
+printf 'let pureFn = try (let k = 1 in fun () -> k) finally ()\n' > "$scratch/cache-module-tryfinally-pure.fsx"
+cat > "$scratch/cache-module-app-mutable-return.fsx" <<'FS'
+type Box() =
+  let cell = ref 0
+  member _.Peek() = cell.Value
+let make = fun () -> Box()
+let shared = make ()
+FS
 printf 'let handlers: Map<string, int ref -> int> = Map.empty\n' > "$scratch/cache-module-map-fn-ref.fsx"
 printf 'let nextId =\n  let n = ref 0L\n  fun () -> n.Value <- n.Value + 1L; n.Value\n' > "$scratch/cache-module-closure-ref.fsx"
 printf 'let private nextRunId = ref 0L\n' > "$scratch/cache-module-nextrunid.fsx"
@@ -351,6 +417,13 @@ run_case() {
       count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
       [[ $count -eq $required ]]
       ;;
+    AXC010-static-pair)
+      [[ $rc -ne 0 ]] || { printf 'FAIL %s %s exited clean\n' "$name" "$expected" >&2; return 1; }
+      count=$(grep -Ec 'Error AX[AC][0-9]+' "$scratch/$name.log" || true)
+      [[ $count -eq 2 ]] || { printf 'FAIL %s diagnostic count (exit %s; log %s)\n' "$name" "$rc" "$scratch/$name.log" >&2; return 1; }
+      grep -Fq "$scratch/$name.fsx(2,13): Error AXC010 : Alex production code must not hold type-static mutable state or ref cells: type Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int (field 'Counter.next')." "$scratch/$name.log" || { printf 'FAIL %s missing Counter.next at 2,13 (log %s)\n' "$name" "$scratch/$name.log" >&2; return 1; }
+      grep -Fq "$scratch/$name.fsx(2,19): Error AXC010 : Alex production code must not hold type-static mutable state or ref cells: type Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.unit (field 'Counter.reset')." "$scratch/$name.log" || { printf 'FAIL %s missing Counter.reset at 2,19 (log %s)\n' "$name" "$scratch/$name.log" >&2; return 1; }
+      ;;
     AXC011)
       local reason=$object_positions required=0
       [[ $rc -ne 0 ]] || { printf 'FAIL %s %s exited clean\n' "$name" "$expected" >&2; return 1; }
@@ -543,6 +616,20 @@ run_case cache-module-static-mutable AXC010-static '2,21' "System.Int32 (field '
 run_case cache-module-static-prop AXC010-static '2,28' "System.Int32 (field 'Counter.Count@')."
 run_case cache-module-static-ref AXC010-static '2,13' "Microsoft.FSharp.Core.FSharpRef\`1 (field 'Counter.cell')."
 run_case cache-module-static-immutable clean
+run_case cache-module-static-closure-ref AXC010-static '2,13' "type Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int64 (field 'Counter.next')."
+run_case cache-module-static-prop-closure-ref AXC010-static '3,4' "type Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int64 (field 'Counter.Next@')."
+run_case cache-module-static-pure-fn clean
+run_case cache-module-static-tuple-closure-ref AXC010-static-pair
+run_case cache-module-static-tuple-pure clean
+run_case cache-module-static-cctor-objexpr-ref AXC010-static '4,40' "Cache-module-static-cctor-objexpr-ref.ICounter (field 'Counter.Shared@')."
+run_case cache-module-static-cctor-objexpr-pure clean
+run_case cache-module-static-cctor-id-lambda-ref AXC010-static '3,13' "type Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int (field 'Counter.next')."
+run_case cache-module-static-cctor-id-lambda-pure clean
+run_case cache-module-inline-app-ref AXC010-any '1,4' "type Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int (binding 'next')."
+run_case cache-module-inline-app-pure clean
+run_case cache-module-tryfinally-ref AXC010-any '1,4' "type Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int (binding 'next')."
+run_case cache-module-tryfinally-pure clean
+run_case cache-module-app-mutable-return AXC010-any '5,4' "Cache-module-app-mutable-return.Box (binding 'shared')."
 run_case cache-module-map-fn-ref clean
 run_case cache-module-closure-ref AXC010-any '1,4' "type Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int64 (binding 'nextId')."
 run_case cache-module-nextrunid AXC010-any '1,12' "Microsoft.FSharp.Core.FSharpRef\`1 (binding 'nextRunId')."
@@ -838,7 +925,7 @@ run_case src/Alex/Controls/Axc011DictionaryLookalike AXC002 '1,10'
 run_case src/Alex/Controls/Axc011ClassAndObjectExpr AXC011 '3,2 5,52' "Alex must not introduce legacy mutable state: let mutable in 'Controls/Axc011ClassAndObjectExpr.fsx' is outside the checked-in ratchet."
 [[ $executed -gt 0 ]] || { printf 'No truth case matched.\n' >&2; exit 1; }
 if [[ -z ${ALEX_ANALYZER_ONLY:-} ]]; then
-  [[ $executed -eq 302 ]] || { printf 'Expected 302 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
+  [[ $executed -eq 316 ]] || { printf 'Expected 316 registered cases, ran %s.\n' "$executed" >&2; exit 1; }
   printf '{"executed":%s,"cases":[' "$executed" > "$scratch/truth.json"
   separator=''
   for case_name in "${cases[@]}"; do printf '%s"%s"' "$separator" "$case_name" >> "$scratch/truth.json"; separator=','; done

@@ -4,6 +4,8 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Security
+open System.Text.Json
+open System.Xml.Linq
 open Xunit
 
 let private repoRoot =
@@ -264,7 +266,9 @@ let private writeScanHarness (targetsPath: string) (harnessDir: string) (source:
     File.WriteAllText(harnessPath, xml)
     harnessPath
 
-// Markers are assembled at run time so this test file never carries a boundary marker itself.
+// Compiler-service and LLVM-dialect probe strings are split across literals so this test file
+// does not trigger ALEX001 (active in tests scope) or embed raw LLVM emission syntax;
+// "--pass-pipeline" is a process marker permitted in tests scope.
 let private cleanProbeSource = "module BoundaryProbe\nlet ok = 1\n"
 
 let private violatingProbeSource =
@@ -313,13 +317,14 @@ let ``ALEX001/003/004 source scans stay active under SkipCompilerExecution when 
         Assert.Contains("error ALEX004: " + alex004Reason, probeOutput)
 
         // Guard-necessity control: with the skip flag set and no task assembly present the target is skipped,
-        // so the very same violation escapes. The scan, not the flag, is what catches it.
+        // a high-importance message records the skip, and the violation is not checked.
         let absentTargets = taskAssemblyAbsentTargets boundaryTargetsPath scratch
         let absentHarness = writeScanHarness absentTargets scratch violatingProbeSource
         let absentExit, absentOutput =
             runMsbuild scratch absentHarness
                 [ "-target:CheckAlexBoundary"; "-property:SkipCompilerExecution=true" ]
         Assert.True((absentExit = 0), sprintf "Expected the scan to be skipped when the task assembly is absent, got exit %d:\n%s" absentExit absentOutput)
+        Assert.Contains("Alex boundary check (ALEX001-ALEX004) skipped: SkipCompilerExecution=true and boundary task assembly", absentOutput)
         for code in [ "ALEX001"; "ALEX003"; "ALEX004" ] do
             Assert.DoesNotContain("error " + code, absentOutput))
 
@@ -354,3 +359,323 @@ let ``Fault-injection control: the scan executed under SkipCompilerExecution, it
         Assert.DoesNotContain("error ALEX001:", skipOutput)
         Assert.Contains("error ALEX003: " + alex003Reason, skipOutput)
         Assert.Contains("error ALEX004: " + alex004Reason, skipOutput))
+
+let private alexProjectPath =
+    Path.Combine(repoRoot, "src", "Alex", "Alex.fsproj")
+
+let private alexTestsProjectPath =
+    Path.Combine(repoRoot, "tests", "Alex.Tests", "Alex.Tests.fsproj")
+
+let private copyBoundaryBuildTree (destDir: string) =
+    let taskDir = Path.Combine(destDir, "Alex.Boundary.Tasks")
+    Directory.CreateDirectory(taskDir) |> ignore
+    let destTargets = Path.Combine(destDir, "Boundary.targets")
+    let destCsproj = Path.Combine(taskDir, "Alex.Boundary.Tasks.csproj")
+    let destSource = Path.Combine(taskDir, "ValidateAlexBoundary.cs")
+    let destDll = Path.Combine(taskDir, "bin", "Debug", "net10.0", "Alex.Boundary.Tasks.dll")
+    File.Copy(boundaryTargetsPath, destTargets)
+    File.Copy(taskProjectPath, destCsproj)
+    File.Copy(taskSourcePath, destSource)
+    destTargets, destCsproj, destSource, destDll
+
+let private splitSemicolon (raw: string) =
+    raw.Split(';', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+
+let private attrValue (name: string) (el: XElement) =
+    match el.Attribute(XName.Get name) with
+    | null -> ""
+    | a -> a.Value
+
+[<Fact>]
+let ``Nested MSBuild isolation and reentry guard isolate Alex.Boundary.Tasks from outer build properties`` () =
+    // Structural XML check on Boundary.targets and Alex.Boundary.Tasks.csproj.
+    let targetsDoc = XDocument.Load(boundaryTargetsPath)
+    let buildTaskTarget =
+        targetsDoc.Descendants()
+        |> Seq.filter (fun el -> el.Name.LocalName = "Target" && attrValue "Name" el = "BuildAlexBoundaryTask")
+        |> Seq.exactlyOne
+    let nestedCalls =
+        buildTaskTarget.Elements()
+        |> Seq.filter (fun el -> el.Name.LocalName = "MSBuild")
+        |> Seq.toList
+    Assert.Equal(2, nestedCalls.Length)
+    let requiredRemoved =
+        [ "OutputPath"; "OutDir"; "BaseOutputPath"; "RuntimeIdentifier"; "TargetFramework"; "SkipCompilerExecution"; "DesignTimeBuild" ]
+    for callEl in nestedCalls do
+        let removeAttr = callEl.Attribute(XName.Get "RemoveProperties")
+        Assert.NotNull(removeAttr)
+        let removedSet = splitSemicolon removeAttr.Value |> Set.ofArray
+        for prop in requiredRemoved do
+            Assert.Contains(prop, removedSet)
+        let propsAttr = callEl.Attribute(XName.Get "Properties")
+        Assert.NotNull(propsAttr)
+        let propsSet = splitSemicolon propsAttr.Value |> Set.ofArray
+        Assert.Contains("_SkipAlexBoundaryCheck=true", propsSet)
+    let taskDoc = XDocument.Load(taskProjectPath)
+    let taskImports =
+        taskDoc.Descendants()
+        |> Seq.filter (fun el -> el.Name.LocalName = "Import")
+        |> Seq.map (fun el -> match el.Attribute(XName.Get "Project") with null -> "" | a -> a.Value)
+        |> Seq.toList
+    Assert.DoesNotContain(taskImports, fun p -> p.Contains("Boundary.targets", StringComparison.OrdinalIgnoreCase))
+
+    // Behavioral control: hostile outer build properties must not redirect Alex.Boundary.Tasks output
+    // or prevent CheckAlexBoundary from loading the isolated task assembly.
+    withScratch (fun scratch ->
+        let isolatedDir = Path.Combine(scratch, "isolated")
+        let targetsCopy, _, _, expectedDll = copyBoundaryBuildTree isolatedDir
+        let outerOut = Path.Combine(scratch, "outer-out") + string Path.DirectorySeparatorChar
+        let outerBase = Path.Combine(scratch, "outer-obj") + string Path.DirectorySeparatorChar
+        let cleanHarness = writeScanHarness targetsCopy scratch cleanProbeSource
+        let passExit, passOutput =
+            runMsbuild scratch cleanHarness
+                [ "-target:CheckAlexBoundary"
+                  "-property:OutputPath=" + outerOut
+                  "-property:OutDir=" + outerOut
+                  "-property:BaseOutputPath=" + outerBase
+                  "-property:RuntimeIdentifier=linux-x64"
+                  "-property:TargetFramework=net10.0"
+                  "-property:DesignTimeBuild=true" ]
+        Assert.True((passExit = 0), sprintf "Expected isolated nested build to succeed under hostile outer properties, got exit %d:\n%s" passExit passOutput)
+        Assert.True(File.Exists(expectedDll), sprintf "Expected isolated task DLL at %s" expectedDll)
+        Assert.False(File.Exists(Path.Combine(outerOut, "Alex.Boundary.Tasks.dll")), "Nested task build leaked into outer OutputPath.")
+
+        // Fault-injection control: removing RemoveProperties allows hostile outer OutputPath/OutDir to hijack
+        // the nested task build away from _AlexBoundaryTaskAssembly so CheckAlexBoundary fails to load the task.
+        let unisolatedDir = Path.Combine(scratch, "unisolated")
+        let unisolatedTargets, _, _, unisolatedDll = copyBoundaryBuildTree unisolatedDir
+        let unisolatedText =
+            File.ReadAllText(unisolatedTargets)
+                .Replace("RemoveProperties=\"OutputPath;OutDir;BaseOutputPath;RuntimeIdentifier;TargetFramework;SkipCompilerExecution;DesignTimeBuild\"", "")
+        File.WriteAllText(unisolatedTargets, unisolatedText)
+        let faultOut = Path.Combine(scratch, "fault-out") + string Path.DirectorySeparatorChar
+        let faultHarness = writeScanHarness unisolatedTargets scratch cleanProbeSource
+        let faultExit, faultOutput =
+            runMsbuild scratch faultHarness
+                [ "-target:CheckAlexBoundary"
+                  "-property:OutputPath=" + faultOut
+                  "-property:OutDir=" + faultOut ]
+        Assert.True(faultExit <> 0, sprintf "Expected unisolated nested build with hostile OutputPath to fail loading task assembly, got exit 0:\n%s" faultOutput)
+        Assert.Contains("MSB4062", faultOutput)
+        Assert.Contains("Alex.Boundary.Tasks.dll", faultOutput)
+        Assert.False(File.Exists(unisolatedDll), "Unisolated build should not have emitted into the canonical task path.")
+        Assert.True(File.Exists(Path.Combine(faultOut, "Alex.Boundary.Tasks.dll")), "Expected unisolated nested build to redirect Alex.Boundary.Tasks.dll into hostile OutputPath."))
+
+[<Fact>]
+let ``VerifyAlexBoundaryTaskFreshness refuses stale boundary task DLLs under SkipCompilerExecution`` () =
+    withScratch (fun scratch ->
+        let copyDir = Path.Combine(scratch, "freshness")
+        let targetsCopy, csprojCopy, sourceCopy, dllCopy = copyBoundaryBuildTree copyDir
+        let cleanHarness = writeScanHarness targetsCopy scratch cleanProbeSource
+        // Build fresh task assembly.
+        let buildExit, buildOutput = runMsbuild scratch cleanHarness [ "-target:CheckAlexBoundary" ]
+        Assert.True((buildExit = 0), sprintf "Expected initial task build to succeed, got exit %d:\n%s" buildExit buildOutput)
+        Assert.True(File.Exists(dllCopy), "Expected built task assembly.")
+        let originalSourceTime = File.GetLastWriteTimeUtc(sourceCopy)
+        let originalCsprojTime = File.GetLastWriteTimeUtc(csprojCopy)
+        let dllTime = File.GetLastWriteTimeUtc(dllCopy)
+
+        // Positive control: fresh DLL passes under SkipCompilerExecution=true.
+        let freshExit, freshOutput =
+            runMsbuild scratch cleanHarness
+                [ "-target:CheckAlexBoundary"; "-property:SkipCompilerExecution=true" ]
+        Assert.True((freshExit = 0), sprintf "Expected fresh task DLL to pass under SkipCompilerExecution=true, got exit %d:\n%s" freshExit freshOutput)
+
+        // Exact-reason negative control 1: ValidateAlexBoundary.cs newer than DLL is refused.
+        File.SetLastWriteTimeUtc(sourceCopy, dllTime.AddSeconds(10.0))
+        let staleSourceExit, staleSourceOutput =
+            runMsbuild scratch cleanHarness
+                [ "-target:CheckAlexBoundary"; "-property:SkipCompilerExecution=true" ]
+        Assert.True(staleSourceExit <> 0, sprintf "Expected stale ValidateAlexBoundary.cs to fail, got exit 0:\n%s" staleSourceOutput)
+        Assert.Contains("is stale relative to", staleSourceOutput)
+        Assert.Contains("ValidateAlexBoundary.cs", staleSourceOutput)
+        File.SetLastWriteTimeUtc(sourceCopy, originalSourceTime)
+
+        // Exact-reason negative control 2: Alex.Boundary.Tasks.csproj newer than DLL is refused.
+        File.SetLastWriteTimeUtc(csprojCopy, dllTime.AddSeconds(10.0))
+        let staleCsprojExit, staleCsprojOutput =
+            runMsbuild scratch cleanHarness
+                [ "-target:CheckAlexBoundary"; "-property:SkipCompilerExecution=true" ]
+        Assert.True(staleCsprojExit <> 0, sprintf "Expected stale Alex.Boundary.Tasks.csproj to fail, got exit 0:\n%s" staleCsprojOutput)
+        Assert.Contains("is stale relative to", staleCsprojOutput)
+        Assert.Contains("Alex.Boundary.Tasks.csproj", staleCsprojOutput)
+
+        // Fault-injection control: disabling VerifyAlexBoundaryTaskFreshness allows the stale DLL to pass silently.
+        let disabledTargets = Path.Combine(copyDir, "Boundary.nofresh.targets")
+        let mutatedDoc = XDocument.Load(targetsCopy)
+        for t in mutatedDoc.Descendants() |> Seq.filter (fun el -> el.Name.LocalName = "Target" && attrValue "Name" el = "VerifyAlexBoundaryTaskFreshness") do
+            t.SetAttributeValue(XName.Get "Condition", "false")
+        mutatedDoc.Save(disabledTargets)
+        let faultHarness = writeScanHarness disabledTargets scratch cleanProbeSource
+        let faultExit, faultOutput =
+            runMsbuild scratch faultHarness
+                [ "-target:CheckAlexBoundary"; "-property:SkipCompilerExecution=true" ]
+        Assert.True((faultExit = 0), sprintf "Expected disabled freshness check to silently accept stale DLL, got exit %d:\n%s" faultExit faultOutput)
+        File.SetLastWriteTimeUtc(csprojCopy, originalCsprojTime))
+
+[<Fact>]
+let ``CoreCompile design-time hook enforces boundary and reverted-condition fault lets violations escape`` () =
+    // Real-project CoreCompile check on src/Alex/Alex.fsproj with DesignTimeBuild=true + SkipCompilerExecution=true.
+    let realExit, realOutput =
+        runMsbuild repoRoot alexProjectPath
+            [ "-target:CoreCompile"
+              "-property:DesignTimeBuild=true"
+              "-property:SkipCompilerExecution=true" ]
+    Assert.True((realExit = 0), sprintf "Expected real src/Alex/Alex.fsproj design-time CoreCompile to pass, got exit %d:\n%s" realExit realOutput)
+
+    withScratch (fun scratch ->
+        let _, _, _, realForeign, linkRepos, _, _ = setupSymlinkTopology scratch
+        let linkPsg = Path.Combine(linkRepos, "Fidelity.PSG", "src", "Fidelity.PSG", "Fidelity.PSG.fsproj")
+        let linkBareWire = Path.Combine(linkRepos, "BAREWire", "src", "BAREWire.fsproj")
+        let violatingHarness = writeScanHarness boundaryTargetsPath scratch violatingProbeSource
+
+        // Exact-reason negative control through -target:CoreCompile with both design-time properties set.
+        let negExit, negOutput =
+            runMsbuild scratch violatingHarness
+                [ "-target:CoreCompile"
+                  "-property:DesignTimeBuild=true"
+                  "-property:SkipCompilerExecution=true" ]
+        Assert.True(negExit <> 0, sprintf "Expected CoreCompile with DesignTimeBuild+SkipCompilerExecution to refuse violations, got exit 0:\n%s" negOutput)
+        Assert.Contains("error ALEX001: " + alex001Reason, negOutput)
+        Assert.Contains("error ALEX003: " + alex003Reason, negOutput)
+        Assert.Contains("error ALEX004: " + alex004Reason, negOutput)
+
+        let refHarness = writeHarness boundaryTargetsPath scratch
+        let refNegExit, refNegOutput =
+            runMsbuild scratch refHarness
+                [ "-target:CoreCompile"
+                  "-property:DesignTimeBuild=true"
+                  "-property:SkipCompilerExecution=true"
+                  "-property:TestPermittedPrimary=" + linkPsg
+                  "-property:TestPermittedLibrary=" + linkBareWire
+                  "-property:TestRef=" + realForeign ]
+        Assert.True(refNegExit <> 0, sprintf "Expected CoreCompile design-time check to refuse unpermitted ProjectReference, got exit 0:\n%s" refNegOutput)
+        Assert.Contains("error ALEX002:", refNegOutput)
+
+        // Fault-injection control: in the same self-contained build directory (with a real built
+        // Alex.Boundary.Tasks.dll beside the targets file), first confirm the unmutated targets file
+        // refuses the violation under CoreCompile + DesignTimeBuild=true + SkipCompilerExecution=true,
+        // then mutate ONLY CheckAlexBoundary's Condition to '$(SkipCompilerExecution)' != 'true'
+        // (removing Or Exists('$(_AlexBoundaryTaskAssembly)')) and prove the exact same violation escapes.
+        let fiDir = Path.Combine(scratch, "reverted-check")
+        let fiTargets, _, _, fiDll = copyBoundaryBuildTree fiDir
+        let fiCleanHarness = writeScanHarness fiTargets scratch cleanProbeSource
+        let fiBuildExit, fiBuildOutput = runMsbuild scratch fiCleanHarness [ "-target:CheckAlexBoundary" ]
+        Assert.True((fiBuildExit = 0), sprintf "Expected baseline build in reverted-check dir to succeed, got exit %d:\n%s" fiBuildExit fiBuildOutput)
+        Assert.True(File.Exists(fiDll), sprintf "Expected built task DLL beside targets at %s" fiDll)
+        let fiOriginalHarness = writeScanHarness fiTargets scratch violatingProbeSource
+        let fiBaselineExit, fiBaselineOutput =
+            runMsbuild scratch fiOriginalHarness
+                [ "-target:CoreCompile"
+                  "-property:DesignTimeBuild=true"
+                  "-property:SkipCompilerExecution=true" ]
+        Assert.True(fiBaselineExit <> 0, sprintf "Expected unmutated targets in reverted-check dir to refuse violations, got exit 0:\n%s" fiBaselineOutput)
+        Assert.Contains("error ALEX001: " + alex001Reason, fiBaselineOutput)
+        Assert.Contains("error ALEX003: " + alex003Reason, fiBaselineOutput)
+        Assert.Contains("error ALEX004: " + alex004Reason, fiBaselineOutput)
+
+        let revertedTargets = Path.Combine(fiDir, "Boundary.reverted.targets")
+        let doc = XDocument.Load(fiTargets)
+        let checkTarget =
+            doc.Descendants()
+            |> Seq.filter (fun el -> el.Name.LocalName = "Target" && attrValue "Name" el = "CheckAlexBoundary")
+            |> Seq.exactlyOne
+        checkTarget.SetAttributeValue(XName.Get "Condition", "'$(SkipCompilerExecution)' != 'true'")
+        doc.Save(revertedTargets)
+        let revertedHarness = writeScanHarness revertedTargets scratch violatingProbeSource
+        let faultExit, faultOutput =
+            runMsbuild scratch revertedHarness
+                [ "-target:CoreCompile"
+                  "-property:DesignTimeBuild=true"
+                  "-property:SkipCompilerExecution=true" ]
+        Assert.True((faultExit = 0), sprintf "Expected reverted CheckAlexBoundary condition to let violation escape CoreCompile, got exit %d:\n%s" faultExit faultOutput)
+        for code in [ "ALEX001"; "ALEX002"; "ALEX003"; "ALEX004" ] do
+            Assert.DoesNotContain("error " + code, faultOutput))
+
+let private evaluateProperties (workingDir: string) (projectPath: string) (props: string list) (overrides: string list) =
+    let exitCode, output =
+        runMsbuild workingDir projectPath
+            (("-getProperty:" + String.concat "," props) :: overrides)
+    Assert.True((exitCode = 0), sprintf "Property evaluation failed for %s (exit %d):\n%s" projectPath exitCode output)
+    use doc = JsonDocument.Parse(output)
+    let propObj = doc.RootElement.GetProperty("Properties")
+    props
+    |> List.map (fun p -> p, propObj.GetProperty(p).GetString())
+    |> Map.ofList
+
+[<Fact>]
+let ``TreatAsLocalProperty hardens Alex.fsproj and Alex.Tests.fsproj against CLI property overrides`` () =
+    let hardenedProps =
+        [ "AlexBoundaryScope"
+          "AlexBoundaryAlsoPermitted"
+          "AlexBoundaryPermitted"
+          "PsgContractProject"
+          "PsgContractLibrary"
+          "_AlexBoundaryTaskProject"
+          "_AlexBoundaryTaskAssembly"
+          "_AlexBoundaryTaskSource"
+          "_SkipAlexBoundaryCheck"
+          "WarningsAsErrors" ]
+    let hostileOverrides =
+        [ "-property:AlexBoundaryScope=tests"
+          "-property:AlexBoundaryAlsoPermitted=/evil/Extra.fsproj"
+          "-property:AlexBoundaryPermitted=/evil/Only.fsproj"
+          "-property:PsgContractProject=/evil/Psg.fsproj"
+          "-property:PsgContractLibrary=/evil/Lib.fsproj"
+          "-property:_AlexBoundaryTaskProject=/evil/Task.csproj"
+          "-property:_AlexBoundaryTaskAssembly=/evil/Task.dll"
+          "-property:_AlexBoundaryTaskSource=/evil/Task.cs"
+          "-property:_SkipAlexBoundaryCheck=true"
+          "-property:WarningsAsErrors=" ]
+
+    // Positive + negative control on src/Alex/Alex.fsproj (evaluation-only -getProperty, no Restore).
+    let alexNormal = evaluateProperties repoRoot alexProjectPath hardenedProps []
+    let alexHostile = evaluateProperties repoRoot alexProjectPath hardenedProps hostileOverrides
+    Assert.Equal("library", alexHostile["AlexBoundaryScope"])
+    Assert.Equal("", alexHostile["AlexBoundaryAlsoPermitted"])
+    Assert.Equal("", alexHostile["_SkipAlexBoundaryCheck"])
+    Assert.Equal(alexNormal["PsgContractProject"], alexHostile["PsgContractProject"])
+    Assert.Equal(alexNormal["PsgContractLibrary"], alexHostile["PsgContractLibrary"])
+    Assert.Equal(alexNormal["AlexBoundaryPermitted"], alexHostile["AlexBoundaryPermitted"])
+    Assert.Equal(alexNormal["_AlexBoundaryTaskProject"], alexHostile["_AlexBoundaryTaskProject"])
+    Assert.Equal(alexNormal["_AlexBoundaryTaskAssembly"], alexHostile["_AlexBoundaryTaskAssembly"])
+    Assert.Equal(alexNormal["_AlexBoundaryTaskSource"], alexHostile["_AlexBoundaryTaskSource"])
+    let alexWarnings = splitSemicolon alexHostile["WarningsAsErrors"] |> Set.ofArray
+    Assert.Contains("FS0025", alexWarnings)
+    Assert.Contains("FS0026", alexWarnings)
+
+    // Positive + negative control on tests/Alex.Tests/Alex.Tests.fsproj (all 10 hardened properties).
+    let testsHostileOverrides =
+        "-property:AlexBoundaryScope=library" :: (hostileOverrides |> List.tail)
+    let testsNormal = evaluateProperties repoRoot alexTestsProjectPath hardenedProps []
+    let testsHostile = evaluateProperties repoRoot alexTestsProjectPath hardenedProps testsHostileOverrides
+    Assert.Equal("tests", testsHostile["AlexBoundaryScope"])
+    Assert.Equal(testsNormal["AlexBoundaryAlsoPermitted"], testsHostile["AlexBoundaryAlsoPermitted"])
+    Assert.Equal("", testsHostile["_SkipAlexBoundaryCheck"])
+    Assert.Equal(testsNormal["PsgContractProject"], testsHostile["PsgContractProject"])
+    Assert.Equal(testsNormal["PsgContractLibrary"], testsHostile["PsgContractLibrary"])
+    Assert.Equal(testsNormal["AlexBoundaryPermitted"], testsHostile["AlexBoundaryPermitted"])
+    Assert.Equal(testsNormal["_AlexBoundaryTaskProject"], testsHostile["_AlexBoundaryTaskProject"])
+    Assert.Equal(testsNormal["_AlexBoundaryTaskAssembly"], testsHostile["_AlexBoundaryTaskAssembly"])
+    Assert.Equal(testsNormal["_AlexBoundaryTaskSource"], testsHostile["_AlexBoundaryTaskSource"])
+
+    // Fault-injection control: stripping TreatAsLocalProperty from a scratch copy of Alex.fsproj
+    // (with the exact same Directory.Build.props beside it) proves CLI global overrides hijack those
+    // properties without TreatAsLocalProperty.
+    withScratch (fun scratch ->
+        File.Copy(Path.Combine(repoRoot, "Directory.Build.props"), Path.Combine(scratch, "Directory.Build.props"))
+        let doc = XDocument.Load(alexProjectPath)
+        doc.Root.SetAttributeValue(XName.Get "TreatAsLocalProperty", null)
+        // Rewrite relative Boundary.targets import to absolute path for scratch location.
+        for imp in doc.Descendants() |> Seq.filter (fun el -> el.Name.LocalName = "Import") do
+            if attrValue "Project" imp = "../../build/Boundary.targets" then
+                imp.SetAttributeValue(XName.Get "Project", boundaryTargetsPath)
+        let unhardenedProj = Path.Combine(scratch, "Alex.unhardened.fsproj")
+        doc.Save(unhardenedProj)
+        let hijacked = evaluateProperties scratch unhardenedProj hardenedProps hostileOverrides
+        Assert.Equal("tests", hijacked["AlexBoundaryScope"])
+        Assert.Equal("/evil/Extra.fsproj", hijacked["AlexBoundaryAlsoPermitted"])
+        Assert.Equal("true", hijacked["_SkipAlexBoundaryCheck"])
+        Assert.Equal("/evil/Psg.fsproj", hijacked["PsgContractProject"])
+        Assert.Equal("/evil/Task.dll", hijacked["_AlexBoundaryTaskAssembly"])
+        Assert.Equal("", hijacked["WarningsAsErrors"]))

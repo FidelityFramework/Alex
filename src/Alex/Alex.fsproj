@@ -1,4 +1,10 @@
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk"
+         TreatAsLocalProperty="AlexBoundaryScope;AlexBoundaryAlsoPermitted;AlexBoundaryPermitted;PsgContractProject;PsgContractLibrary;_AlexBoundaryTaskProject;_AlexBoundaryTaskAssembly;_AlexBoundaryTaskSource;_SkipAlexBoundaryCheck;WarningsAsErrors">
+  <PropertyGroup>
+    <AlexBoundaryScope>library</AlexBoundaryScope>
+    <AlexBoundaryAlsoPermitted></AlexBoundaryAlsoPermitted>
+    <_SkipAlexBoundaryCheck></_SkipAlexBoundaryCheck>
+  </PropertyGroup>
   <Import Project="../../build/Boundary.targets" />
 
   <!-- Alex: the passive witness. It reads one published PSG revision (Fidelity.PSG)

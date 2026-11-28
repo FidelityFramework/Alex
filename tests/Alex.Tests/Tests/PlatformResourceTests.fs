@@ -984,7 +984,7 @@ module Schema53BoundaryWitnessing =
 
         // Direct borrowed ResourceHandle argument (call.Resource.IsNone) returning i32 emits a deferred
         // BoundaryBufferCall paired with the published ResourceImport (Farscape #220, borrowed-handle
-        // descriptor surface). Both are portable middle-end ops; realization is the backend's business.
+        // descriptor surface). Both are portable middle-end ops; target lowering is performed by the selected backend leg.
         let plainBorrowedCall = { callRow with Result = Some(BoundaryScalar.Integer(32, true)) }
         let plainBorrowedImport = { importRow with Symbol = "fixture_column_bytes"; Result = Some(BoundaryScalar.Integer(32, true)) }
         let plainBorrowedGraph =
@@ -1057,11 +1057,13 @@ module Schema53BoundaryWitnessing =
         | Result.Ok(([ MLIROp.FuncOp(FuncOp.FuncCall([ { Type = TInt(IntWidth 32) } ], "fixture_column_bytes", [ { Type = TInt(IntWidth 64) } ])) ] as ops, TRValue _), _) ->
             // The FuncCall route is only admissible together with the import identity it names.
             match Alex.Patterns.PlatformPatterns.boundaryImportsAt declBinding scalarGraph.Emission.Boundary with
-            | Result.Ok([ MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(imp, _, _)) ] as decls) ->
+            | Result.Ok([ MLIROp.FuncOp(FuncOp.BoundaryFuncDecl(imp, _, _)) ]) ->
                 Assert.Equal(descId, imp.Identity)
                 Assert.Equal("fixture_column_bytes", imp.Symbol)
-                Assert.Equal(1, decls.Length)
-                Assert.True((Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops |> Result.isOk), "Expected the admitted FuncCall to serialize.")
+                match Alex.Dialects.Core.Serialize.moduleText (Ok 64) None ops with
+                | Result.Ok (Available text) ->
+                    Assert.Contains("func.call @fixture_column_bytes", text)
+                | other -> failwithf "Expected portable Available MLIR text for plain scalar FuncCall, got: %A" other
             | other -> failwithf "Unexpected published imports beside the plain scalar FuncCall: %A" other
         | other -> failwithf "Unexpected plain scalar fault-injection result: %A" other
 

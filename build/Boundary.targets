@@ -11,12 +11,17 @@
     ALEX004  A library emission spells an LLVM dialect type or operation. Target
              realization belongs to the selected backend, never the middle end.
 
-    The source scans run whenever the boundary task assembly is present. Skipping the
-    compile (SkipCompilerExecution='true') stops the task from being built, it does not
-    stop the boundary from being checked.
+    The boundary checks (ALEX001, ALEX002, ALEX003 and ALEX004) run whenever compilation
+    executes or the boundary task assembly already exists. Skipping compilation
+    (SkipCompilerExecution='true') stops the task project from being rebuilt: if the task
+    assembly exists, its freshness against ValidateAlexBoundary.cs and
+    Alex.Boundary.Tasks.csproj is verified before CheckAlexBoundary runs (a stale assembly
+    is refused); if the task assembly is absent, the check is skipped and a high-importance
+    message records that skip.
   -->
   <PropertyGroup>
     <_AlexBoundaryTaskProject>$(MSBuildThisFileDirectory)Alex.Boundary.Tasks/Alex.Boundary.Tasks.csproj</_AlexBoundaryTaskProject>
+    <_AlexBoundaryTaskSource>$(MSBuildThisFileDirectory)Alex.Boundary.Tasks/ValidateAlexBoundary.cs</_AlexBoundaryTaskSource>
     <_AlexBoundaryTaskAssembly>$(MSBuildThisFileDirectory)Alex.Boundary.Tasks/bin/Debug/net10.0/Alex.Boundary.Tasks.dll</_AlexBoundaryTaskAssembly>
     <AlexBoundaryScope Condition="'$(AlexBoundaryScope)' == ''">library</AlexBoundaryScope>
     <AlexBoundaryPermitted>$(PsgContractProject);$(PsgContractLibrary);$(AlexBoundaryAlsoPermitted)</AlexBoundaryPermitted>
@@ -26,18 +31,40 @@
              TaskFactory="TaskHostFactory" />
   <Target Name="BuildAlexBoundaryTask"
           BeforeTargets="CheckAlexBoundary"
-          Condition="'$(SkipCompilerExecution)' != 'true'">
+          Condition="'$(SkipCompilerExecution)' != 'true' And '$(_SkipAlexBoundaryCheck)' != 'true'">
     <MSBuild Projects="$(_AlexBoundaryTaskProject)"
              Targets="Restore"
-             Properties="Configuration=Debug;Platform=AnyCPU"
+             RemoveProperties="OutputPath;OutDir;BaseOutputPath;RuntimeIdentifier;TargetFramework;SkipCompilerExecution;DesignTimeBuild"
+             Properties="Configuration=Debug;Platform=AnyCPU;_SkipAlexBoundaryCheck=true"
              Condition="!Exists('$(MSBuildThisFileDirectory)Alex.Boundary.Tasks/obj/project.assets.json')" />
     <MSBuild Projects="$(_AlexBoundaryTaskProject)"
              Targets="Build"
-             Properties="Configuration=Debug;Platform=AnyCPU;BuildProjectReferences=false" />
+             RemoveProperties="OutputPath;OutDir;BaseOutputPath;RuntimeIdentifier;TargetFramework;SkipCompilerExecution;DesignTimeBuild"
+             Properties="Configuration=Debug;Platform=AnyCPU;BuildProjectReferences=false;_SkipAlexBoundaryCheck=true" />
+  </Target>
+  <Target Name="VerifyAlexBoundaryTaskInputsPresent"
+          BeforeTargets="CheckAlexBoundary"
+          Condition="'$(SkipCompilerExecution)' == 'true' And Exists('$(_AlexBoundaryTaskAssembly)') And '$(_SkipAlexBoundaryCheck)' != 'true'">
+    <Error Condition="!Exists('$(_AlexBoundaryTaskSource)') Or !Exists('$(_AlexBoundaryTaskProject)')"
+           Text="Boundary task source or project is missing while running with SkipCompilerExecution=true: '$(_AlexBoundaryTaskSource)' / '$(_AlexBoundaryTaskProject)'." />
+  </Target>
+  <Target Name="VerifyAlexBoundaryTaskFreshness"
+          BeforeTargets="CheckAlexBoundary"
+          DependsOnTargets="VerifyAlexBoundaryTaskInputsPresent"
+          Inputs="$(_AlexBoundaryTaskSource);$(_AlexBoundaryTaskProject)"
+          Outputs="$(_AlexBoundaryTaskAssembly)"
+          Condition="'$(SkipCompilerExecution)' == 'true' And Exists('$(_AlexBoundaryTaskAssembly)') And '$(_SkipAlexBoundaryCheck)' != 'true'">
+    <Error Text="Boundary task assembly '$(_AlexBoundaryTaskAssembly)' is stale relative to '$(_AlexBoundaryTaskSource)' or '$(_AlexBoundaryTaskProject)'. Rebuild the boundary task before running with SkipCompilerExecution=true." />
+  </Target>
+  <Target Name="ReportAlexBoundarySkipped"
+          BeforeTargets="CoreCompile;CheckAlexBoundary"
+          Condition="'$(SkipCompilerExecution)' == 'true' And !Exists('$(_AlexBoundaryTaskAssembly)') And '$(_SkipAlexBoundaryCheck)' != 'true'">
+    <Message Importance="High"
+             Text="Alex boundary check (ALEX001-ALEX004) skipped: SkipCompilerExecution=true and boundary task assembly '$(_AlexBoundaryTaskAssembly)' does not exist." />
   </Target>
   <Target Name="CheckAlexBoundary"
           BeforeTargets="CoreCompile"
-          Condition="'$(SkipCompilerExecution)' != 'true' Or Exists('$(_AlexBoundaryTaskAssembly)')">
+          Condition="('$(SkipCompilerExecution)' != 'true' Or Exists('$(_AlexBoundaryTaskAssembly)')) And '$(_SkipAlexBoundaryCheck)' != 'true'">
     <ValidateAlexBoundary Sources="@(Compile)"
                           ProjectReferences="@(ProjectReference)"
                           Permitted="$(AlexBoundaryPermitted)"
